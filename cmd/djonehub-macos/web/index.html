@@ -52,6 +52,7 @@
 
     <nav class="task-nav" aria-label="功能导航">
       <button class="tab active" data-view="sms"><span>短信</span><small>收件箱</small></button>
+      <button class="tab" data-view="calls"><span>来电</span><small>通话记录</small></button>
       <button class="tab" data-view="esim"><span>eSIM/卡片</span><small>Profile</small></button>
       <button class="tab" data-view="network"><span>网络</span><small>4G USB</small></button>
       <button class="tab" data-view="at"><span>AT 调试</span><small>诊断</small></button>
@@ -64,29 +65,34 @@
         <input id="message" type="text" placeholder="短信内容" maxlength="1000" required>
         <button type="submit">发送</button>
       </form>
-      <details id="bark-settings-panel" class="fold-panel notification-panel">
-        <summary><span>Bark 通知转发</span><small id="bark-summary">未配置</small></summary>
-        <form id="bark-settings-form" class="bark-settings-grid">
+      <details id="sms-bark-settings-panel" class="fold-panel notification-panel">
+        <summary><span>短信 Bark 通知</span><small id="sms-bark-summary">未配置</small></summary>
+        <form id="sms-bark-settings-form" class="bark-settings-grid">
           <label class="checkbox-field">
-            <input id="bark-enabled" type="checkbox">
+            <input id="sms-bark-enabled" type="checkbox">
             <span><strong>收到新短信时自动转发</strong><small>仅转发新收到的短信，不转发从本机发出的短信。</small></span>
           </label>
           <label class="settings-field settings-field-wide">
-            <span>Bark API 链接</span>
-            <input id="bark-api-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.day.app/你的Key/{message}?group=短信通知">
-            <small>链接中必须保留 <code>{message}</code>；短信内容会经过 URL 编码后替换该占位符。</small>
+            <span>短信 Bark API 链接</span>
+            <input id="sms-bark-api-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.day.app/短信Key/{message}?group=短信通知">
+            <small>链接中必须保留一个 <code>{message}</code>，与来电 Bark API 相互独立。</small>
           </label>
           <label class="settings-field">
             <span>自定义别名</span>
-            <input id="bark-alias" type="text" maxlength="80" autocomplete="off" placeholder="例如：备用卡">
-            <small>通知内容格式：<code>[自定义别名]短信内容</code>。</small>
+            <input id="sms-bark-alias" type="text" maxlength="80" autocomplete="off" placeholder="例如：备用卡">
+            <small>在消息模板中使用 <code>{alias}</code> 或 <code>{alias_prefix}</code>。</small>
+          </label>
+          <label class="settings-field settings-field-wide">
+            <span>短信消息模板</span>
+            <textarea id="sms-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}来自 {sender}：{content}"></textarea>
+            <small>可用变量：<code>{sender}</code>、<code>{content}</code>、<code>{code}</code>、<code>{timestamp}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
           </label>
           <div class="settings-actions">
-            <button id="test-bark" class="secondary" type="button">发送测试通知</button>
+            <button id="test-sms-bark" class="secondary" type="button">发送测试通知</button>
             <button type="submit">保存配置</button>
           </div>
         </form>
-        <p id="bark-status" class="inline-status">正在读取 Bark 配置...</p>
+        <p id="sms-bark-status" class="inline-status">正在读取短信 Bark 配置...</p>
       </details>
       <div class="section-heading">
         <h2>收件箱</h2>
@@ -97,6 +103,53 @@
       </div>
       <p id="sms-status" class="inline-status">尚未读取短信</p>
       <div id="sms-list" class="list empty">暂无短信</div>
+    </section>
+
+    <section id="calls" class="view">
+      <div class="view-intro"><div><span class="section-kicker">CALL MONITOR</span><h2>来电监控</h2></div><p>后台持续监听模块语音通话，并记录最近 100 条通话。</p></div>
+      <div class="call-monitor-heading">
+        <p id="call-monitor-status" class="inline-status">尚未读取来电状态</p>
+        <button id="refresh-calls" class="secondary" type="button">刷新</button>
+      </div>
+      <div id="active-call" class="active-call-card" hidden>
+        <span id="active-call-label">正在来电</span>
+        <strong id="active-call-number">未知号码</strong>
+        <small id="active-call-time"></small>
+      </div>
+      <details id="call-bark-settings-panel" class="fold-panel notification-panel">
+        <summary><span>未接来电 Bark 通知</span><small id="call-bark-summary">未配置</small></summary>
+        <form id="call-bark-settings-form" class="bark-settings-grid">
+          <label class="checkbox-field">
+            <input id="call-bark-enabled" type="checkbox">
+            <span><strong>未接来电结束后自动转发</strong><small>已接听和外呼不会触发；每个未接来电只推送一次。</small></span>
+          </label>
+          <label class="settings-field settings-field-wide">
+            <span>来电 Bark API 链接</span>
+            <input id="call-bark-api-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.day.app/来电Key/{message}?group=未接来电">
+            <small>链接中必须保留一个 <code>{message}</code>，与短信 Bark API 相互独立。</small>
+          </label>
+          <label class="settings-field">
+            <span>自定义别名</span>
+            <input id="call-bark-alias" type="text" maxlength="80" autocomplete="off" placeholder="例如：电话卡">
+            <small>在消息模板中使用 <code>{alias}</code> 或 <code>{alias_prefix}</code>。</small>
+          </label>
+          <label class="settings-field settings-field-wide">
+            <span>未接来电消息模板</span>
+            <textarea id="call-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}未接来电：{number}&#10;时间：{started_at}"></textarea>
+            <small>可用变量：<code>{number}</code>、<code>{started_at}</code>、<code>{ended_at}</code>、<code>{duration}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
+          </label>
+          <div class="settings-actions">
+            <button id="test-call-bark" class="secondary" type="button">发送测试通知</button>
+            <button type="submit">保存配置</button>
+          </div>
+        </form>
+        <p id="call-bark-status" class="inline-status">正在读取来电 Bark 配置...</p>
+      </details>
+      <div class="section-heading">
+        <h2>最近通话记录</h2>
+        <small id="call-history-count">0 条</small>
+      </div>
+      <div id="call-history" class="list empty">暂无记录</div>
     </section>
 
     <section id="esim" class="view">

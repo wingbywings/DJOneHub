@@ -11,76 +11,232 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
-const barkMessagePlaceholder = "{message}"
+const (
+	barkConfigVersion             = 2
+	barkMessagePlaceholder        = "{message}"
+	defaultSMSBarkTemplate        = "{alias_prefix}{content}"
+	defaultMissedCallBarkTemplate = "{alias_prefix}未接来电：{number}\n时间：{started_at}"
+)
+
+type barkChannelSettings struct {
+	Enabled         bool   `json:"enabled"`
+	APIURL          string `json:"api_url"`
+	Alias           string `json:"alias"`
+	MessageTemplate string `json:"message_template"`
+}
 
 type barkSettings struct {
+	Version    int                 `json:"version"`
+	SMS        barkChannelSettings `json:"sms"`
+	MissedCall barkChannelSettings `json:"missed_call"`
+}
+
+type barkSettingsDocument struct {
+	Version    int                  `json:"version"`
+	SMS        *barkChannelSettings `json:"sms"`
+	MissedCall *barkChannelSettings `json:"missed_call"`
+
+	// Version 1 used a single flat channel. It migrates to SMS only.
 	Enabled bool   `json:"enabled"`
 	APIURL  string `json:"api_url"`
 	Alias   string `json:"alias"`
 }
 
-func normalizeBarkSettings(settings barkSettings) barkSettings {
+type barkChannelKind string
+
+const (
+	barkChannelSMS        barkChannelKind = "sms"
+	barkChannelMissedCall barkChannelKind = "missed_call"
+)
+
+var barkTemplateVariablePattern = regexp.MustCompile(`\{[a-z_]+\}`)
+
+func normalizeBarkChannelSettings(settings barkChannelSettings, defaultTemplate string) barkChannelSettings {
 	settings.APIURL = strings.TrimSpace(settings.APIURL)
 	settings.Alias = strings.TrimSpace(settings.Alias)
+	settings.MessageTemplate = strings.TrimSpace(settings.MessageTemplate)
+	if settings.MessageTemplate == "" {
+		settings.MessageTemplate = defaultTemplate
+	}
 	return settings
 }
 
-func validateBarkSettings(settings barkSettings) error {
-	settings = normalizeBarkSettings(settings)
-	if settings.APIURL == "" {
-		if settings.Enabled {
-			return errors.New("启用 Bark 通知前请填写 API 链接")
+func normalizeBarkSettings(settings barkSettings) barkSettings {
+	settings.Version = barkConfigVersion
+	settings.SMS = normalizeBarkChannelSettings(settings.SMS, defaultSMSBarkTemplate)
+	settings.MissedCall = normalizeBarkChannelSettings(settings.MissedCall, defaultMissedCallBarkTemplate)
+	return settings
+}
+
+func barkChannelLabel(kind barkChannelKind) string {
+	if kind == barkChannelMissedCall {
+		return "未接来电"
+	}
+	return "短信"
+}
+
+func barkChannelDefaultTemplate(kind barkChannelKind) string {
+	if kind == barkChannelMissedCall {
+		return defaultMissedCallBarkTemplate
+	}
+	return defaultSMSBarkTemplate
+}
+
+func barkChannelAllowedVariables(kind barkChannelKind) map[string]bool {
+	common := map[string]bool{
+		"{alias}":        true,
+		"{alias_prefix}": true,
+	}
+	if kind == barkChannelMissedCall {
+		common["{number}"] = true
+		common["{started_at}"] = true
+		common["{ended_at}"] = true
+		common["{duration}"] = true
+		return common
+	}
+	common["{sender}"] = true
+	common["{content}"] = true
+	common["{code}"] = true
+	common["{timestamp}"] = true
+	return common
+}
+
+func validateBarkURL(raw string, enabled bool, label string) error {
+	if raw == "" {
+		if enabled {
+			return fmt.Errorf("启用%s Bark 通知前请填写 API 链接", label)
 		}
 		return nil
 	}
-	if strings.Count(settings.APIURL, barkMessagePlaceholder) != 1 {
-		return fmt.Errorf("Bark API 链接必须包含一个 %s 占位符", barkMessagePlaceholder)
+	if strings.Count(raw, barkMessagePlaceholder) != 1 {
+		return fmt.Errorf("%s Bark API 链接必须包含一个 %s 占位符", label, barkMessagePlaceholder)
 	}
-	if len(settings.APIURL) > 2048 {
-		return errors.New("Bark API 链接过长")
+	if len(raw) > 2048 {
+		return fmt.Errorf("%s Bark API 链接过长", label)
 	}
-	if utf8.RuneCountInString(settings.Alias) > 80 {
-		return errors.New("Bark 自定义别名不能超过 80 个字符")
-	}
-	placeholderAt := strings.Index(settings.APIURL, barkMessagePlaceholder)
-	if separatorAt := strings.IndexAny(settings.APIURL, "?#"); separatorAt >= 0 && placeholderAt > separatorAt {
+	placeholderAt := strings.Index(raw, barkMessagePlaceholder)
+	if separatorAt := strings.IndexAny(raw, "?#"); separatorAt >= 0 && placeholderAt > separatorAt {
 		return fmt.Errorf("%s 占位符必须位于 Bark API 的路径中", barkMessagePlaceholder)
 	}
-
-	parsed, err := url.Parse(strings.Replace(settings.APIURL, barkMessagePlaceholder, "test", 1))
+	parsed, err := url.Parse(strings.Replace(raw, barkMessagePlaceholder, "test", 1))
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("Bark API 链接必须是有效的 HTTP 或 HTTPS 地址")
+		return fmt.Errorf("%s Bark API 链接必须是有效的 HTTP 或 HTTPS 地址", label)
 	}
 	return nil
 }
 
-func formatBarkMessage(alias, content string) string {
+func validateBarkChannelSettings(kind barkChannelKind, settings barkChannelSettings) error {
+	settings = normalizeBarkChannelSettings(settings, barkChannelDefaultTemplate(kind))
+	label := barkChannelLabel(kind)
+	if err := validateBarkURL(settings.APIURL, settings.Enabled, label); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(settings.Alias) > 80 {
+		return fmt.Errorf("%s Bark 自定义别名不能超过 80 个字符", label)
+	}
+	if utf8.RuneCountInString(settings.MessageTemplate) > 4000 {
+		return fmt.Errorf("%s Bark 消息模板不能超过 4000 个字符", label)
+	}
+	allowed := barkChannelAllowedVariables(kind)
+	for _, variable := range barkTemplateVariablePattern.FindAllString(settings.MessageTemplate, -1) {
+		if !allowed[variable] {
+			return fmt.Errorf("%s Bark 消息模板包含不支持的变量 %s", label, variable)
+		}
+	}
+	return nil
+}
+
+func validateBarkSettings(settings barkSettings) error {
+	settings = normalizeBarkSettings(settings)
+	if err := validateBarkChannelSettings(barkChannelSMS, settings.SMS); err != nil {
+		return err
+	}
+	return validateBarkChannelSettings(barkChannelMissedCall, settings.MissedCall)
+}
+
+func formatBarkAliasPrefix(alias string) string {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
-		return content
+		return ""
 	}
 	if (strings.HasPrefix(alias, "[") && strings.HasSuffix(alias, "]")) ||
 		(strings.HasPrefix(alias, "【") && strings.HasSuffix(alias, "】")) {
-		return alias + content
+		return alias
 	}
-	return "[" + alias + "]" + content
+	return "[" + alias + "]"
 }
 
-func buildBarkURL(settings barkSettings, content string) (string, error) {
-	settings = normalizeBarkSettings(settings)
-	if err := validateBarkSettings(settings); err != nil {
+func renderBarkTemplate(template string, values map[string]string) string {
+	replacements := make([]string, 0, len(values)*2)
+	for key, value := range values {
+		replacements = append(replacements, "{"+key+"}", value)
+	}
+	return strings.NewReplacer(replacements...).Replace(template)
+}
+
+func renderSMSBarkMessage(settings barkChannelSettings, message receivedSMS) string {
+	return renderBarkTemplate(settings.MessageTemplate, map[string]string{
+		"alias":        settings.Alias,
+		"alias_prefix": formatBarkAliasPrefix(settings.Alias),
+		"sender":       message.Sender,
+		"content":      message.Content,
+		"code":         message.Code,
+		"timestamp":    message.Timestamp.Local().Format("2006-01-02 15:04:05"),
+	})
+}
+
+func renderMissedCallBarkMessage(settings barkChannelSettings, call callRecord) string {
+	endedAt := ""
+	duration := ""
+	if call.EndedAt != nil {
+		endedAt = call.EndedAt.Local().Format("2006-01-02 15:04:05")
+		duration = formatCallDuration(call.EndedAt.Sub(call.StartedAt))
+	}
+	number := strings.TrimSpace(call.Number)
+	if number == "" {
+		number = "未知号码"
+	}
+	return renderBarkTemplate(settings.MessageTemplate, map[string]string{
+		"alias":        settings.Alias,
+		"alias_prefix": formatBarkAliasPrefix(settings.Alias),
+		"number":       number,
+		"started_at":   call.StartedAt.Local().Format("2006-01-02 15:04:05"),
+		"ended_at":     endedAt,
+		"duration":     duration,
+	})
+}
+
+func formatCallDuration(duration time.Duration) string {
+	if duration < 0 {
+		duration = 0
+	}
+	seconds := int(duration.Round(time.Second).Seconds())
+	hours := seconds / 3600
+	minutes := seconds % 3600 / 60
+	seconds %= 60
+	if hours > 0 {
+		return fmt.Sprintf("%d小时%d分%d秒", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%d分%d秒", minutes, seconds)
+	}
+	return fmt.Sprintf("%d秒", seconds)
+}
+
+func buildBarkURL(settings barkChannelSettings, content string) (string, error) {
+	if err := validateBarkURL(strings.TrimSpace(settings.APIURL), settings.Enabled, "通知"); err != nil {
 		return "", err
 	}
-	message := formatBarkMessage(settings.Alias, content)
-	return strings.Replace(settings.APIURL, barkMessagePlaceholder, url.PathEscape(message), 1), nil
+	return strings.Replace(settings.APIURL, barkMessagePlaceholder, url.PathEscape(content), 1), nil
 }
 
-func sendBarkNotification(ctx context.Context, client *http.Client, settings barkSettings, content string) error {
+func sendBarkNotification(ctx context.Context, client *http.Client, settings barkChannelSettings, content string) error {
 	target, err := buildBarkURL(settings, content)
 	if err != nil {
 		return err
@@ -128,8 +284,24 @@ func (a *app) loadBarkSettingsLocked() error {
 		return fmt.Errorf("读取 Bark 配置失败: %w", err)
 	}
 	if len(data) > 0 {
-		if err := json.Unmarshal(data, &settings); err != nil {
+		var document barkSettingsDocument
+		if err := json.Unmarshal(data, &document); err != nil {
 			return fmt.Errorf("解析 Bark 配置失败: %w", err)
+		}
+		if document.Version >= barkConfigVersion || document.SMS != nil || document.MissedCall != nil {
+			settings.Version = barkConfigVersion
+			if document.SMS != nil {
+				settings.SMS = *document.SMS
+			}
+			if document.MissedCall != nil {
+				settings.MissedCall = *document.MissedCall
+			}
+		} else {
+			settings.SMS = barkChannelSettings{
+				Enabled: document.Enabled,
+				APIURL:  document.APIURL,
+				Alias:   document.Alias,
+			}
 		}
 	}
 	settings = normalizeBarkSettings(settings)
@@ -192,75 +364,149 @@ func (a *app) forwardSMSBark(message receivedSMS) {
 		log.Printf("Bark SMS forwarding skipped: %v", err)
 		return
 	}
-	if !settings.Enabled {
+	channel := settings.SMS
+	if !channel.Enabled {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
-		defer cancel()
-		if err := sendBarkNotification(ctx, a.barkHTTPClient, settings, message.Content); err != nil {
-			log.Printf("Bark SMS forwarding failed: %v", err)
-			return
-		}
-		log.Printf("SMS forwarded to Bark successfully")
-	}()
+	content := renderSMSBarkMessage(channel, message)
+	go a.sendBarkAsync(channel, content, "SMS")
 }
 
-func (a *app) getBarkSettings(w http.ResponseWriter, _ *http.Request) {
+func (a *app) forwardMissedCallBark(call callRecord) {
+	if !call.Missed {
+		return
+	}
+	settings, err := a.currentBarkSettings()
+	if err != nil {
+		log.Printf("Bark missed-call forwarding skipped: %v", err)
+		return
+	}
+	channel := settings.MissedCall
+	if !channel.Enabled {
+		return
+	}
+	content := renderMissedCallBarkMessage(channel, call)
+	go a.sendBarkAsync(channel, content, "missed call")
+}
+
+func (a *app) sendBarkAsync(settings barkChannelSettings, content, label string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	if err := sendBarkNotification(ctx, a.barkHTTPClient, settings, content); err != nil {
+		log.Printf("Bark %s forwarding failed: %v", label, err)
+		return
+	}
+	log.Printf("%s forwarded to Bark successfully", label)
+}
+
+func selectBarkChannel(settings barkSettings, kind barkChannelKind) barkChannelSettings {
+	if kind == barkChannelMissedCall {
+		return settings.MissedCall
+	}
+	return settings.SMS
+}
+
+func setBarkChannel(settings *barkSettings, kind barkChannelKind, channel barkChannelSettings) {
+	if kind == barkChannelMissedCall {
+		settings.MissedCall = channel
+		return
+	}
+	settings.SMS = channel
+}
+
+func (a *app) getBarkChannelSettings(w http.ResponseWriter, kind barkChannelKind) {
 	w.Header().Set("Cache-Control", "no-store")
 	settings, err := a.currentBarkSettings()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	writeJSON(w, http.StatusOK, selectBarkChannel(settings, kind))
 }
 
-func (a *app) saveBarkSettings(w http.ResponseWriter, r *http.Request) {
+func (a *app) saveBarkChannelSettings(w http.ResponseWriter, r *http.Request, kind barkChannelKind) {
 	w.Header().Set("Cache-Control", "no-store")
-	var settings barkSettings
-	if !decodeJSON(w, r, &settings) {
+	var channel barkChannelSettings
+	if !decodeJSON(w, r, &channel) {
 		return
 	}
-	settings = normalizeBarkSettings(settings)
-	if err := validateBarkSettings(settings); err != nil {
+	channel = normalizeBarkChannelSettings(channel, barkChannelDefaultTemplate(kind))
+	if err := validateBarkChannelSettings(kind, channel); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	a.barkMu.Lock()
 	defer a.barkMu.Unlock()
-	if err := a.ensureBarkSettingsPathLocked(); err != nil {
+	if err := a.loadBarkSettingsLocked(); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	previous := a.barkSettings
-	a.barkSettings = settings
+	setBarkChannel(&a.barkSettings, kind, channel)
+	a.barkSettings.Version = barkConfigVersion
 	if err := a.persistBarkSettingsLocked(); err != nil {
 		a.barkSettings = previous
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	a.barkSettingsLoaded = true
-	writeJSON(w, http.StatusOK, map[string]any{"message": "Bark 通知配置已保存", "settings": settings})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":  barkChannelLabel(kind) + " Bark 通知配置已保存",
+		"settings": channel,
+	})
 }
 
-func (a *app) testBarkSettings(w http.ResponseWriter, _ *http.Request) {
+func (a *app) testBarkChannelSettings(w http.ResponseWriter, kind barkChannelKind) {
 	w.Header().Set("Cache-Control", "no-store")
 	settings, err := a.currentBarkSettings()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if settings.APIURL == "" {
-		writeError(w, http.StatusBadRequest, "请先保存 Bark API 链接")
+	channel := selectBarkChannel(settings, kind)
+	if channel.APIURL == "" {
+		writeError(w, http.StatusBadRequest, "请先保存 "+barkChannelLabel(kind)+" Bark API 链接")
 		return
+	}
+	now := time.Now()
+	content := renderSMSBarkMessage(channel, receivedSMS{
+		Sender: "10086", Content: "DJOneHub Bark 短信通知测试", Code: "123456", Timestamp: now,
+	})
+	if kind == barkChannelMissedCall {
+		ended := now
+		content = renderMissedCallBarkMessage(channel, callRecord{
+			Number: "13800138000", StartedAt: now.Add(-8 * time.Second), EndedAt: &ended, Missed: true,
+		})
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
-	if err := sendBarkNotification(ctx, a.barkHTTPClient, settings, "DJOneHub Bark 通知测试"); err != nil {
+	if err := sendBarkNotification(ctx, a.barkHTTPClient, channel, content); err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "Bark 测试通知已发送"})
+	writeJSON(w, http.StatusOK, map[string]string{"message": barkChannelLabel(kind) + " Bark 测试通知已发送"})
+}
+
+func (a *app) getSMSBarkSettings(w http.ResponseWriter, _ *http.Request) {
+	a.getBarkChannelSettings(w, barkChannelSMS)
+}
+
+func (a *app) saveSMSBarkSettings(w http.ResponseWriter, r *http.Request) {
+	a.saveBarkChannelSettings(w, r, barkChannelSMS)
+}
+
+func (a *app) testSMSBarkSettings(w http.ResponseWriter, _ *http.Request) {
+	a.testBarkChannelSettings(w, barkChannelSMS)
+}
+
+func (a *app) getMissedCallBarkSettings(w http.ResponseWriter, _ *http.Request) {
+	a.getBarkChannelSettings(w, barkChannelMissedCall)
+}
+
+func (a *app) saveMissedCallBarkSettings(w http.ResponseWriter, r *http.Request) {
+	a.saveBarkChannelSettings(w, r, barkChannelMissedCall)
+}
+
+func (a *app) testMissedCallBarkSettings(w http.ResponseWriter, _ *http.Request) {
+	a.testBarkChannelSettings(w, barkChannelMissedCall)
 }

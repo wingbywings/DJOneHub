@@ -19,84 +19,72 @@ func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error)
 	return fn(request)
 }
 
-func TestFormatBarkMessage(t *testing.T) {
-	tests := []struct {
-		alias   string
-		content string
-		want    string
-	}{
-		{alias: "备用卡", content: "验证码 1234", want: "[备用卡]验证码 1234"},
-		{alias: "[主卡]", content: "余额不足", want: "[主卡]余额不足"},
-		{alias: "", content: "普通短信", want: "普通短信"},
+func TestValidateBarkChannelsIndependently(t *testing.T) {
+	if err := validateBarkChannelSettings(barkChannelSMS, barkChannelSettings{Enabled: true}); err == nil {
+		t.Fatal("enabled SMS Bark settings without an API URL should fail validation")
 	}
-	for _, test := range tests {
-		if got := formatBarkMessage(test.alias, test.content); got != test.want {
-			t.Fatalf("formatBarkMessage(%q, %q) = %q, want %q", test.alias, test.content, got, test.want)
-		}
+	if err := validateBarkChannelSettings(barkChannelMissedCall, barkChannelSettings{
+		Enabled: true, APIURL: "https://api.day.app/key/{message}", MessageTemplate: "{content}",
+	}); err == nil {
+		t.Fatal("missed-call template using an SMS variable should fail validation")
+	}
+	if err := validateBarkChannelSettings(barkChannelMissedCall, barkChannelSettings{
+		Enabled: true, APIURL: "https://api.day.app/key/{message}", MessageTemplate: "未接来电 {number}",
+	}); err != nil {
+		t.Fatalf("valid missed-call settings failed validation: %v", err)
+	}
+	if err := validateBarkChannelSettings(barkChannelSMS, barkChannelSettings{}); err != nil {
+		t.Fatalf("empty disabled SMS settings failed validation: %v", err)
 	}
 }
 
-func TestValidateBarkSettings(t *testing.T) {
-	if err := validateBarkSettings(barkSettings{Enabled: true}); err == nil {
-		t.Fatal("enabled Bark settings without an API URL should fail validation")
+func TestRenderBarkTemplatesUseChannelSpecificVariables(t *testing.T) {
+	sms := barkChannelSettings{Alias: "短信卡", MessageTemplate: "{alias_prefix}{sender}|{content}|{code}|{timestamp}"}
+	smsMessage := renderSMSBarkMessage(sms, receivedSMS{
+		Sender: "10086", Content: "验证码 4321", Code: "4321",
+		Timestamp: time.Date(2026, 8, 10, 12, 30, 0, 0, time.Local),
+	})
+	if smsMessage != "[短信卡]10086|验证码 4321|4321|2026-08-10 12:30:00" {
+		t.Fatalf("renderSMSBarkMessage() = %q", smsMessage)
 	}
-	if err := validateBarkSettings(barkSettings{Enabled: true, APIURL: "https://api.day.app/key/no-placeholder"}); err == nil {
-		t.Fatal("Bark API URL without {message} should fail validation")
-	}
-	if err := validateBarkSettings(barkSettings{Enabled: true, APIURL: "https://api.day.app/key/{message}?group=短信通知"}); err != nil {
-		t.Fatalf("valid Bark settings failed validation: %v", err)
-	}
-	if err := validateBarkSettings(barkSettings{}); err != nil {
-		t.Fatalf("empty disabled Bark settings failed validation: %v", err)
+
+	ended := time.Date(2026, 8, 10, 13, 0, 8, 0, time.Local)
+	call := barkChannelSettings{Alias: "电话卡", MessageTemplate: "{alias_prefix}{number}|{started_at}|{duration}"}
+	callMessage := renderMissedCallBarkMessage(call, callRecord{
+		Number: "13800138000", StartedAt: ended.Add(-8 * time.Second), EndedAt: &ended, Missed: true,
+	})
+	if callMessage != "[电话卡]13800138000|2026-08-10 13:00:00|8秒" {
+		t.Fatalf("renderMissedCallBarkMessage() = %q", callMessage)
 	}
 }
 
 func TestSendBarkNotificationEncodesMessageAndPreservesGroup(t *testing.T) {
-	received := make(chan struct{}, 1)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if r.Method != http.MethodGet {
-			t.Errorf("method = %s, want GET", r.Method)
-		}
-		if r.URL.Path != "/[备用卡]验证码 1234/5" {
+		if r.URL.Path != "/[短信卡]验证码 1234/5" {
 			t.Errorf("path = %q, want decoded Bark message", r.URL.Path)
 		}
 		if got := r.URL.Query().Get("group"); got != "短信通知" {
 			t.Errorf("group = %q, want 短信通知", got)
 		}
-		received <- struct{}{}
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"code":200,"message":"success"}`)),
-			Request:    r,
-		}, nil
+		return barkSuccessResponse(r), nil
 	})}
-
-	settings := barkSettings{
-		Enabled: true,
-		APIURL:  "https://example.invalid/{message}?group=短信通知",
-		Alias:   "备用卡",
+	settings := barkChannelSettings{
+		Enabled: true, APIURL: "https://example.invalid/{message}?group=短信通知",
 	}
-	if err := sendBarkNotification(context.Background(), client, settings, "验证码 1234/5"); err != nil {
+	if err := sendBarkNotification(context.Background(), client, settings, "[短信卡]验证码 1234/5"); err != nil {
 		t.Fatalf("sendBarkNotification() error = %v", err)
-	}
-	select {
-	case <-received:
-	case <-time.After(time.Second):
-		t.Fatal("Bark server did not receive the notification")
 	}
 }
 
-func TestBarkSettingsAPIPersistsConfiguration(t *testing.T) {
+func TestBarkSettingsAPIPersistsChannelsIndependently(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bark-settings.json")
 	instance := &app{barkSettingsPath: path}
-	body := `{"enabled":true,"api_url":"https://api.day.app/key/{message}?group=短信通知","alias":"备用卡"}`
-	request := httptest.NewRequest(http.MethodPut, "/api/settings/bark", strings.NewReader(body))
-	response := httptest.NewRecorder()
-	instance.routes().ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("PUT /api/settings/bark status = %d, body = %s", response.Code, response.Body.String())
-	}
+
+	smsBody := `{"enabled":true,"api_url":"https://api.day.app/sms/{message}","alias":"短信卡","message_template":"{sender}: {content}"}`
+	putBarkSettings(t, instance, "/api/settings/bark/sms", smsBody)
+	callBody := `{"enabled":true,"api_url":"https://api.day.app/call/{message}","alias":"电话卡","message_template":"未接来电 {number}"}`
+	putBarkSettings(t, instance, "/api/settings/bark/missed-call", callBody)
+
 	if info, err := os.Stat(path); err != nil {
 		t.Fatalf("saved Bark config stat error = %v", err)
 	} else if info.Mode().Perm() != 0o600 {
@@ -104,18 +92,32 @@ func TestBarkSettingsAPIPersistsConfiguration(t *testing.T) {
 	}
 
 	reloaded := &app{barkSettingsPath: path}
-	request = httptest.NewRequest(http.MethodGet, "/api/settings/bark", nil)
-	response = httptest.NewRecorder()
-	reloaded.routes().ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("GET /api/settings/bark status = %d, body = %s", response.Code, response.Body.String())
+	sms := getBarkSettings(t, reloaded, "/api/settings/bark/sms")
+	call := getBarkSettings(t, reloaded, "/api/settings/bark/missed-call")
+	if sms.APIURL != "https://api.day.app/sms/{message}" || sms.MessageTemplate != "{sender}: {content}" {
+		t.Fatalf("saved SMS settings = %#v", sms)
 	}
-	var got barkSettings
-	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode saved Bark settings: %v", err)
+	if call.APIURL != "https://api.day.app/call/{message}" || call.MessageTemplate != "未接来电 {number}" {
+		t.Fatalf("saved missed-call settings = %#v", call)
 	}
-	if !got.Enabled || got.Alias != "备用卡" || got.APIURL == "" {
-		t.Fatalf("saved Bark settings = %#v", got)
+}
+
+func TestLegacyBarkSettingsMigrateToSMSOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bark-settings.json")
+	legacy := `{"enabled":true,"api_url":"https://api.day.app/legacy/{message}","alias":"旧卡"}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	instance := &app{barkSettingsPath: path}
+	settings, err := instance.currentBarkSettings()
+	if err != nil {
+		t.Fatalf("currentBarkSettings() error = %v", err)
+	}
+	if !settings.SMS.Enabled || settings.SMS.Alias != "旧卡" || settings.SMS.MessageTemplate != defaultSMSBarkTemplate {
+		t.Fatalf("migrated SMS settings = %#v", settings.SMS)
+	}
+	if settings.MissedCall.Enabled || settings.MissedCall.APIURL != "" {
+		t.Fatalf("migrated missed-call settings = %#v, want disabled", settings.MissedCall)
 	}
 }
 
@@ -123,21 +125,14 @@ func TestMergeSMSForwardsOnlyNewIncomingMessages(t *testing.T) {
 	received := make(chan string, 3)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		received <- r.URL.Path
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"code":200}`)),
-			Request:    r,
-		}, nil
+		return barkSuccessResponse(r), nil
 	})}
-
 	instance := &app{
 		barkSettingsLoaded: true,
-		barkSettings: barkSettings{
-			Enabled: true,
-			APIURL:  "https://example.invalid/{message}",
-			Alias:   "主卡",
-		},
+		barkSettings: normalizeBarkSettings(barkSettings{SMS: barkChannelSettings{
+			Enabled: true, APIURL: "https://example.invalid/{message}",
+			Alias: "主卡", MessageTemplate: "{alias_prefix}{content}",
+		}}),
 		barkHTTPClient: client,
 	}
 	message := receivedSMS{Sender: "10086", Content: "验证码 4321", Timestamp: time.Now()}
@@ -157,9 +152,98 @@ func TestMergeSMSForwardsOnlyNewIncomingMessages(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("new incoming SMS was not forwarded")
 	}
+	assertNoBarkRequest(t, received)
+}
+
+func TestMissedCallForwardsOnlyAfterUnansweredCallEnds(t *testing.T) {
+	received := make(chan string, 2)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		received <- r.URL.Path
+		return barkSuccessResponse(r), nil
+	})}
+	instance := &app{
+		barkSettingsLoaded: true,
+		barkSettings: normalizeBarkSettings(barkSettings{MissedCall: barkChannelSettings{
+			Enabled: true, APIURL: "https://example.invalid/{message}",
+			MessageTemplate: "未接：{number}",
+		}}),
+		barkHTTPClient: client,
+	}
+	started := time.Date(2026, 8, 10, 14, 0, 0, 0, time.Local)
+	instance.applyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: "10010"}}, started)
+	assertNoBarkRequest(t, received)
+	instance.applyCallPoll(nil, started.Add(8*time.Second))
 	select {
 	case path := <-received:
-		t.Fatalf("unexpected duplicate/outgoing Bark forwarding: %q", path)
+		if path != "/未接：10010" {
+			t.Fatalf("forwarded path = %q", path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missed call was not forwarded")
+	}
+	instance.applyCallPoll(nil, started.Add(11*time.Second))
+	assertNoBarkRequest(t, received)
+}
+
+func TestAnsweredCallDoesNotForwardBark(t *testing.T) {
+	received := make(chan string, 1)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		received <- r.URL.Path
+		return barkSuccessResponse(r), nil
+	})}
+	instance := &app{
+		barkSettingsLoaded: true,
+		barkSettings: normalizeBarkSettings(barkSettings{MissedCall: barkChannelSettings{
+			Enabled: true, APIURL: "https://example.invalid/{message}", MessageTemplate: "未接：{number}",
+		}}),
+		barkHTTPClient: client,
+	}
+	started := time.Date(2026, 8, 10, 15, 0, 0, 0, time.Local)
+	instance.applyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: "10086"}}, started)
+	instance.applyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: "10086"}}, started.Add(3*time.Second))
+	instance.applyCallPoll(nil, started.Add(12*time.Second))
+	assertNoBarkRequest(t, received)
+}
+
+func barkSuccessResponse(request *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"code":200}`)),
+		Request:    request,
+	}
+}
+
+func putBarkSettings(t *testing.T, instance *app, path, body string) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	response := httptest.NewRecorder()
+	instance.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT %s status = %d, body = %s", path, response.Code, response.Body.String())
+	}
+}
+
+func getBarkSettings(t *testing.T, instance *app, path string) barkChannelSettings {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	response := httptest.NewRecorder()
+	instance.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET %s status = %d, body = %s", path, response.Code, response.Body.String())
+	}
+	var got barkChannelSettings
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode Bark settings: %v", err)
+	}
+	return got
+}
+
+func assertNoBarkRequest(t *testing.T, requests <-chan string) {
+	t.Helper()
+	select {
+	case path := <-requests:
+		t.Fatalf("unexpected Bark forwarding: %q", path)
 	case <-time.After(150 * time.Millisecond):
 	}
 }

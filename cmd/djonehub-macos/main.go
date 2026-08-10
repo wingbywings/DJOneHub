@@ -95,6 +95,14 @@ type app struct {
 	smsLastPoll      time.Time
 	smsLastPollError string
 
+	callMu            sync.RWMutex
+	activeCall        *callRecord
+	callHistory       []callRecord
+	callPollInterval  time.Duration
+	callLastPoll      time.Time
+	callLastPollError string
+	callConfigured    bool
+
 	profileNotesMu     sync.Mutex
 	profileNotes       map[string]profileNote
 	profileNotesLoaded bool
@@ -216,6 +224,7 @@ func main() {
 				smsPollInterval:  8 * time.Second,
 				smsAutoCleanupME: true,
 				smsReassembler:   smscodec.NewReassembler(),
+				callPollInterval: 3 * time.Second,
 			}
 			if usbDevice != nil {
 				log.Printf("DJI USB device detected without AT serial port: %s %s (%s:%s)",
@@ -255,7 +264,11 @@ func main() {
 		log.Fatalf("create modem manager: %v", err)
 	}
 
-	instance := &app{modem: manager, port: port, smsPollInterval: 8 * time.Second, smsAutoCleanupME: true}
+	instance := &app{
+		modem: manager, port: port,
+		smsPollInterval: 8 * time.Second, smsAutoCleanupME: true,
+		callPollInterval: 3 * time.Second,
+	}
 	manager.SetSMSCallback(instance.recordSMS)
 	if err := manager.Start(); err != nil {
 		log.Fatalf("open modem on %s: %v", port, err)
@@ -332,6 +345,7 @@ func serve(instance *app, listen string) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go instance.startCallPoller(ctx)
 
 	if !instance.demo {
 		log.Printf("DJOneHub is using %s", instance.port)
@@ -360,9 +374,10 @@ func serve(instance *app, listen string) {
 func newDemoApp() *app {
 	now := time.Now()
 	return &app{
-		demo:            true,
-		port:            "Demo · Quectel EG25-G",
-		smsPollInterval: 8 * time.Second,
+		demo:             true,
+		port:             "Demo · Quectel EG25-G",
+		smsPollInterval:  8 * time.Second,
+		callPollInterval: 3 * time.Second,
 		sms: []receivedSMS{
 			{
 				Sender:    "10086",
@@ -702,6 +717,9 @@ func (a *app) markUSBATDetached(reason string) {
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
+	a.callMu.Lock()
+	a.callConfigured = false
+	a.callMu.Unlock()
 	if manager, _ := a.currentESIMManager(); manager != nil {
 		manager.NotifyModemReset()
 	}
@@ -716,9 +734,16 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/sms/send", a.sendSMS)
 	mux.HandleFunc("POST /api/sms/refresh", a.refreshSMS)
 	mux.HandleFunc("POST /api/sms/clear-module", a.clearModuleSMS)
-	mux.HandleFunc("GET /api/settings/bark", a.getBarkSettings)
-	mux.HandleFunc("PUT /api/settings/bark", a.saveBarkSettings)
-	mux.HandleFunc("POST /api/settings/bark/test", a.testBarkSettings)
+	mux.HandleFunc("GET /api/calls/status", a.callStatus)
+	mux.HandleFunc("GET /api/settings/bark", a.getSMSBarkSettings)
+	mux.HandleFunc("PUT /api/settings/bark", a.saveSMSBarkSettings)
+	mux.HandleFunc("POST /api/settings/bark/test", a.testSMSBarkSettings)
+	mux.HandleFunc("GET /api/settings/bark/sms", a.getSMSBarkSettings)
+	mux.HandleFunc("PUT /api/settings/bark/sms", a.saveSMSBarkSettings)
+	mux.HandleFunc("POST /api/settings/bark/sms/test", a.testSMSBarkSettings)
+	mux.HandleFunc("GET /api/settings/bark/missed-call", a.getMissedCallBarkSettings)
+	mux.HandleFunc("PUT /api/settings/bark/missed-call", a.saveMissedCallBarkSettings)
+	mux.HandleFunc("POST /api/settings/bark/missed-call/test", a.testMissedCallBarkSettings)
 	mux.HandleFunc("POST /api/at", a.executeAT)
 	mux.HandleFunc("GET /api/network", a.networkDiagnostic)
 	mux.HandleFunc("GET /api/network/traffic", a.networkTraffic)

@@ -5,6 +5,7 @@ let esimHealthInFlight = false;
 let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
+let callPollInFlight = false;
 
 function setThemePreference(theme) {
   if (theme === "light" || theme === "dark") {
@@ -173,7 +174,7 @@ function renderHardwareDetails(status) {
   const hint = document.createElement("small");
   hint.textContent = status.discovery_error
     ? `当前限制：${status.discovery_error}`
-    : "AT 串口可用后，短信和 eSIM/卡片操作会自动启用。";
+    : "AT 串口可用后，短信、来电和 eSIM/卡片操作会自动启用。";
 
   panel.hidden = false;
   panel.replaceChildren(title, detail, hint);
@@ -293,63 +294,155 @@ async function loadSMS() {
   }
 }
 
-function renderBarkSettings(settings) {
-  const enabled = Boolean(settings?.enabled);
-  $("#bark-enabled").checked = enabled;
-  $("#bark-api-url").value = settings?.api_url || "";
-  $("#bark-alias").value = settings?.alias || "";
-  $("#bark-summary").textContent = enabled ? "已启用" : (settings?.api_url ? "已停用" : "未配置");
-  $("#bark-status").textContent = enabled
-    ? "Bark 转发已启用，新短信会自动推送。"
-    : "Bark 转发当前未启用。";
+function barkEndpoint(kind) {
+  return kind === "call"
+    ? "/api/settings/bark/missed-call"
+    : "/api/settings/bark/sms";
 }
 
-async function loadBarkSettings() {
+function renderBarkSettings(kind, settings) {
+  const prefix = kind === "call" ? "call" : "sms";
+  const label = kind === "call" ? "未接来电" : "短信";
+  const enabled = Boolean(settings?.enabled);
+  $(`#${prefix}-bark-enabled`).checked = enabled;
+  $(`#${prefix}-bark-api-url`).value = settings?.api_url || "";
+  $(`#${prefix}-bark-alias`).value = settings?.alias || "";
+  $(`#${prefix}-bark-message-template`).value = settings?.message_template || "";
+  $(`#${prefix}-bark-summary`).textContent = enabled ? "已启用" : (settings?.api_url ? "已停用" : "未配置");
+  $(`#${prefix}-bark-status`).textContent = enabled
+    ? `${label} Bark 转发已启用。`
+    : `${label} Bark 转发当前未启用。`;
+}
+
+async function loadBarkSettings(kind) {
+  const prefix = kind === "call" ? "call" : "sms";
   try {
-    renderBarkSettings(await api("/api/settings/bark"));
+    renderBarkSettings(kind, await api(barkEndpoint(kind)));
   } catch (error) {
-    $("#bark-status").textContent = `读取 Bark 配置失败：${error.message}`;
+    $(`#${prefix}-bark-status`).textContent = `读取 Bark 配置失败：${error.message}`;
   }
 }
 
-async function saveBarkSettings(event) {
+async function saveBarkSettings(event, kind) {
   event.preventDefault();
+  const prefix = kind === "call" ? "call" : "sms";
   const button = event.submitter || event.currentTarget.querySelector("button[type=submit]");
   const settings = {
-    enabled: $("#bark-enabled").checked,
-    api_url: $("#bark-api-url").value.trim(),
-    alias: $("#bark-alias").value.trim(),
+    enabled: $(`#${prefix}-bark-enabled`).checked,
+    api_url: $(`#${prefix}-bark-api-url`).value.trim(),
+    alias: $(`#${prefix}-bark-alias`).value.trim(),
+    message_template: $(`#${prefix}-bark-message-template`).value.trim(),
   };
   button.disabled = true;
-  $("#bark-status").textContent = "正在保存 Bark 配置...";
+  $(`#${prefix}-bark-status`).textContent = "正在保存 Bark 配置...";
   try {
-    const result = await api("/api/settings/bark", {
+    const result = await api(barkEndpoint(kind), {
       method: "PUT",
       body: JSON.stringify(settings),
     });
-    renderBarkSettings(result.settings || settings);
+    renderBarkSettings(kind, result.settings || settings);
     notice("Bark 通知配置已保存");
   } catch (error) {
-    $("#bark-status").textContent = `保存失败：${error.message}`;
+    $(`#${prefix}-bark-status`).textContent = `保存失败：${error.message}`;
     notice(error.message);
   } finally {
     button.disabled = false;
   }
 }
 
-async function testBarkSettings() {
-  const button = $("#test-bark");
+async function testBarkSettings(kind) {
+  const prefix = kind === "call" ? "call" : "sms";
+  const button = kind === "call" ? $("#test-call-bark") : $("#test-sms-bark");
   button.disabled = true;
-  $("#bark-status").textContent = "正在发送 Bark 测试通知...";
+  $(`#${prefix}-bark-status`).textContent = "正在发送 Bark 测试通知...";
   try {
-    const result = await api("/api/settings/bark/test", { method: "POST" });
-    $("#bark-status").textContent = result.message || "Bark 测试通知已发送。";
+    const result = await api(`${barkEndpoint(kind)}/test`, { method: "POST" });
+    $(`#${prefix}-bark-status`).textContent = result.message || "Bark 测试通知已发送。";
     notice(result.message || "Bark 测试通知已发送");
   } catch (error) {
-    $("#bark-status").textContent = `测试失败：${error.message}`;
+    $(`#${prefix}-bark-status`).textContent = `测试失败：${error.message}`;
     notice(error.message);
   } finally {
     button.disabled = false;
+  }
+}
+
+function callStateLabel(call) {
+  switch (call?.state) {
+    case "incoming": return "正在来电";
+    case "waiting": return "来电等待";
+    case "active": return "通话已接通";
+    case "dialing": return "正在拨号";
+    case "alerting": return "等待接听";
+    case "held": return "通话保持";
+    default: return "通话状态";
+  }
+}
+
+function callDuration(call) {
+  if (!call?.started_at || !call?.ended_at) return "";
+  const seconds = Math.max(0, Math.round((new Date(call.ended_at) - new Date(call.started_at)) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  if (hours) return `${hours} 小时 ${minutes} 分 ${rest} 秒`;
+  if (minutes) return `${minutes} 分 ${rest} 秒`;
+  return `${rest} 秒`;
+}
+
+function renderCallHistory(history) {
+  const list = $("#call-history");
+  const rows = Array.isArray(history) ? history : [];
+  $("#call-history-count").textContent = `${rows.length} 条`;
+  if (!rows.length) {
+    list.className = "list empty";
+    list.textContent = "暂无记录";
+    return;
+  }
+  list.className = "list";
+  list.replaceChildren(...rows.map((call) => {
+    const row = document.createElement("article");
+    row.className = `item call-history-item${call.missed ? " missed" : ""}`;
+    const number = document.createElement("strong");
+    number.textContent = call.number || "未知号码";
+    const state = document.createElement("p");
+    const result = call.missed
+      ? "未接来电"
+      : (call.direction === "incoming" ? "已接来电" : "外呼");
+    state.textContent = [result, callDuration(call)].filter(Boolean).join(" · ");
+    const time = document.createElement("time");
+    time.textContent = new Date(call.started_at).toLocaleString();
+    row.append(number, state, time);
+    return row;
+  }));
+}
+
+async function loadCalls() {
+  if (callPollInFlight) return;
+  callPollInFlight = true;
+  try {
+    const status = await api("/api/calls/status");
+    const active = status.active;
+    const panel = $("#active-call");
+    const pollText = status.polling
+      ? `每 ${status.poll_interval_s || 3} 秒检查`
+      : "演示模式";
+    $("#call-monitor-status").textContent = status.last_poll_error
+      ? `${pollText} · ${status.last_poll_error}`
+      : `${pollText} · 监听正常`;
+    if (active) {
+      panel.hidden = false;
+      $("#active-call-label").textContent = callStateLabel(active);
+      $("#active-call-number").textContent = active.number || "未知号码";
+      $("#active-call-time").textContent = new Date(active.started_at).toLocaleString();
+    } else {
+      panel.hidden = true;
+    }
+    renderCallHistory(status.history);
+  } catch (error) {
+    $("#call-monitor-status").textContent = `监听异常：${error.message}`;
+  } finally {
+    callPollInFlight = false;
   }
 }
 
@@ -1040,6 +1133,10 @@ document.querySelectorAll(".tab").forEach((tab) => {
     if (tab.dataset.view === "esim") loadESIM();
     else setESIMHealthPolling(false);
     if (tab.dataset.view === "network") loadNetwork();
+    if (tab.dataset.view === "calls") {
+      loadCalls();
+      loadBarkSettings("call");
+    }
   });
 });
 
@@ -1088,8 +1185,11 @@ $("#send-form").addEventListener("submit", async (event) => {
   }
 });
 
-$("#bark-settings-form").addEventListener("submit", saveBarkSettings);
-$("#test-bark").addEventListener("click", testBarkSettings);
+$("#sms-bark-settings-form").addEventListener("submit", (event) => saveBarkSettings(event, "sms"));
+$("#test-sms-bark").addEventListener("click", () => testBarkSettings("sms"));
+$("#call-bark-settings-form").addEventListener("submit", (event) => saveBarkSettings(event, "call"));
+$("#test-call-bark").addEventListener("click", () => testBarkSettings("call"));
+$("#refresh-calls").addEventListener("click", loadCalls);
 
 $("#at-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -1107,7 +1207,9 @@ $("#at-form").addEventListener("submit", async (event) => {
 });
 
 $("#refresh").addEventListener("click", async () => {
-  await Promise.all([loadStatus(), loadSMS()]);
+  const tasks = [loadStatus(), loadSMS()];
+  if ($("#calls").classList.contains("active")) tasks.push(loadCalls());
+  await Promise.all(tasks);
   notice("状态已刷新");
 });
 $("#refresh-sms").addEventListener("click", async () => {
@@ -1168,7 +1270,10 @@ $("#reboot-module").addEventListener("click", rebootModule);
 
 loadStatus();
 loadSMS();
-loadBarkSettings();
+loadBarkSettings("sms");
 setNetworkTrafficPolling(true);
 setInterval(loadStatus, 10000);
 setInterval(loadSMS, 5000);
+setInterval(() => {
+  if ($("#calls").classList.contains("active")) loadCalls();
+}, 2000);

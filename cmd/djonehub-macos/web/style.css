@@ -54,7 +54,7 @@
 }
 * { box-sizing: border-box; }
 body { min-width: 320px; margin: 0; background: var(--page); color: var(--text); }
-button, input { font: inherit; }
+button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: wait; opacity: .52; }
 
@@ -113,7 +113,7 @@ button:active:not(:disabled) { transform: translateY(1px); }
 .inline-status { margin: 8px 0 13px; color: #788598; font-size: 13px; }
 #workmode-status { padding: 9px 12px; border-left: 2px solid #4f83e7; background: #f1f6ff; }
 
-.task-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 26px 0 20px; padding: 5px; border: 1px solid #d9dee6; border-radius: 8px; background: #fff; }
+.task-nav { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 26px 0 20px; padding: 5px; border: 1px solid #d9dee6; border-radius: 8px; background: #fff; }
 .tab { min-height: 56px; padding: 7px 10px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: #718096; text-align: left; }
 .tab span { display: block; color: inherit; font-size: 14px; font-weight: 700; }
 .tab small { display: block; margin-top: 3px; color: #8b97a8; font-size: 11px; font-weight: 500; }
@@ -128,9 +128,10 @@ button:active:not(:disabled) { transform: translateY(1px); }
 .view-intro p { max-width: 480px; margin: 0; font-size: 13px; text-align: right; }
 
 .toolbar { display: grid; grid-template-columns: 190px 1fr auto; gap: 10px; margin-top: 18px; }
-input { width: 100%; padding: 0 12px; border-color: #cbd3df; background: #fff; color: #1f2b3b; outline: none; }
-input::placeholder { color: #8793a4; }
-input:focus { border-color: #6698ed; box-shadow: 0 0 0 3px rgba(77, 130, 232, .14); }
+input, textarea { width: 100%; padding: 0 12px; border: 1px solid #cbd3df; border-radius: 6px; background: #fff; color: #1f2b3b; outline: none; }
+textarea { min-height: 104px; padding-top: 10px; padding-bottom: 10px; line-height: 1.5; resize: vertical; }
+input::placeholder, textarea::placeholder { color: #8793a4; }
+input:focus, textarea:focus { border-color: #6698ed; box-shadow: 0 0 0 3px rgba(77, 130, 232, .14); }
 .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 28px 0 9px; }
 .compact-heading { margin-top: 21px; }
 .subheading { margin: 28px 0 9px; color: #334155; font-size: 15px; }
@@ -149,6 +150,14 @@ input:focus { border-color: #6698ed; box-shadow: 0 0 0 3px rgba(77, 130, 232, .1
 .settings-field code { color: var(--text-muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .settings-actions { display: flex; align-items: end; justify-content: flex-end; gap: 8px; }
 .notification-panel > .inline-status { margin: 0 16px 16px; }
+
+.call-monitor-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 16px; }
+.active-call-card { margin-top: 12px; padding: 18px; border: 1px solid #f0b8be; border-radius: 8px; background: color-mix(in srgb, var(--surface) 88%, #ef4444 12%); }
+.active-call-card[hidden] { display: none; }
+.active-call-card span, .active-call-card small { display: block; color: var(--text-muted); font-size: 12px; }
+.active-call-card strong { display: block; margin: 6px 0; overflow-wrap: anywhere; color: var(--text-strong); font-size: 25px; }
+.call-history-item p { color: var(--text-muted); }
+.call-history-item.missed p { color: #b45309; font-weight: 700; }
 
 .diagnostic-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .diagnostic-card { min-height: 108px; padding: 14px 15px; border: 1px solid #d9dee6; border-radius: 7px; background: #fff; }
@@ -266,7 +275,7 @@ p, #device-summary, .inline-status, .modal-message { color: var(--text-muted); }
 }
 .secondary { border-color: var(--border); background: var(--surface); color: var(--text-strong); }
 .secondary:hover:not(:disabled) { border-color: #718096; background: var(--surface-hover); }
-input { border-color: var(--border); background: var(--surface); color: var(--text-strong); }
+input, textarea { border-color: var(--border); background: var(--surface); color: var(--text-strong); }
 .task-nav { border-color: var(--border); background: var(--surface); }
 .tab { color: var(--text-muted); }
 .tab:hover:not(:disabled) { background: var(--surface-hover); color: var(--text-strong); }
@@ -305,6 +314,7 @@ input { border-color: var(--border); background: var(--surface); color: var(--te
   .view-intro p, .profile-panel-heading p { text-align: left; }
   .toolbar { grid-template-columns: 1fr; }
   .section-heading { align-items: flex-start; flex-direction: column; }
+  .call-monitor-heading { align-items: flex-start; flex-direction: column; }
   .heading-actions { justify-content: flex-start; flex-wrap: wrap; }
   .diagnostic-grid, .fold-panel > #esim-runtime { grid-template-columns: 1fr; }
   .item { grid-template-columns: 1fr; gap: 7px; }
