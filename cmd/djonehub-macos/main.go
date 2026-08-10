@@ -104,6 +104,12 @@ type app struct {
 
 	trafficMu        sync.Mutex
 	trafficBaselines map[string]networkByteCounters
+
+	barkMu             sync.Mutex
+	barkSettings       barkSettings
+	barkSettingsLoaded bool
+	barkSettingsPath   string
+	barkHTTPClient     *http.Client
 }
 
 type usbInterfaceStatus struct {
@@ -542,8 +548,8 @@ func (a *app) recordSMS(sender, content string, timestamp time.Time) {
 
 func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
 	a.smsMu.Lock()
-	defer a.smsMu.Unlock()
 	seen := make(map[string]bool, len(a.sms)+len(messages))
+	newMessages := make([]receivedSMS, 0, len(messages))
 	for _, item := range a.sms {
 		seen[smsCacheKey(item)] = true
 	}
@@ -557,6 +563,7 @@ func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
 		}
 		seen[key] = true
 		a.sms = append(a.sms, item)
+		newMessages = append(newMessages, item)
 		newCount++
 	}
 	sort.SliceStable(a.sms, func(i, j int) bool {
@@ -565,7 +572,12 @@ func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
 	if len(a.sms) > 500 {
 		a.sms = a.sms[:500]
 	}
-	return newCount, len(a.sms)
+	total = len(a.sms)
+	a.smsMu.Unlock()
+	for _, item := range newMessages {
+		a.forwardSMSBark(item)
+	}
+	return newCount, total
 }
 
 func smsCacheKey(item receivedSMS) string {
@@ -704,6 +716,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/sms/send", a.sendSMS)
 	mux.HandleFunc("POST /api/sms/refresh", a.refreshSMS)
 	mux.HandleFunc("POST /api/sms/clear-module", a.clearModuleSMS)
+	mux.HandleFunc("GET /api/settings/bark", a.getBarkSettings)
+	mux.HandleFunc("PUT /api/settings/bark", a.saveBarkSettings)
+	mux.HandleFunc("POST /api/settings/bark/test", a.testBarkSettings)
 	mux.HandleFunc("POST /api/at", a.executeAT)
 	mux.HandleFunc("GET /api/network", a.networkDiagnostic)
 	mux.HandleFunc("GET /api/network/traffic", a.networkTraffic)

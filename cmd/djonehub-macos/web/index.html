@@ -64,6 +64,30 @@
         <input id="message" type="text" placeholder="短信内容" maxlength="1000" required>
         <button type="submit">发送</button>
       </form>
+      <details id="bark-settings-panel" class="fold-panel notification-panel">
+        <summary><span>Bark 通知转发</span><small id="bark-summary">未配置</small></summary>
+        <form id="bark-settings-form" class="bark-settings-grid">
+          <label class="checkbox-field">
+            <input id="bark-enabled" type="checkbox">
+            <span><strong>收到新短信时自动转发</strong><small>仅转发新收到的短信，不转发从本机发出的短信。</small></span>
+          </label>
+          <label class="settings-field settings-field-wide">
+            <span>Bark API 链接</span>
+            <input id="bark-api-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://api.day.app/你的Key/{message}?group=短信通知">
+            <small>链接中必须保留 <code>{message}</code>；短信内容会经过 URL 编码后替换该占位符。</small>
+          </label>
+          <label class="settings-field">
+            <span>自定义别名</span>
+            <input id="bark-alias" type="text" maxlength="80" autocomplete="off" placeholder="例如：备用卡">
+            <small>通知内容格式：<code>[自定义别名]短信内容</code>。</small>
+          </label>
+          <div class="settings-actions">
+            <button id="test-bark" class="secondary" type="button">发送测试通知</button>
+            <button type="submit">保存配置</button>
+          </div>
+        </form>
+        <p id="bark-status" class="inline-status">正在读取 Bark 配置...</p>
+      </details>
       <div class="section-heading">
         <h2>收件箱</h2>
         <div class="heading-actions">

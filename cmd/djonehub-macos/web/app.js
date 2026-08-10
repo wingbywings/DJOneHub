@@ -293,6 +293,66 @@ async function loadSMS() {
   }
 }
 
+function renderBarkSettings(settings) {
+  const enabled = Boolean(settings?.enabled);
+  $("#bark-enabled").checked = enabled;
+  $("#bark-api-url").value = settings?.api_url || "";
+  $("#bark-alias").value = settings?.alias || "";
+  $("#bark-summary").textContent = enabled ? "已启用" : (settings?.api_url ? "已停用" : "未配置");
+  $("#bark-status").textContent = enabled
+    ? "Bark 转发已启用，新短信会自动推送。"
+    : "Bark 转发当前未启用。";
+}
+
+async function loadBarkSettings() {
+  try {
+    renderBarkSettings(await api("/api/settings/bark"));
+  } catch (error) {
+    $("#bark-status").textContent = `读取 Bark 配置失败：${error.message}`;
+  }
+}
+
+async function saveBarkSettings(event) {
+  event.preventDefault();
+  const button = event.submitter || event.currentTarget.querySelector("button[type=submit]");
+  const settings = {
+    enabled: $("#bark-enabled").checked,
+    api_url: $("#bark-api-url").value.trim(),
+    alias: $("#bark-alias").value.trim(),
+  };
+  button.disabled = true;
+  $("#bark-status").textContent = "正在保存 Bark 配置...";
+  try {
+    const result = await api("/api/settings/bark", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    });
+    renderBarkSettings(result.settings || settings);
+    notice("Bark 通知配置已保存");
+  } catch (error) {
+    $("#bark-status").textContent = `保存失败：${error.message}`;
+    notice(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function testBarkSettings() {
+  const button = $("#test-bark");
+  button.disabled = true;
+  $("#bark-status").textContent = "正在发送 Bark 测试通知...";
+  try {
+    const result = await api("/api/settings/bark/test", { method: "POST" });
+    $("#bark-status").textContent = result.message || "Bark 测试通知已发送。";
+    notice(result.message || "Bark 测试通知已发送");
+  } catch (error) {
+    $("#bark-status").textContent = `测试失败：${error.message}`;
+    notice(error.message);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function profileRows(value) {
   const groups = Array.isArray(value) ? value : value?.profiles || [];
   return groups.flatMap((group) =>
@@ -1028,6 +1088,9 @@ $("#send-form").addEventListener("submit", async (event) => {
   }
 });
 
+$("#bark-settings-form").addEventListener("submit", saveBarkSettings);
+$("#test-bark").addEventListener("click", testBarkSettings);
+
 $("#at-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const output = $("#at-output");
@@ -1105,6 +1168,7 @@ $("#reboot-module").addEventListener("click", rebootModule);
 
 loadStatus();
 loadSMS();
+loadBarkSettings();
 setNetworkTrafficPolling(true);
 setInterval(loadStatus, 10000);
 setInterval(loadSMS, 5000);
