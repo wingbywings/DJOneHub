@@ -9,7 +9,11 @@ import (
 
 type usbAT struct{}
 
-func openDJIUSBAT() (*usbAT, error) {
+func listDJIUSBDevices() ([]usbDeviceLocator, error) {
+	return nil, errors.New("USB discovery requires macOS cgo build with libusb")
+}
+
+func openDJIUSBAT(_ ...usbDeviceLocator) (*usbAT, error) {
 	return nil, errors.New("USB AT requires macOS cgo build with libusb")
 }
 

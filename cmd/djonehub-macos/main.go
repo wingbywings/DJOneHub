@@ -73,17 +73,26 @@ type modulePhonebookEntry struct {
 }
 
 type app struct {
-	modem             *modem.Manager
-	esimMu            sync.RWMutex
-	esim              *esim.Manager
-	esimSwitchAllowed bool
-	usbAT             *usbAT
-	port              string
-	demo              bool
-	discoveryError    string
-	usbDevice         *usbDeviceStatus
-	usbATBackoffUntil time.Time
-	usbATBackoffErr   string
+	// operationMu keeps multi-command writes (SMS/eSIM/mode changes) atomic
+	// relative to background SMS and call polling for this one module. Each
+	// module owns a separate lock, so different modules still run in parallel.
+	operationMu                  sync.RWMutex
+	modem                        *modem.Manager
+	esimMu                       sync.RWMutex
+	esim                         *esim.Manager
+	esimSwitchAllowed            bool
+	usbAT                        *usbAT
+	usbLocator                   *usbDeviceLocator
+	onUSBDetached                func(string)
+	authorizeUSBNetMode          func(int) error
+	releaseUSBNetModeReservation func(int)
+	onUSBNetModeChanged          func(int)
+	port                         string
+	demo                         bool
+	discoveryError               string
+	usbDevice                    *usbDeviceStatus
+	usbATBackoffUntil            time.Time
+	usbATBackoffErr              string
 
 	smsMu          sync.RWMutex
 	sms            []receivedSMS
@@ -211,37 +220,30 @@ func main() {
 	}
 
 	if strings.TrimSpace(port) == "" {
+		// Prefer the libusb registry whenever a DJI module is already present.
+		// A generic AT serial port elsewhere on the Mac must not force all DJI
+		// modules back through the legacy single-device startup path.
+		usbDevices, usbDiscoveryErr := listDJIUSBDevices()
+		if usbDiscoveryErr == nil && len(usbDevices) > 0 {
+			hub := newUSBDeviceHub()
+			if reconcileErr := hub.reconcile(); reconcileErr != nil {
+				log.Printf("initial USB module discovery failed: %v", reconcileErr)
+			}
+			serveUSBDeviceHub(hub, listen)
+			return
+		}
+		if usbDiscoveryErr != nil {
+			log.Printf("USB module discovery unavailable: %v", usbDiscoveryErr)
+		}
 		var err error
 		port, err = discoverATPort()
 		if err != nil {
-			usbDevice := discoverDJIUSBDevice()
-			usbATDevice, usbATErr := openDJIUSBAT()
-			instance := &app{
-				port:             "未发现 AT 串口",
-				discoveryError:   err.Error(),
-				usbDevice:        usbDevice,
-				usbAT:            usbATDevice,
-				smsPollInterval:  8 * time.Second,
-				smsAutoCleanupME: true,
-				smsReassembler:   smscodec.NewReassembler(),
-				callPollInterval: 3 * time.Second,
+			log.Printf("serial modem discovery skipped: %v", err)
+			hub := newUSBDeviceHub()
+			if reconcileErr := hub.reconcile(); reconcileErr != nil {
+				log.Printf("initial USB module discovery failed: %v", reconcileErr)
 			}
-			if usbDevice != nil {
-				log.Printf("DJI USB device detected without AT serial port: %s %s (%s:%s)",
-					usbDevice.Vendor, usbDevice.Product, usbDevice.VendorID, usbDevice.ProductID)
-			}
-			if usbATErr != nil {
-				log.Printf("USB AT unavailable: %v", usbATErr)
-			} else {
-				instance.port = usbATDevice.Description()
-				instance.discoveryError = ""
-				defer usbATDevice.Close()
-				log.Printf("USB AT bridge opened on DJI %s", usbATDevice.Description())
-				instance.initUSBATESIMManager()
-			}
-			log.Printf("modem discovery skipped: %v", err)
-			go instance.startSMSPoller(context.Background())
-			serve(instance, listen)
+			serveUSBDeviceHub(hub, listen)
 			return
 		}
 	}
@@ -634,6 +636,10 @@ func (a *app) pollSMSOnce() error {
 	if a.demo || a.modem != nil {
 		return nil
 	}
+	if !a.operationMu.TryRLock() {
+		return nil
+	}
+	defer a.operationMu.RUnlock()
 	if err := a.ensureUSBAT(); err != nil {
 		a.setSMSPollStatus(err)
 		return err
@@ -675,7 +681,13 @@ func (a *app) ensureUSBAT() error {
 		}
 		return errors.New("USB AT is cooling down after disconnect")
 	}
-	dev, err := openDJIUSBAT()
+	var dev *usbAT
+	var err error
+	if a.usbLocator != nil {
+		dev, err = openDJIUSBAT(*a.usbLocator)
+	} else {
+		dev, err = openDJIUSBAT()
+	}
 	if err != nil {
 		return err
 	}
@@ -722,6 +734,9 @@ func (a *app) markUSBATDetached(reason string) {
 	a.callMu.Unlock()
 	if manager, _ := a.currentESIMManager(); manager != nil {
 		manager.NotifyModemReset()
+	}
+	if a.onUSBDetached != nil {
+		a.onUSBDetached(reason)
 	}
 }
 
@@ -786,6 +801,8 @@ func (a *app) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) status(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.RLock()
+	defer a.operationMu.RUnlock()
 	if a.demo {
 		writeJSON(w, http.StatusOK, modem.DeviceStatus{
 			IMEI:          "867400000000001",
@@ -851,7 +868,12 @@ func (a *app) currentUSBDevice() *usbDeviceStatus {
 	if a.modem != nil || a.demo {
 		return a.usbDevice
 	}
-	usbDevice := discoverDJIUSBDevice()
+	var usbDevice *usbDeviceStatus
+	if a.usbLocator != nil {
+		usbDevice = discoverDJIUSBDeviceByLocator(*a.usbLocator)
+	} else {
+		usbDevice = discoverDJIUSBDevice()
+	}
 	// Never retain the last successful scan: that is stale after an unplug.
 	a.usbDevice = usbDevice
 	return usbDevice
@@ -1225,6 +1247,8 @@ func (a *app) refreshSMS(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) clearModuleSMS(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	if a.demo {
 		writeJSON(w, http.StatusOK, map[string]any{"cleared": true, "before": 0, "after": 0})
 		return
@@ -1297,6 +1321,8 @@ func (a *app) sendSMS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "phone and message are required")
 		return
 	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	if a.demo {
 		a.recordSMS("已发送至 "+body.Phone, body.Message, time.Now())
 		writeJSON(w, http.StatusOK, map[string]any{"sent": true, "segments": 1})
@@ -1386,6 +1412,8 @@ func (a *app) executeAT(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "command must start with AT")
 		return
 	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	if a.demo {
 		response, _ := a.runATCommand(body.Command, 20*time.Second)
 		writeJSON(w, http.StatusOK, map[string]string{"response": response})
@@ -1400,6 +1428,8 @@ func (a *app) executeAT(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) networkDiagnostic(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.RLock()
+	defer a.operationMu.RUnlock()
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			log.Printf("network diagnostic panic: %v", recovered)
@@ -1571,6 +1601,8 @@ func (a *app) checkProxyRoute(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	var body struct {
 		Mode int `json:"mode"`
 	}
@@ -1581,11 +1613,30 @@ func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "only usbnet mode 0, 1, 2 or 3 is allowed")
 		return
 	}
+	if a.authorizeUSBNetMode != nil {
+		if err := a.authorizeUSBNetMode(body.Mode); err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	command := fmt.Sprintf(`AT+QCFG="usbnet",%d`, body.Mode)
 	response, err := a.runATCommand(command, 8*time.Second)
 	if err != nil {
+		if a.releaseUSBNetModeReservation != nil {
+			a.releaseUSBNetModeReservation(body.Mode)
+		}
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
+	}
+	if atResponseIsError(response) || !atProbeSucceeded(response) {
+		if a.releaseUSBNetModeReservation != nil {
+			a.releaseUSBNetModeReservation(body.Mode)
+		}
+		writeError(w, http.StatusBadGateway, "module rejected USB network mode change: "+response)
+		return
+	}
+	if a.onUSBNetModeChanged != nil {
+		a.onUSBNetModeChanged(body.Mode)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":         body.Mode,
@@ -1595,6 +1646,8 @@ func (a *app) setUSBNetMode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) rebootModule(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	response, err := a.runATCommand("AT+CFUN=1,1", 3*time.Second)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -1917,6 +1970,8 @@ func (a *app) phonebookProbeCommand(command string, result *phonebookProbeResult
 // probeESIMPhonebook performs only AT test/read commands. It never writes a
 // phonebook entry, so it is safe to use before enabling portable card notes.
 func (a *app) probeESIMPhonebook(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	result := phonebookProbeResult{Responses: make(map[string]string)}
 	if a.demo {
 		result.StorageSupported = true
@@ -2062,6 +2117,8 @@ func (a *app) readModuleESIMNotes() (map[string]moduleProfileNote, map[int]bool,
 }
 
 func (a *app) listModuleESIMNotes(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	a.moduleNotesMu.Lock()
 	defer a.moduleNotesMu.Unlock()
 	notes, _, used, total, err := a.readModuleESIMNotes()
@@ -2073,6 +2130,8 @@ func (a *app) listModuleESIMNotes(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) saveModuleESIMNote(w http.ResponseWriter, r *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	var body moduleProfileNote
 	if !decodeJSON(w, r, &body) {
 		return
@@ -2124,6 +2183,8 @@ func (a *app) saveModuleESIMNote(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) esimOverview(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	if a.demo {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"chip_info": map[string]any{
@@ -2191,6 +2252,8 @@ func isPhysicalSIMESIMProbeError(err error) bool {
 }
 
 func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -2248,6 +2311,8 @@ func (a *app) esimHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	esimManager, switchAllowed := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -2315,6 +2380,8 @@ func (a *app) switchESIM(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -2346,6 +2413,8 @@ func (a *app) renameESIMProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")
@@ -2376,6 +2445,8 @@ func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) downloadESIMProfile(w http.ResponseWriter, r *http.Request) {
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
 	esimManager, _ := a.currentESIMManager()
 	if !a.demo && esimManager == nil {
 		writeError(w, http.StatusServiceUnavailable, "eSIM manager is unavailable")

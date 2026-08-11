@@ -6,6 +6,14 @@ let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
 let callPollInFlight = false;
+let activeDeviceID = localStorage.getItem("djonehub-active-device") || "";
+let knownDevices = [];
+
+function routedAPIPath(path) {
+  if (!activeDeviceID || path === "/api/devices" || path.startsWith("/api/devices/")) return path;
+  if (!path.startsWith("/api/")) return path;
+  return `/api/devices/${encodeURIComponent(activeDeviceID)}${path.slice(4)}`;
+}
 
 function setThemePreference(theme) {
   if (theme === "light" || theme === "dark") {
@@ -56,13 +64,73 @@ const operatorNames = new Map([
 ]);
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
+  const response = await fetch(routedAPIPath(path), {
     ...options,
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
+}
+
+function deviceOptionLabel(device) {
+  const state = device.state === "ready" ? "在线" : "离线";
+  const identity = device.imei_masked || device.physical_id || "未识别";
+  return `${device.alias || "未命名模块"} · ${state} · ${identity}`;
+}
+
+async function loadDevices({ refreshCurrent = false, refreshOnChange = true } = {}) {
+  const select = $("#device-select");
+  try {
+    const devices = await api("/api/devices");
+    knownDevices = Array.isArray(devices) ? devices : [];
+    const ready = knownDevices.filter((device) => device.state === "ready");
+    if (!ready.some((device) => device.id === activeDeviceID)) {
+      activeDeviceID = ready[0]?.id || "";
+      if (activeDeviceID) localStorage.setItem("djonehub-active-device", activeDeviceID);
+      else localStorage.removeItem("djonehub-active-device");
+      if (refreshOnChange) refreshCurrent = true;
+    }
+    select.replaceChildren();
+    if (!knownDevices.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "未检测到模块";
+      select.append(option);
+      select.disabled = true;
+    } else {
+      knownDevices.forEach((device) => {
+        const option = document.createElement("option");
+        option.value = device.id;
+        option.textContent = deviceOptionLabel(device);
+        option.disabled = device.state !== "ready";
+        select.append(option);
+      });
+      select.disabled = ready.length === 0;
+      select.value = activeDeviceID;
+    }
+    $("#rename-device").disabled = !activeDeviceID;
+    if (refreshCurrent) await refreshActiveDevice();
+  } catch (error) {
+    // Older/single-serial/demo backends do not expose the multi-device list.
+    // Clear a previously saved selection so their legacy /api/* routes keep
+    // working without requiring a coordinated upgrade.
+    activeDeviceID = "";
+    localStorage.removeItem("djonehub-active-device");
+    select.replaceChildren(new Option("当前单模块", ""));
+    select.disabled = true;
+    $("#rename-device").disabled = true;
+  }
+}
+
+async function refreshActiveDevice() {
+  lastSMSCount = null;
+  networkTrafficPrevious = null;
+  const tasks = [loadStatus(), loadSMS(), loadBarkSettings("sms")];
+  if ($("#calls").classList.contains("active")) tasks.push(loadCalls());
+  if ($("#esim").classList.contains("active")) tasks.push(loadESIM());
+  if ($("#network").classList.contains("active")) tasks.push(loadNetwork());
+  await Promise.allSettled(tasks);
 }
 
 function notice(message) {
@@ -106,6 +174,7 @@ function showModal({ title, message = "", fields = [], confirmLabel = "确定", 
     input.placeholder = field.placeholder || "";
     input.autocomplete = "off";
     if (field.required) input.required = true;
+    if (field.maxLength) input.maxLength = field.maxLength;
     label.append(caption, input);
     return label;
   }));
@@ -1268,10 +1337,46 @@ $("#usbnet-mode-2").addEventListener("click", () => setUSBNetMode(2));
 $("#usbnet-mode-3").addEventListener("click", () => setUSBNetMode(3));
 $("#reboot-module").addEventListener("click", rebootModule);
 
-loadStatus();
-loadSMS();
-loadBarkSettings("sms");
-setNetworkTrafficPolling(true);
+$("#device-select").addEventListener("change", async (event) => {
+  const next = event.currentTarget.value;
+  if (!next || next === activeDeviceID) return;
+  activeDeviceID = next;
+  localStorage.setItem("djonehub-active-device", activeDeviceID);
+  await refreshActiveDevice();
+  const device = knownDevices.find((item) => item.id === activeDeviceID);
+  notice(`已切换到${device?.alias ? ` ${device.alias}` : "所选模块"}`);
+});
+
+$("#rename-device").addEventListener("click", async () => {
+  const device = knownDevices.find((item) => item.id === activeDeviceID);
+  if (!device) return;
+  const values = await showModal({
+    title: "重命名模块",
+    message: "名称会保存在本机，用于区分不同模块和 SIM。",
+    confirmLabel: "保存名称",
+    fields: [{ name: "alias", label: "模块名称", value: device.alias || "", required: true, maxLength: 80 }],
+  });
+  if (!values?.alias) return;
+  try {
+    await api(`/api/devices/${encodeURIComponent(activeDeviceID)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ alias: values.alias }),
+    });
+    await loadDevices();
+    notice("模块名称已保存");
+  } catch (error) {
+    notice(error.message);
+  }
+});
+
+async function bootstrap() {
+  await loadDevices({ refreshOnChange: false });
+  await refreshActiveDevice();
+  setNetworkTrafficPolling(true);
+}
+
+void bootstrap();
+setInterval(loadDevices, 4000);
 setInterval(loadStatus, 10000);
 setInterval(loadSMS, 5000);
 setInterval(() => {

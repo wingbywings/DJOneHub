@@ -20,6 +20,13 @@
       <p id="device-summary">正在连接大疆 4G 模块</p>
     </div>
     <div class="header-actions">
+      <label class="device-picker" for="device-select">
+        <span>当前模块</span>
+        <select id="device-select" aria-label="选择要管理的大疆 4G 模块">
+          <option value="">正在发现模块…</option>
+        </select>
+      </label>
+      <button id="rename-device" class="secondary compact" type="button" disabled>重命名</button>
       <div class="theme-switch" role="group" aria-label="网页外观">
         <button class="theme-option" type="button" data-theme-option="light" aria-pressed="false">浅色</button>
         <button class="theme-option" type="button" data-theme-option="dark" aria-pressed="false">深色</button>

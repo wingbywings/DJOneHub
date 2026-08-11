@@ -112,6 +112,10 @@ func (a *app) pollCallOnce() error {
 	if a.demo {
 		return nil
 	}
+	if !a.operationMu.TryRLock() {
+		return nil
+	}
+	defer a.operationMu.RUnlock()
 	if a.modem == nil && a.currentUSBDevice() == nil {
 		a.setCallPollStatus(fmt.Errorf("DJI USB device is not connected"))
 		return nil

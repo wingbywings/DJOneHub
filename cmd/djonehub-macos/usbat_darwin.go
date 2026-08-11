@@ -26,6 +26,7 @@ const (
 type usbAT struct {
 	ctx         *C.libusb_context
 	handle      *C.libusb_device_handle
+	locator     usbDeviceLocator
 	iface       int
 	endpointIn  byte
 	endpointOut byte
@@ -38,12 +39,124 @@ type usbATCandidate struct {
 	endpointOut byte
 }
 
-func openDJIUSBAT() (*usbAT, error) {
+func listDJIUSBDevices() ([]usbDeviceLocator, error) {
 	var ctx *C.libusb_context
 	if rc := C.libusb_init(&ctx); rc != 0 {
 		return nil, fmt.Errorf("libusb init: %s", usbErrorName(rc))
 	}
-	handle := C.libusb_open_device_with_vid_pid(ctx, djiUSBVendorID, djiUSBProductID)
+	defer C.libusb_exit(ctx)
+
+	var list **C.libusb_device
+	count := C.libusb_get_device_list(ctx, &list)
+	if count < 0 {
+		return nil, fmt.Errorf("list USB devices: %s", usbErrorName(C.int(count)))
+	}
+	defer C.libusb_free_device_list(list, 1)
+
+	devices := unsafe.Slice(list, int(count))
+	out := make([]usbDeviceLocator, 0)
+	for _, device := range devices {
+		var descriptor C.struct_libusb_device_descriptor
+		if rc := C.libusb_get_device_descriptor(device, &descriptor); rc != 0 {
+			continue
+		}
+		if uint16(descriptor.idVendor) != djiUSBVendorID || uint16(descriptor.idProduct) != djiUSBProductID {
+			continue
+		}
+		locator := locatorForUSBDevice(device, descriptor)
+		locator.Status = statusForUSBDevice(device, descriptor, locator)
+		out = append(out, locator)
+	}
+	return out, nil
+}
+
+func locatorForUSBDevice(device *C.libusb_device, descriptor C.struct_libusb_device_descriptor) usbDeviceLocator {
+	ports := make([]C.uint8_t, 8)
+	portCount := C.libusb_get_port_numbers(device, &ports[0], C.int(len(ports)))
+	path := make([]uint8, 0)
+	if portCount > 0 {
+		path = make([]uint8, int(portCount))
+		for i := range path {
+			path[i] = uint8(ports[i])
+		}
+	}
+	return usbDeviceLocator{
+		VendorID:  uint16(descriptor.idVendor),
+		ProductID: uint16(descriptor.idProduct),
+		Bus:       uint8(C.libusb_get_bus_number(device)),
+		Address:   uint8(C.libusb_get_device_address(device)),
+		PortPath:  path,
+	}
+}
+
+func statusForUSBDevice(device *C.libusb_device, descriptor C.struct_libusb_device_descriptor, locator usbDeviceLocator) *usbDeviceStatus {
+	status := &usbDeviceStatus{
+		Product:    "DJI 4G Module",
+		Vendor:     "DJI",
+		VendorID:   fmt.Sprintf("%04x", uint16(descriptor.idVendor)),
+		ProductID:  fmt.Sprintf("%04x", uint16(descriptor.idProduct)),
+		LocationID: locator.PhysicalID(),
+		Speed:      usbSpeedName(int(C.libusb_get_device_speed(device))),
+		Mode:       "vendor-specific USB mode",
+	}
+	var config *C.struct_libusb_config_descriptor
+	if rc := C.libusb_get_active_config_descriptor(device, &config); rc != 0 {
+		return status
+	}
+	defer C.libusb_free_config_descriptor(config)
+	interfaces := unsafe.Slice(config._interface, int(config.bNumInterfaces))
+	for _, intf := range interfaces {
+		altsettings := unsafe.Slice(intf.altsetting, int(intf.num_altsetting))
+		for _, alt := range altsettings {
+			status.Interfaces = append(status.Interfaces, usbInterfaceStatus{
+				Number:    int(alt.bInterfaceNumber),
+				Class:     int(alt.bInterfaceClass),
+				Subclass:  int(alt.bInterfaceSubClass),
+				Protocol:  int(alt.bInterfaceProtocol),
+				Endpoints: int(alt.bNumEndpoints),
+			})
+		}
+	}
+	if allVendorSpecific(status.Interfaces) {
+		status.Mode = "vendor-specific QMI/diagnostic mode"
+	}
+	return status
+}
+
+func openDJIUSBAT(target ...usbDeviceLocator) (*usbAT, error) {
+	var ctx *C.libusb_context
+	if rc := C.libusb_init(&ctx); rc != 0 {
+		return nil, fmt.Errorf("libusb init: %s", usbErrorName(rc))
+	}
+	var list **C.libusb_device
+	count := C.libusb_get_device_list(ctx, &list)
+	if count < 0 {
+		C.libusb_exit(ctx)
+		return nil, fmt.Errorf("list USB devices: %s", usbErrorName(C.int(count)))
+	}
+	defer C.libusb_free_device_list(list, 1)
+
+	var handle *C.libusb_device_handle
+	var selected usbDeviceLocator
+	for _, device := range unsafe.Slice(list, int(count)) {
+		var descriptor C.struct_libusb_device_descriptor
+		if rc := C.libusb_get_device_descriptor(device, &descriptor); rc != 0 {
+			continue
+		}
+		if uint16(descriptor.idVendor) != djiUSBVendorID || uint16(descriptor.idProduct) != djiUSBProductID {
+			continue
+		}
+		candidate := locatorForUSBDevice(device, descriptor)
+		if len(target) > 0 && !sameUSBDevice(target[0], candidate) {
+			continue
+		}
+		if rc := C.libusb_open(device, &handle); rc != 0 {
+			C.libusb_exit(ctx)
+			return nil, fmt.Errorf("open DJI USB device %s: %s", candidate.PhysicalID(), usbErrorName(rc))
+		}
+		selected = candidate
+		break
+	}
 	if handle == nil {
 		C.libusb_exit(ctx)
 		return nil, errors.New("DJI USB AT device 2ca3:4006 not found")
@@ -63,6 +176,7 @@ func openDJIUSBAT() (*usbAT, error) {
 		dev := &usbAT{
 			ctx:         ctx,
 			handle:      handle,
+			locator:     selected,
 			iface:       candidate.iface,
 			endpointIn:  candidate.endpointIn,
 			endpointOut: candidate.endpointOut,
@@ -295,8 +409,8 @@ func (u *usbAT) Description() string {
 	if u == nil {
 		return "USB AT"
 	}
-	return fmt.Sprintf("USB AT · 2ca3:4006 interface %d out 0x%02x in 0x%02x",
-		u.iface, u.endpointOut, u.endpointIn)
+	return fmt.Sprintf("USB AT · 2ca3:4006 · %s · interface %d out 0x%02x in 0x%02x",
+		u.locator.PhysicalID(), u.iface, u.endpointOut, u.endpointIn)
 }
 
 func (u *usbAT) bulkWriteLocked(endpoint byte, payload []byte, timeout time.Duration) error {

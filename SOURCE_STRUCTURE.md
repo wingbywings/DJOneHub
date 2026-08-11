@@ -41,6 +41,8 @@ DJOneHub-source-minimal/
 
 - `cmd/djonehub-macos/main.go`：HTTP 服务、设备状态、短信、eSIM、网络和流量 API。
 - `cmd/djonehub-macos/usbat_darwin.go`：macOS 上通过 libusb 接管大疆模块 USB AT 接口。
+- `cmd/djonehub-macos/device_hub.go`：多模块注册表、热插拔协调、按设备 API 路由和模块别名。
+- `cmd/djonehub-macos/usb_identity.go`：同 VID/PID 模块的 USB 物理路径标识与精确匹配。
 - `cmd/djonehub-macos/usbat_esim_channel.go`：经 AT/APDU 访问实体 eUICC 卡片。
 - `cmd/djonehub-macos/web/`：由 `go:embed` 编译进二进制的网页界面。
 
