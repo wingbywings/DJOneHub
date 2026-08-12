@@ -96,12 +96,14 @@ type app struct {
 	smsLastPollError string
 
 	callMu            sync.RWMutex
+	callActionMu      sync.Mutex
 	activeCall        *callRecord
 	callHistory       []callRecord
 	callPollInterval  time.Duration
 	callLastPoll      time.Time
 	callLastPollError string
 	callConfigured    bool
+	callATRunner      func(string, time.Duration) (string, error)
 
 	profileNotesMu     sync.Mutex
 	profileNotes       map[string]profileNote
@@ -735,6 +737,11 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/sms/refresh", a.refreshSMS)
 	mux.HandleFunc("POST /api/sms/clear-module", a.clearModuleSMS)
 	mux.HandleFunc("GET /api/calls/status", a.callStatus)
+	mux.HandleFunc("POST /api/calls/dial", a.dialCallHTTP)
+	mux.HandleFunc("POST /api/calls/answer", a.answerCallHTTP)
+	mux.HandleFunc("POST /api/calls/hangup", a.hangupCallHTTP)
+	mux.HandleFunc("GET /api/calls/audio", a.callAudioStatusHTTP)
+	mux.HandleFunc("POST /api/calls/audio/enable", a.enableCallAudioHTTP)
 	mux.HandleFunc("GET /api/settings/bark", a.getSMSBarkSettings)
 	mux.HandleFunc("PUT /api/settings/bark", a.saveSMSBarkSettings)
 	mux.HandleFunc("POST /api/settings/bark/test", a.testSMSBarkSettings)
@@ -1259,6 +1266,9 @@ func (a *app) runATCommand(command string, timeout time.Duration) (string, error
 			"AT+QNWINFO":         "+QNWINFO: \"FDD LTE\",\"46000\",\"LTE BAND 3\",1650\r\nOK",
 			"AT+QCFG=\"USBNET\"": "+QCFG: \"usbnet\",1\r\nOK",
 			"AT+QCFG=\"USBCFG\"": "+QCFG: \"usbcfg\",0x2C7C,0x0125,1,1,1,1,1,0,0\r\nOK",
+			"AT+QPCMV=?":         "+QPCMV: (0,1),(0,1,2)\r\nOK",
+			"AT+QPCMV?":          "+QPCMV: 1,2\r\nOK",
+			"AT+QPCMV=1,2":       "OK",
 			"AT+CGDCONT?":        "+CGDCONT: 1,\"IPV4V6\",\"3gnet\",\"0.0.0.0\",0,0,0,0\r\nOK",
 			"AT+CGACT?":          "+CGACT: 1,1\r\nOK",
 			"AT+CGPADDR=1":       "+CGPADDR: 1,\"10.23.45.67\"\r\nOK",

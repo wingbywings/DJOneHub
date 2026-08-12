@@ -52,7 +52,7 @@
 
     <nav class="task-nav" aria-label="功能导航">
       <button class="tab active" data-view="sms"><span>短信</span><small>收件箱</small></button>
-      <button class="tab" data-view="calls"><span>来电</span><small>通话记录</small></button>
+      <button class="tab" data-view="calls"><span>电话</span><small>拨打与接听</small></button>
       <button class="tab" data-view="esim"><span>eSIM/卡片</span><small>Profile</small></button>
       <button class="tab" data-view="network"><span>网络</span><small>4G USB</small></button>
       <button class="tab" data-view="at"><span>AT 调试</span><small>诊断</small></button>
@@ -106,7 +106,61 @@
     </section>
 
     <section id="calls" class="view">
-      <div class="view-intro"><div><span class="section-kicker">CALL MONITOR</span><h2>来电监控</h2></div><p>后台持续监听模块语音通话，并记录最近 100 条通话。</p></div>
+      <div class="view-intro"><div><span class="section-kicker">CELLULAR CALLS</span><h2>电话拨打与接听</h2></div><p>通过模块蜂窝语音控制电话，并记录最近 100 条通话。</p></div>
+      <form id="call-dial-form" class="toolbar call-dial-toolbar">
+        <input id="call-number" type="tel" inputmode="tel" autocomplete="tel" maxlength="33" placeholder="电话号码，例如 10086 或 +8613800138000" required>
+        <button id="dial-call" type="submit">拨打</button>
+      </form>
+      <p id="call-audio-status" class="inline-status call-audio-status">当前仅提供拨号、接听和挂断信令；模块 UAC 通过真机验证前没有通话音频。</p>
+      <details id="call-audio-panel" class="fold-panel call-audio-panel">
+        <summary><span>通话音频（实验）</span><small id="call-audio-summary">尚未探测</small></summary>
+        <div class="call-audio-body">
+          <p id="call-audio-capability" class="inline-status">点击“探测模块 UAC”读取音频能力；探测不会修改模块配置。</p>
+          <div class="call-audio-module-actions">
+            <button id="probe-call-audio" class="secondary" type="button">探测模块 UAC</button>
+            <button id="enable-call-audio" class="secondary" type="button" hidden>启用模块 UAC</button>
+          </div>
+          <div class="call-audio-grid">
+            <label class="settings-field">
+              <span>模块下行输入</span>
+              <select id="call-audio-modem-input" disabled><option value="">先检测浏览器音频设备</option></select>
+              <small>选择来自大疆/Quectel USB Audio 的输入。</small>
+            </label>
+            <label class="settings-field">
+              <span>Mac 麦克风</span>
+              <select id="call-audio-microphone" disabled><option value="">先检测浏览器音频设备</option></select>
+              <small>你的声音将发送到模块通话上行。</small>
+            </label>
+            <label class="settings-field">
+              <span>模块上行输出</span>
+              <select id="call-audio-modem-output" disabled><option value="">先检测浏览器音频设备</option></select>
+              <small>选择大疆/Quectel USB Audio 的输出。</small>
+            </label>
+            <label class="settings-field">
+              <span>Mac 播放设备</span>
+              <select id="call-audio-speaker" disabled><option value="">先检测浏览器音频设备</option></select>
+              <small>建议选择耳机，避免回声和啸叫。</small>
+            </label>
+            <label class="settings-field">
+              <span>下行播放音量</span>
+              <input id="call-audio-speaker-volume" type="range" min="0" max="1" step="0.05" value="1">
+              <small>只调整对端声音在 Mac 上的播放音量。</small>
+            </label>
+            <label class="checkbox-field call-audio-mute">
+              <input id="call-audio-microphone-muted" type="checkbox">
+              <span><strong>麦克风静音</strong><small>停止向模块发送 Mac 麦克风声音。</small></span>
+            </label>
+          </div>
+          <div class="call-audio-bridge-actions">
+            <button id="detect-call-audio-devices" class="secondary" type="button">检测浏览器音频设备</button>
+            <button id="start-call-audio" type="button" disabled>连接通话音频</button>
+            <button id="stop-call-audio" class="danger" type="button" disabled>停止音频</button>
+          </div>
+          <p id="call-audio-bridge-status" class="inline-status">音频桥未连接。首次检测会请求浏览器麦克风权限。</p>
+          <audio id="call-downlink-audio" autoplay playsinline hidden></audio>
+          <audio id="call-uplink-audio" autoplay playsinline hidden></audio>
+        </div>
+      </details>
       <div class="call-monitor-heading">
         <p id="call-monitor-status" class="inline-status">尚未读取来电状态</p>
         <button id="refresh-calls" class="secondary" type="button">刷新</button>
@@ -115,6 +169,10 @@
         <span id="active-call-label">正在来电</span>
         <strong id="active-call-number">未知号码</strong>
         <small id="active-call-time"></small>
+        <div class="call-actions">
+          <button id="answer-call" type="button" hidden>接听</button>
+          <button id="hangup-call" class="danger" type="button" hidden>挂断</button>
+        </div>
       </div>
       <details id="call-bark-settings-panel" class="fold-panel notification-panel">
         <summary><span>未接来电 Bark 通知</span><small id="call-bark-summary">未配置</small></summary>

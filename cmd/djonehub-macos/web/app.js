@@ -6,6 +6,16 @@ let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
 let callPollInFlight = false;
+let callControlInFlight = false;
+let activeCallState = null;
+let callCapabilities = {};
+let callAudioCapability = null;
+let callAudioDevicesReady = false;
+let callAudioBridgeActive = false;
+let callAudioDownlinkStream = null;
+let callAudioMicrophoneStream = null;
+
+const modemAudioLabelPattern = /dji|quectel|eg25|baiwang|usb audio|usb-audio/i;
 
 function setThemePreference(theme) {
   if (theme === "light" || theme === "dark") {
@@ -61,7 +71,12 @@ async function api(path, options = {}) {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(data.error || `HTTP ${response.status}`);
+    error.code = data.code || "";
+    error.detail = data.detail || "";
+    throw error;
+  }
   return data;
 }
 
@@ -417,12 +432,58 @@ function renderCallHistory(history) {
   }));
 }
 
+function setCallControls(active, capabilities = {}) {
+  const canSignal = capabilities.signaling !== false;
+  const incoming = active?.state === "incoming" || active?.state === "waiting";
+  const dialButton = $("#dial-call");
+  const numberInput = $("#call-number");
+  const answerButton = $("#answer-call");
+  const hangupButton = $("#hangup-call");
+  dialButton.disabled = callControlInFlight || !canSignal || Boolean(active);
+  numberInput.disabled = callControlInFlight || Boolean(active);
+  answerButton.hidden = !incoming;
+  answerButton.disabled = callControlInFlight || !incoming;
+  hangupButton.hidden = !active;
+  hangupButton.disabled = callControlInFlight || !active;
+  hangupButton.textContent = incoming ? "拒接" : "挂断";
+  $("#call-audio-status").textContent = capabilities.audio
+    ? "模块音频已就绪。"
+    : "当前仅提供拨号、接听和挂断信令；模块 UAC 通过真机验证前没有通话音频。";
+  updateCallAudioBridgeControls();
+}
+
+function setCallControlBusy(busy) {
+  callControlInFlight = busy;
+  setCallControls(activeCallState, callCapabilities);
+}
+
+async function performCallControl(path, options, pendingMessage, successMessage) {
+  if (callControlInFlight) return;
+  setCallControlBusy(true);
+  $("#call-monitor-status").textContent = pendingMessage;
+  try {
+    const result = await api(path, options);
+    notice(successMessage);
+    if (result.call) activeCallState = result.call;
+    if (result.status === "idle") activeCallState = null;
+    setCallControls(activeCallState, callCapabilities);
+    await loadCalls();
+  } catch (error) {
+    $("#call-monitor-status").textContent = `电话操作失败：${error.message}`;
+    notice(error.message);
+  } finally {
+    setCallControlBusy(false);
+  }
+}
+
 async function loadCalls() {
   if (callPollInFlight) return;
   callPollInFlight = true;
   try {
     const status = await api("/api/calls/status");
     const active = status.active;
+    activeCallState = active || null;
+    callCapabilities = status.capabilities || {};
     const panel = $("#active-call");
     const pollText = status.polling
       ? `每 ${status.poll_interval_s || 3} 秒检查`
@@ -437,13 +498,243 @@ async function loadCalls() {
       $("#active-call-time").textContent = new Date(active.started_at).toLocaleString();
     } else {
       panel.hidden = true;
+      if (callAudioBridgeActive) stopCallAudioBridge("通话已结束，音频桥已停止。");
     }
+    setCallControls(active, status.capabilities || {});
     renderCallHistory(status.history);
   } catch (error) {
     $("#call-monitor-status").textContent = `监听异常：${error.message}`;
   } finally {
     callPollInFlight = false;
   }
+}
+
+function renderCallAudioCapability(capability) {
+  callAudioCapability = capability;
+  const summary = $("#call-audio-summary");
+  const detail = $("#call-audio-capability");
+  const enableButton = $("#enable-call-audio");
+  const diagnostics = Array.isArray(capability?.diagnostics) ? capability.diagnostics : [];
+  if (!capability?.supported) {
+    summary.textContent = "模块未报告支持";
+    detail.textContent = diagnostics[0] || "模块固件未报告 QPCMV/UAC 支持。";
+    enableButton.hidden = true;
+    return;
+  }
+  if (capability.needs_usb_reconfigure) {
+    summary.textContent = "需要修改 USB 组合";
+    detail.textContent = "模块支持 UAC，但 USB Audio 接口尚未加入当前 USB 组合；启用后需要重启模块。";
+    enableButton.hidden = false;
+    enableButton.textContent = "启用 UAC USB 接口";
+    enableButton.disabled = Boolean(activeCallState);
+    return;
+  }
+  if (!capability.usb_config_known) {
+    summary.textContent = "USB 配置未知";
+    detail.textContent = diagnostics[0] || `无法确认模块 USB 组合中的 UAC 状态（检测到 ${capability.usb_function_count || 0} 个功能参数）。`;
+    enableButton.hidden = true;
+    return;
+  }
+  if (!capability.runtime_control_available) {
+    summary.textContent = "固件禁用 UAC 运行控制";
+    detail.textContent = diagnostics.find((item) => item.includes("QPCMV"))
+      || "模块声明了 QPCMV 命令，但拒绝读取或修改运行状态；电话信令仍可使用。";
+    enableButton.hidden = true;
+    return;
+  }
+  if (capability.enabled && capability.mode === 2) {
+    summary.textContent = "模块 UAC 已开启";
+    detail.textContent = "模块已进入 UAC 模式。下一步检测浏览器中的输入和输出设备。";
+    enableButton.hidden = true;
+    return;
+  }
+  summary.textContent = "UAC 运行模式未开启";
+  detail.textContent = "USB Audio 接口已配置，但本次模块启动后尚未进入 UAC 模式。";
+  enableButton.hidden = false;
+  enableButton.textContent = "开启本次 UAC 模式";
+  enableButton.disabled = Boolean(activeCallState);
+}
+
+async function loadCallAudioCapability() {
+  const button = $("#probe-call-audio");
+  button.disabled = true;
+  $("#call-audio-capability").textContent = "正在读取模块 USB 和 QPCMV 状态...";
+  try {
+    const capability = await api("/api/calls/audio");
+    renderCallAudioCapability(capability);
+  } catch (error) {
+    $("#call-audio-summary").textContent = "探测失败";
+    $("#call-audio-capability").textContent = `模块音频探测失败：${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function enableModuleCallAudio() {
+  if (!callAudioCapability?.supported) return;
+  let allowUSBReconfigure = false;
+  if (callAudioCapability.needs_usb_reconfigure) {
+    const confirmed = await showModal({
+      title: "启用模块 USB Audio",
+      message: "该操作会修改模块 USB 组合。修改完成后必须重启模块，USB 接口会暂时断开并重新枚举；请先结束通话和 eSIM 写入操作。",
+      confirmLabel: "确认修改",
+      danger: true,
+    });
+    if (!confirmed) return;
+    allowUSBReconfigure = true;
+  }
+  const button = $("#enable-call-audio");
+  button.disabled = true;
+  try {
+    const result = await api("/api/calls/audio/enable", {
+      method: "POST",
+      body: JSON.stringify({ allow_usb_reconfigure: allowUSBReconfigure }),
+    });
+    if (result.restart_required) {
+      $("#call-audio-summary").textContent = "等待模块重启";
+      $("#call-audio-capability").textContent = "UAC USB 配置已写入。请重启模块，重新连接后再次探测。";
+      notice("UAC 配置已写入，请重启模块");
+    } else {
+      notice("模块 UAC 模式已开启");
+      await loadCallAudioCapability();
+    }
+  } catch (error) {
+    const diagnostic = error.detail ? `；${error.detail}` : "";
+    $("#call-audio-capability").textContent = `启用失败：${error.message}${diagnostic}`;
+    notice(error.message);
+  } finally {
+    button.disabled = Boolean(activeCallState);
+  }
+}
+
+function populateAudioDeviceSelect(select, devices, preferredDevice) {
+  const previous = select.value;
+  select.replaceChildren(...devices.map((device, index) => {
+    const option = document.createElement("option");
+    option.value = device.deviceId;
+    option.textContent = device.label || `${device.kind === "audioinput" ? "输入" : "输出"}设备 ${index + 1}`;
+    return option;
+  }));
+  const preferred = devices.find(preferredDevice) || devices.find((device) => device.deviceId === previous) || devices[0];
+  if (preferred) select.value = preferred.deviceId;
+  select.disabled = devices.length === 0;
+}
+
+async function detectCallAudioDevices() {
+  const button = $("#detect-call-audio-devices");
+  button.disabled = true;
+  $("#call-audio-bridge-status").textContent = "正在请求麦克风权限并枚举音频设备...";
+  let permissionStream = null;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia || !navigator.mediaDevices?.enumerateDevices) {
+      throw new Error("当前浏览器不支持音频设备枚举");
+    }
+    if (typeof $("#call-uplink-audio").setSinkId !== "function") {
+      throw new Error("当前浏览器不能选择音频输出设备，请使用最新版 Chrome 或 Edge");
+    }
+    permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devices.filter((device) => device.kind === "audioinput" && device.deviceId);
+    const outputs = devices.filter((device) => device.kind === "audiooutput" && device.deviceId);
+    populateAudioDeviceSelect($("#call-audio-modem-input"), inputs, (device) => modemAudioLabelPattern.test(device.label));
+    populateAudioDeviceSelect($("#call-audio-microphone"), inputs, (device) => !modemAudioLabelPattern.test(device.label));
+    populateAudioDeviceSelect($("#call-audio-modem-output"), outputs, (device) => modemAudioLabelPattern.test(device.label));
+    populateAudioDeviceSelect($("#call-audio-speaker"), outputs, (device) => !modemAudioLabelPattern.test(device.label));
+    callAudioDevicesReady = inputs.length >= 2 && outputs.length >= 2;
+    $("#call-audio-bridge-status").textContent = callAudioDevicesReady
+      ? `发现 ${inputs.length} 个输入和 ${outputs.length} 个输出。请核对模块与 Mac 设备后，在通话中连接音频。`
+      : `只发现 ${inputs.length} 个输入和 ${outputs.length} 个输出；双向桥至少需要模块与 Mac 各一个输入、各一个输出。`;
+  } catch (error) {
+    callAudioDevicesReady = false;
+    $("#call-audio-bridge-status").textContent = `音频设备检测失败：${error.message}`;
+  } finally {
+    permissionStream?.getTracks().forEach((track) => track.stop());
+    button.disabled = false;
+    updateCallAudioBridgeControls();
+  }
+}
+
+function updateCallAudioBridgeControls() {
+  const start = $("#start-call-audio");
+  const stop = $("#stop-call-audio");
+  if (!start || !stop) return;
+  start.disabled = callAudioBridgeActive || !callAudioDevicesReady || !activeCallState;
+  stop.disabled = !callAudioBridgeActive;
+  const enable = $("#enable-call-audio");
+  if (enable && !enable.hidden) enable.disabled = Boolean(activeCallState);
+}
+
+function primeCallAudioElement(element) {
+  try {
+    element.muted = true;
+    const play = element.play();
+    if (play?.catch) play.catch(() => {});
+    element.pause();
+    element.muted = false;
+  } catch (_) {
+    element.muted = false;
+  }
+}
+
+function stopCallAudioBridge(message = "音频桥已停止。") {
+  callAudioDownlinkStream?.getTracks().forEach((track) => track.stop());
+  callAudioMicrophoneStream?.getTracks().forEach((track) => track.stop());
+  callAudioDownlinkStream = null;
+  callAudioMicrophoneStream = null;
+  [$("#call-downlink-audio"), $("#call-uplink-audio")].forEach((element) => {
+    try { element.pause(); element.srcObject = null; } catch (_) {}
+  });
+  callAudioBridgeActive = false;
+  $("#call-audio-bridge-status").textContent = message;
+  updateCallAudioBridgeControls();
+}
+
+async function startCallAudioBridge() {
+  if (!activeCallState) {
+    notice("请先拨通或接听电话");
+    return;
+  }
+  const modemInput = $("#call-audio-modem-input").value;
+  const microphone = $("#call-audio-microphone").value;
+  const modemOutput = $("#call-audio-modem-output").value;
+  const speaker = $("#call-audio-speaker").value;
+  if (!modemInput || !microphone || !modemOutput || !speaker) {
+    notice("请先选择四个音频端点");
+    return;
+  }
+  if (modemInput === microphone || modemOutput === speaker) {
+    notice("模块与 Mac 必须选择不同的输入和输出设备");
+    return;
+  }
+  const downlinkAudio = $("#call-downlink-audio");
+  const uplinkAudio = $("#call-uplink-audio");
+  primeCallAudioElement(downlinkAudio);
+  primeCallAudioElement(uplinkAudio);
+  $("#call-audio-bridge-status").textContent = "正在连接模块音频与 Mac 麦克风/播放设备...";
+  try {
+    callAudioDownlinkStream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: modemInput }, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      video: false,
+    });
+    callAudioMicrophoneStream = await navigator.mediaDevices.getUserMedia({
+      audio: { deviceId: { exact: microphone }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      video: false,
+    });
+    await downlinkAudio.setSinkId(speaker);
+    await uplinkAudio.setSinkId(modemOutput);
+    downlinkAudio.srcObject = callAudioDownlinkStream;
+    uplinkAudio.srcObject = callAudioMicrophoneStream;
+    downlinkAudio.volume = Number($("#call-audio-speaker-volume").value);
+    callAudioMicrophoneStream.getAudioTracks().forEach((track) => {
+      track.enabled = !$("#call-audio-microphone-muted").checked;
+    });
+    await Promise.all([downlinkAudio.play(), uplinkAudio.play()]);
+    callAudioBridgeActive = true;
+    $("#call-audio-bridge-status").textContent = "通话音频已连接：模块下行正在播放，Mac 麦克风正在发送到模块。";
+  } catch (error) {
+    stopCallAudioBridge(`连接音频失败：${error.message}`);
+  }
+  updateCallAudioBridgeControls();
 }
 
 function profileRows(value) {
@@ -1136,6 +1427,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     if (tab.dataset.view === "calls") {
       loadCalls();
       loadBarkSettings("call");
+      if (!callAudioCapability) loadCallAudioCapability();
     }
   });
 });
@@ -1190,6 +1482,41 @@ $("#test-sms-bark").addEventListener("click", () => testBarkSettings("sms"));
 $("#call-bark-settings-form").addEventListener("submit", (event) => saveBarkSettings(event, "call"));
 $("#test-call-bark").addEventListener("click", () => testBarkSettings("call"));
 $("#refresh-calls").addEventListener("click", loadCalls);
+$("#call-dial-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await performCallControl(
+    "/api/calls/dial",
+    { method: "POST", body: JSON.stringify({ number: $("#call-number").value.trim() }) },
+    "正在发起外呼...",
+    "拨号指令已发送",
+  );
+});
+$("#answer-call").addEventListener("click", () => performCallControl(
+  "/api/calls/answer", { method: "POST" }, "正在接听来电...", "接听指令已发送",
+));
+$("#hangup-call").addEventListener("click", () => {
+  const incoming = activeCallState?.state === "incoming" || activeCallState?.state === "waiting";
+  return performCallControl(
+    "/api/calls/hangup",
+    { method: "POST" },
+    incoming ? "正在拒接来电..." : "正在挂断通话...",
+    incoming ? "来电已拒接" : "通话已挂断",
+  );
+});
+$("#probe-call-audio").addEventListener("click", loadCallAudioCapability);
+$("#enable-call-audio").addEventListener("click", enableModuleCallAudio);
+$("#detect-call-audio-devices").addEventListener("click", detectCallAudioDevices);
+$("#start-call-audio").addEventListener("click", startCallAudioBridge);
+$("#stop-call-audio").addEventListener("click", () => stopCallAudioBridge());
+$("#call-audio-speaker-volume").addEventListener("input", (event) => {
+  $("#call-downlink-audio").volume = Number(event.currentTarget.value);
+});
+$("#call-audio-microphone-muted").addEventListener("change", (event) => {
+  callAudioMicrophoneStream?.getAudioTracks().forEach((track) => {
+    track.enabled = !event.currentTarget.checked;
+  });
+});
+window.addEventListener("beforeunload", () => stopCallAudioBridge(""));
 
 $("#at-form").addEventListener("submit", async (event) => {
   event.preventDefault();

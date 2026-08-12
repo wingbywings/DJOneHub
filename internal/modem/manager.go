@@ -865,7 +865,6 @@ func (m *Manager) initModem() {
 		"AT+CMGF=0",         // PDU 模式
 		"AT+CNMI=2,1,0,0,0", // 新短信上报 +CMTI
 		"AT+CLIP=1",         // 启用来电号码显示 (+CLIP URC)
-		"AT+QPCMV=1,2",      // 开启 UAC 语音模式 (PCM → ALSA 桥接必须)
 	}
 
 	for _, cmd := range initCmds {
@@ -2173,8 +2172,9 @@ func (m *Manager) CancelUSSD() {
 	}
 }
 
-// CheckAndEnableUAC 查询并确保开启 USB Audio Class (UAC) 接口
-// 许多 Quectel 模块需要 AT+QCFG="USBCFG" 最后一位为 1 才能在系统枚举出声卡
+// CheckAndEnableUAC 查询并确保开启 USB Audio Class (UAC) 接口。
+// Quectel 文档规定 VID/PID 后第 7 个 USB 功能参数才是 UAC；只有 6 个功能
+// 参数的固件不支持通过 AT 开启 UAC，不能把其最后一项误改成 UAC。
 // 返回 modified(bool) 表示是否发生了配置更改，如果发生了更改，必须重启才能生效
 func (m *Manager) CheckAndEnableUAC() (bool, error) {
 	resp, err := m.ExecuteAT(`AT+QCFG="USBCFG"?`, 3*time.Second)
@@ -2197,15 +2197,15 @@ func (m *Manager) CheckAndEnableUAC() (bool, error) {
 
 	// line 例: "usbcfg",0x2C7C,0x0125,1,1,1,1,1,0,0
 	parts := strings.Split(line, ",")
-	if len(parts) < 8 {
-		return false, nil // 参数过少跳过
+	const uacPartIndex = 9 // command name + VID + PID + the seventh USB function
+	if len(parts) <= uacPartIndex {
+		return false, fmt.Errorf("USBCFG 仅包含 %d 个 USB 功能参数，固件不支持通过 AT 开启 UAC", max(0, len(parts)-3))
 	}
 
-	lastIdx := len(parts) - 1
-	lastVal := strings.TrimSpace(parts[lastIdx])
+	uacValue := strings.TrimSpace(parts[uacPartIndex])
 
-	if lastVal == "0" {
-		parts[lastIdx] = "1"
+	if uacValue == "0" {
+		parts[uacPartIndex] = "1"
 		newArgs := strings.Join(parts, ",")
 		newCmd := fmt.Sprintf(`AT+QCFG=%s`, newArgs)
 		logger.Info(fmt.Sprintf("[%s] 检测到 UAC 接口未开启，正在通过 %s 执行开启", m.cfg.ID, newCmd))
@@ -2214,8 +2214,10 @@ func (m *Manager) CheckAndEnableUAC() (bool, error) {
 			return false, fmt.Errorf("动态开启 UAC 失败: %w", err)
 		}
 		return true, nil
+	} else if uacValue == "1" {
+		logger.Debug(fmt.Sprintf("[%s] UAC 接口已处于开启状态 (%s)，无需重启", m.cfg.ID, uacValue))
 	} else {
-		logger.Debug(fmt.Sprintf("[%s] UAC 接口已处于开启状态 (%s)，无需重启", m.cfg.ID, lastVal))
+		return false, fmt.Errorf("USBCFG UAC 参数值无法识别: %q", uacValue)
 	}
 	return false, nil
 }
