@@ -103,10 +103,11 @@ AT+QGMR   -> QDC507GLEFM21_01.001.02.004
 QPCMV=?   -> +QPCMV: (0,1),(0-2) / OK
 QPCMV?    -> ERROR
 QPCMV=1,2 -> ERROR
+QPCMV=1,0 -> ERROR（2026-08-13 单次真机探测，模块随后仍正常响应 AT）
 USBCFG    -> 0x2CA3,0x4006,...,1（7 个功能参数，UAC 位为 1）
 ```
 
-这表明该固件仅在命令表中保留了 QPCMV 声明，并未开放运行状态读写。DJOneHub 将其标记为 `uac_runtime_control_unavailable`，保留拨号/接听/挂断信令，不再显示 UAC 启用操作。更换 VID/PID 不会改变固件内部命令实现，不能作为音频修复方案。
+这表明该固件仅在命令表中保留了 QPCMV 声明，并未开放运行状态读写。UAC mode 2 和 USB NMEA 串口 PCM mode 0 都不可用。DJOneHub 将其标记为 `uac_runtime_control_unavailable`，保留拨号/接听/挂断信令，不再显示 UAC 启用操作。更换 VID/PID 不会改变固件内部命令实现，不能作为音频修复方案。
 
 Quectel 技术支持已公开说明 `QDC507GLEFM21` 并非 Quectel 开发的固件，应联系设备供应商获取匹配固件。禁止把标准 EG25 固件直接刷入 QDC507；已有公开案例因此进入 9008/循环重启状态。
 
