@@ -86,16 +86,20 @@ type fakeProfileOperationTransmitter struct {
 	listCalls          *atomic.Int32
 	eid                []byte
 	onProfileOperation func()
+	profileOperation   func(*sgp22.ProfileOperationRequest) error
 }
 
 func (f fakeProfileOperationTransmitter) Transmit(request bertlv.Marshaler, response bertlv.Unmarshaler) error {
-	switch request.(type) {
+	switch req := request.(type) {
 	case *sgp22.ProfileOperationRequest:
 		if f.calls != nil {
 			f.calls.Add(1)
 		}
 		if f.onProfileOperation != nil {
 			f.onProfileOperation()
+		}
+		if f.profileOperation != nil {
+			return f.profileOperation(req)
 		}
 		return f.err
 	case *sgp22.ProfileInfoListRequest:
@@ -233,6 +237,15 @@ func mustDecodeHex(t *testing.T, value string) []byte {
 		t.Fatalf("DecodeString(%q) error=%v", value, err)
 	}
 	return out
+}
+
+func TestBasicProfileTagsIncludeISDPAID(t *testing.T) {
+	for _, tag := range basicProfileTags {
+		if tag.Equal(sgp22.TagISDPAID) {
+			return
+		}
+	}
+	t.Fatal("basicProfileTags does not request ISD-P AID")
 }
 
 func TestEUICCSpecConstantsAreStable(t *testing.T) {
@@ -2121,6 +2134,70 @@ func TestDeleteProfileReturnsZeroWarningResultForInvalidICCID(t *testing.T) {
 	}
 	if result.Warning != "" || result.WarningCode != "" {
 		t.Fatalf("result=%#v want zero warning result on hard error", result)
+	}
+}
+
+func TestDeleteProfileWithIdentifierFallbackRetriesWithISDPAID(t *testing.T) {
+	const targetICCID = "89852242410000049620"
+	rawICCID := mustTestICCID(t, targetICCID)
+	isdpAID := sgp22.ISDPAID(mustDecodeHex(t, "A0000005591010FFFFFFFF8900001200"))
+	var identifiers []*bertlv.TLV
+	transmitter := fakeProfileOperationTransmitter{
+		profiles: []*sgp22.ProfileInfo{{ICCID: rawICCID, ISDPAID: isdpAID}},
+		profileOperation: func(req *sgp22.ProfileOperationRequest) error {
+			identifiers = append(identifiers, req.Identifier)
+			if len(identifiers) == 1 {
+				return &sgp22.ProfileOperationError{
+					Operation: sgp22.DeleteProfile,
+					Result:    sgp22.ProfileOperationResultICCIDOrAIDNotFound,
+				}
+			}
+			return nil
+		},
+	}
+	mgr := newTestManagerWithOverviewLoader(nil)
+	client := &lpa.Client{APDU: transmitter}
+
+	err := mgr.deleteProfileWithIdentifierFallback(client, targetICCID, rawICCID)
+	if err != nil {
+		t.Fatalf("deleteProfileWithIdentifierFallback() error=%v", err)
+	}
+	if len(identifiers) != 2 {
+		t.Fatalf("delete identifiers=%d want 2", len(identifiers))
+	}
+	if !identifiers[0].Tag.Equal(sgp22.TagICCID) || !bytes.Equal(identifiers[0].Value, rawICCID) {
+		t.Fatalf("first identifier=%#v want raw ICCID", identifiers[0])
+	}
+	if !identifiers[1].Tag.Equal(sgp22.TagISDPAID) || !bytes.Equal(identifiers[1].Value, isdpAID) {
+		t.Fatalf("second identifier=%#v want ISD-P AID %X", identifiers[1], isdpAID)
+	}
+}
+
+func TestDeleteProfileWithIdentifierFallbackDoesNotRetryOtherErrors(t *testing.T) {
+	const targetICCID = "89852242410000049620"
+	rawICCID := mustTestICCID(t, targetICCID)
+	isdpAID := sgp22.ISDPAID(mustDecodeHex(t, "A0000005591010FFFFFFFF8900001200"))
+	var calls atomic.Int32
+	wantErr := &sgp22.ProfileOperationError{
+		Operation: sgp22.DeleteProfile,
+		Result:    sgp22.ProfileOperationResultDisallowedByPolicy,
+	}
+	transmitter := fakeProfileOperationTransmitter{
+		profiles: []*sgp22.ProfileInfo{{ICCID: rawICCID, ISDPAID: isdpAID}},
+		profileOperation: func(req *sgp22.ProfileOperationRequest) error {
+			calls.Add(1)
+			return wantErr
+		},
+	}
+	mgr := newTestManagerWithOverviewLoader(nil)
+	client := &lpa.Client{APDU: transmitter}
+
+	err := mgr.deleteProfileWithIdentifierFallback(client, targetICCID, rawICCID)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("deleteProfileWithIdentifierFallback() error=%v want %v", err, wantErr)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("delete calls=%d want 1", calls.Load())
 	}
 }
 

@@ -391,6 +391,7 @@ var (
 // 避免 ListProfile 发送几十条 APDU 以及长时间的数据传输。
 var basicProfileTags = []bertlv.Tag{
 	sgp22.TagICCID,
+	sgp22.TagISDPAID,
 	sgp22.TagProfileState,
 	sgp22.TagNickname,
 	sgp22.TagServiceProviderName,
@@ -1903,6 +1904,61 @@ func normalizeICCIDValue(in string) string {
 	return v
 }
 
+func isDeleteProfileIdentifierNotFound(err error) bool {
+	var operationErr *sgp22.ProfileOperationError
+	return errors.As(err, &operationErr) &&
+		operationErr.Operation == sgp22.DeleteProfile &&
+		operationErr.Result == sgp22.ProfileOperationResultICCIDOrAIDNotFound
+}
+
+// deleteProfileWithIdentifierFallback preserves the exact ICCID bytes returned
+// by the eUICC and falls back to the profile's ISD-P AID for cards whose firmware
+// cannot address a profile by ICCID. The fallback is safe only after the card has
+// explicitly reported that the ICCID/AID was not found.
+func (m *Manager) deleteProfileWithIdentifierFallback(client *lpa.Client, targetICCID string, requestedICCID sgp22.ICCID) error {
+	deleteICCID := append(sgp22.ICCID(nil), requestedICCID...)
+	var isdpAID sgp22.ISDPAID
+
+	profiles, listErr := listBasicProfiles(client)
+	if listErr != nil {
+		logger.Warn("删除 Profile 前读取卡片标识失败，将使用请求 ICCID",
+			"device", m.deviceID,
+			"ICCID", targetICCID,
+			"err", listErr)
+	} else {
+		target := normalizeICCIDValue(targetICCID)
+		for _, profile := range profiles {
+			if profile == nil || normalizeICCIDValue(profile.ICCID.String()) != target {
+				continue
+			}
+			deleteICCID = append(sgp22.ICCID(nil), profile.ICCID...)
+			isdpAID = append(sgp22.ISDPAID(nil), profile.ISDPAID...)
+			break
+		}
+	}
+
+	primaryErr := client.DeleteProfile(deleteICCID)
+	if primaryErr == nil {
+		return nil
+	}
+	if !isDeleteProfileIdentifierNotFound(primaryErr) || len(isdpAID) == 0 {
+		return primaryErr
+	}
+
+	logger.Warn("使用 ICCID 删除 Profile 未找到目标，改用 ISD-P AID 重试",
+		"device", m.deviceID,
+		"ICCID", targetICCID,
+		"ISDP_AID", isdpAID.String())
+	if fallbackErr := client.DeleteProfile(isdpAID); fallbackErr != nil {
+		return fmt.Errorf("使用 ICCID 删除失败 (%v)，改用 ISD-P AID 重试仍失败: %w", primaryErr, fallbackErr)
+	}
+	logger.Info("使用 ISD-P AID 删除 eSIM profile 成功",
+		"device", m.deviceID,
+		"ICCID", targetICCID,
+		"ISDP_AID", isdpAID.String())
+	return nil
+}
+
 func isTargetICCIDActive(targetICCID string, currentICCID string) bool {
 	target := normalizeICCIDValue(targetICCID)
 	current := normalizeICCIDValue(currentICCID)
@@ -3340,10 +3396,16 @@ func (m *Manager) DeleteProfile(targetICCID string, aidHex string) (DeleteProfil
 		}
 	}
 
-	if err := client.DeleteProfile(iccid); err != nil {
+	if err := m.deleteProfileWithIdentifierFallback(client, targetICCID, iccid); err != nil {
+		code := DeleteProfileErrorInternal
+		message := fmt.Sprintf("删除 profile %s 失败: %v", targetICCID, err)
+		if isDeleteProfileIdentifierNotFound(err) {
+			code = DeleteProfileErrorProfileNotFound
+			message = fmt.Sprintf("卡片无法定位 profile %s: %v", targetICCID, err)
+		}
 		return DeleteProfileResult{}, NewDeleteProfileError(
-			DeleteProfileErrorInternal,
-			fmt.Sprintf("删除 profile %s 失败: %v", targetICCID, err),
+			code,
+			message,
 			err,
 		)
 	}

@@ -1211,13 +1211,15 @@ document.querySelectorAll(".tab").forEach((tab) => {
 
 $("#esim-download-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  // currentTarget is only populated while the submit event is being handled;
+  // retain the button before awaiting the confirmation dialog.
+  const button = event.submitter || event.currentTarget.querySelector("button[type=submit]");
   const confirmed = await showModal({
     title: "下载新的 Profile",
     message: "将向 SM-DP+ 服务器下载并写入新的 eSIM Profile。写入期间请勿拔出模块。",
     confirmLabel: "开始下载",
   });
   if (!confirmed) return;
-  const button = event.currentTarget.querySelector("button[type=submit]");
   const status = $("#esim-download-status");
   button.disabled = true;
   status.textContent = "正在下载并写入 Profile，请勿拔出模块...";

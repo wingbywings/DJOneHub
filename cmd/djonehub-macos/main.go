@@ -2438,7 +2438,16 @@ func (a *app) deleteESIMProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := esimManager.DeleteProfile(body.ICCID, body.AID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, fmt.Sprintf("删除 Profile 失败: %v", err))
+		status := http.StatusBadGateway
+		switch {
+		case esim.IsDeleteProfileInvalidInput(err):
+			status = http.StatusBadRequest
+		case esim.IsDeleteProfileNotFound(err):
+			status = http.StatusNotFound
+		case esim.IsDeleteProfileBusy(err):
+			status = http.StatusConflict
+		}
+		writeError(w, status, fmt.Sprintf("删除 Profile 失败: %v", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
