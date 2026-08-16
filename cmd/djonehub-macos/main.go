@@ -1356,6 +1356,9 @@ func (a *app) sendUSBATSMS(phone, message string) (int, error) {
 	if a.usbAT == nil {
 		return 0, errors.New("AT serial port is unavailable")
 	}
+	if err := a.checkUSBATSMSTransport(); err != nil {
+		return 0, err
+	}
 
 	modeResponse, err := a.usbAT.Command("AT+CMGF=0", 5*time.Second)
 	if err != nil {
@@ -1376,11 +1379,11 @@ func (a *app) sendUSBATSMS(phone, message string) (int, error) {
 		response, sendErr := a.usbAT.CommandWithPrompt(
 			fmt.Sprintf("AT+CMGS=%d", tpduLengths[i]),
 			payload,
-			45*time.Second,
+			125*time.Second,
 		)
 		if sendErr != nil {
 			a.resetUSBATIfGone(sendErr)
-			return i, fmt.Errorf("send SMS segment %d/%d: %w", i+1, len(tpdus), sendErr)
+			return i, fmt.Errorf("send SMS segment %d/%d: %w (AT response: %q)", i+1, len(tpdus), sendErr, response)
 		}
 		if atResponseIsError(response) || !strings.Contains(response, "+CMGS:") || !atProbeSucceeded(response) {
 			return i, fmt.Errorf("send SMS segment %d/%d failed: %s", i+1, len(tpdus), response)
@@ -1390,6 +1393,58 @@ func (a *app) sendUSBATSMS(phone, message string) (int, error) {
 		}
 	}
 	return len(tpdus), nil
+}
+
+// checkUSBATSMSTransport rejects only a positively identified unavailable
+// transport. Unsupported or failed diagnostic commands are treated as
+// inconclusive so older firmware can still attempt AT+CMGS.
+func (a *app) checkUSBATSMSTransport() error {
+	cregResponse, cregErr := a.usbAT.Command("AT+CREG?", 3*time.Second)
+	imsResponse, imsErr := a.usbAT.Command(`AT+QCFG="ims"`, 3*time.Second)
+	if cregErr != nil || imsErr != nil {
+		return nil
+	}
+	return usbATSMSTransportError(cregResponse, imsResponse)
+}
+
+func usbATSMSTransportError(cregResponse, imsResponse string) error {
+	cregStatus, cregKnown := parseUSBATRegistration(cregResponse, "CREG")
+	_, volteCapable, imsKnown := parseUSBATIMSConfiguration(imsResponse)
+	if cregKnown && cregStatus == 3 && imsKnown && !volteCapable {
+		return errors.New("短信承载不可用：电路域注册被拒绝（CREG=3），且 IMS/VoLTE 未启用；请检查运营商 MBN 是否与当前 SIM/eSIM Profile 匹配")
+	}
+	return nil
+}
+
+func parseUSBATRegistration(response, domain string) (int, bool) {
+	domain = strings.ToUpper(strings.TrimSpace(domain))
+	if domain != "CREG" && domain != "CGREG" && domain != "CEREG" {
+		return 0, false
+	}
+	re := regexp.MustCompile(`\+` + domain + `:\s*\d+,(\d+)`)
+	match := re.FindStringSubmatch(strings.ToUpper(response))
+	if len(match) != 2 {
+		return 0, false
+	}
+	status, err := strconv.Atoi(match[1])
+	return status, err == nil
+}
+
+func parseUSBATIMSConfiguration(response string) (configured int, volteCapable bool, ok bool) {
+	re := regexp.MustCompile(`(?i)\+QCFG:\s*"ims",\s*(\d+),\s*(\d+)`)
+	match := re.FindStringSubmatch(response)
+	if len(match) != 3 {
+		return 0, false, false
+	}
+	configured, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, false, false
+	}
+	volte, err := strconv.Atoi(match[2])
+	if err != nil {
+		return 0, false, false
+	}
+	return configured, volte == 1, true
 }
 
 func smsSubmitOptions(message string) smscodec.SubmitOptions {

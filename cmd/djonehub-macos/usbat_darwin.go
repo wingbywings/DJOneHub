@@ -345,7 +345,15 @@ func (u *usbAT) CommandWithPrompt(cmd string, followUp []byte, timeout time.Dura
 		return "", err
 	}
 
-	deadline := time.Now().Add(timeout)
+	// The prompt should arrive quickly. The final result, however, can take as
+	// long as the network-controlled timeout for commands such as AT+CMGS.
+	// Give each phase its own deadline so time spent waiting for the prompt does
+	// not shorten the network submission window.
+	promptTimeout := 10 * time.Second
+	if timeout < promptTimeout {
+		promptTimeout = timeout
+	}
+	deadline := time.Now().Add(promptTimeout)
 	var response strings.Builder
 	promptReceived := false
 	for time.Now().Before(deadline) {
@@ -377,6 +385,7 @@ func (u *usbAT) CommandWithPrompt(cmd string, followUp []byte, timeout time.Dura
 				return normalizeATResponse(joined), err
 			}
 			promptReceived = true
+			deadline = time.Now().Add(timeout)
 			continue
 		}
 
@@ -385,14 +394,17 @@ func (u *usbAT) CommandWithPrompt(cmd string, followUp []byte, timeout time.Dura
 		}
 	}
 
-	if promptReceived {
-		// ESC cancels a pending message editor on modems that still accept input.
-		_ = u.bulkWriteLocked(u.endpointOut, []byte{0x1b}, 300*time.Millisecond)
-	}
 	if response.Len() == 0 {
-		return "", errors.New("USB interactive AT command timed out without response")
+		return "", errors.New("USB interactive AT command timed out waiting for prompt without response")
 	}
-	return normalizeATResponse(response.String()), errors.New("USB interactive AT command timed out before completion")
+	normalized := normalizeATResponse(response.String())
+	if !promptReceived {
+		return normalized, errors.New("USB interactive AT command timed out waiting for prompt")
+	}
+	// followUp may already end in Ctrl+Z. ESC is only defined as cancelling the
+	// editor before submission, so do not inject it while the modem is waiting
+	// for the network's final result.
+	return normalized, errors.New("USB interactive AT command timed out waiting for final result")
 }
 
 var errUSBTimeout = errors.New("usb timeout")
