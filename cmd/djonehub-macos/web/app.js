@@ -6,6 +6,11 @@ let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
 let callPollInFlight = false;
+let voiceSetupInFlight = false;
+let currentVoiceSetup = {};
+let adbPasscodeContext = "";
+let currentCallState = null;
+let currentAudioHostState = {};
 let activeDeviceID = localStorage.getItem("djonehub-active-device") || "";
 let knownDevices = [];
 
@@ -74,7 +79,9 @@ async function api(path, options = {}) {
 }
 
 function deviceOptionLabel(device) {
-  const state = device.state === "ready" ? "在线" : "离线";
+  const state = device.state === "ready"
+    ? "在线"
+    : (device.state === "reconnecting" ? "重新连接中" : "离线");
   const identity = device.imei_masked || device.physical_id || "未识别";
   return `${device.alias || "未命名模块"} · ${state} · ${identity}`;
 }
@@ -85,7 +92,10 @@ async function loadDevices({ refreshCurrent = false, refreshOnChange = true } = 
     const devices = await api("/api/devices");
     knownDevices = Array.isArray(devices) ? devices : [];
     const ready = knownDevices.filter((device) => device.state === "ready");
-    if (!ready.some((device) => device.id === activeDeviceID)) {
+    const activeIsKnown = knownDevices.some((device) => device.id === activeDeviceID);
+    // Preserve selection while a module briefly re-enumerates. Switching to a
+    // different ready module here would make the UI appear to cross devices.
+    if (!activeIsKnown) {
       activeDeviceID = ready[0]?.id || "";
       if (activeDeviceID) localStorage.setItem("djonehub-active-device", activeDeviceID);
       else localStorage.removeItem("djonehub-active-device");
@@ -492,6 +502,8 @@ async function loadCalls() {
   try {
     const status = await api("/api/calls/status");
     const active = status.active;
+    const audioHost = status.audio_host || {};
+    currentAudioHostState = audioHost;
     const panel = $("#active-call");
     const pollText = status.polling
       ? `每 ${status.poll_interval_s || 3} 秒检查`
@@ -500,18 +512,94 @@ async function loadCalls() {
       ? `${pollText} · ${status.last_poll_error}`
       : `${pollText} · 监听正常`;
     if (active) {
+      currentCallState = active.state || null;
       panel.hidden = false;
       $("#active-call-label").textContent = callStateLabel(active);
       $("#active-call-number").textContent = active.number || "未知号码";
       $("#active-call-time").textContent = new Date(active.started_at).toLocaleString();
+      const ringing = active.state === "incoming" || active.state === "waiting";
+      $("#answer-call").hidden = !ringing;
+      $("#reject-call").hidden = !ringing;
+      $("#hangup-call").hidden = false;
+      $("#dtmf-panel").hidden = active.state !== "active";
+      const mediaActive = active.state === "active" && audioHost.registered;
+      $("#mute-call").hidden = !mediaActive;
+      $("#record-call").hidden = !mediaActive;
+      $("#mute-call").textContent = audioHost.want_muted ? "取消静音" : "静音";
+      $("#record-call").textContent = audioHost.want_recording ? "停止录音" : "录音";
+      $("#dial-call").disabled = true;
     } else {
+      currentCallState = null;
       panel.hidden = true;
+      $("#answer-call").hidden = true;
+      $("#reject-call").hidden = true;
+      $("#hangup-call").hidden = true;
+      $("#dtmf-panel").hidden = true;
+      $("#mute-call").hidden = true;
+      $("#record-call").hidden = true;
+      $("#dial-call").disabled = false;
     }
+    $("#audio-host-status").textContent = audioHost.registered
+      ? (audioHost.running
+        ? `Mac 双向音频已连接${audioHost.recording_path ? ` · 录音：${audioHost.recording_path}` : ""}`
+        : `Mac 音频宿主在线${audioHost.error ? ` · ${audioHost.error}` : "，等待通话媒体"}`)
+      : "Mac 音频宿主尚未连接；发行包请用 djonehub start，源码运行需同时启动 DJOneHubAudioHost";
     renderCallHistory(status.history);
   } catch (error) {
     $("#call-monitor-status").textContent = `监听异常：${error.message}`;
   } finally {
     callPollInFlight = false;
+  }
+  void loadVoiceSetup();
+}
+
+async function loadVoiceSetup() {
+  if (voiceSetupInFlight) return;
+  voiceSetupInFlight = true;
+  const summary = $("#voice-setup-summary");
+  const detail = $("#voice-setup-detail");
+  const initializeButton = $("#initialize-voice-module");
+  const installButton = $("#install-voice-runtime");
+  try {
+    const [setup, voice] = await Promise.all([
+      api("/api/module/setup"),
+      api("/api/voice/status"),
+    ]);
+    const setupText = setup.summary || setup.state || "模块配置状态未知";
+    const nextPasscodeContext = setup.requires_adb_passcode
+      ? `${activeDeviceID}:${setup.adb_challenge || "unknown"}`
+      : "";
+    if (nextPasscodeContext !== adbPasscodeContext) $("#adb-passcode").value = "";
+    adbPasscodeContext = nextPasscodeContext;
+    currentVoiceSetup = setup;
+    const runtimeText = voice.runtime_installed
+      ? (voice.ready
+        ? "模块语音路由运行中"
+        : (voice.preparing
+          ? "正在空闲预热 ADB 与 ACDB"
+          : (voice.prepared ? "ADB 与 ACDB 已准备" : "语音运行时已校验")))
+      : "语音运行时尚未安装";
+    summary.textContent = `${setupText} · ${runtimeText}`;
+    detail.textContent = [setup.detail, voice.last_error || voice.detail || voice.runtime_detail].filter(Boolean).join("；");
+    initializeButton.hidden = !setup.can_initialize;
+    initializeButton.disabled = ["initializing", "restarting", "verifying", "rolling_back"].includes(setup.state);
+    initializeButton.textContent = setup.requires_adb_passcode ? "解锁 ADB 并完成配置" : "初始化模块";
+    $("#adb-passcode-field").hidden = !setup.requires_adb_passcode;
+    $("#adb-challenge").textContent = setup.adb_challenge
+      ? `当前 challenge：${setup.adb_challenge}。passcode 仅提交给当前模块，不会保存。`
+      : "passcode 仅提交给当前模块，不会保存。";
+    installButton.hidden = Boolean(voice.runtime_installed);
+  } catch (error) {
+    summary.textContent = `语音准备状态读取失败：${error.message}`;
+    detail.textContent = "";
+    currentVoiceSetup = {};
+    adbPasscodeContext = "";
+    $("#adb-passcode").value = "";
+    $("#adb-passcode-field").hidden = true;
+    initializeButton.hidden = true;
+    installButton.hidden = true;
+  } finally {
+    voiceSetupInFlight = false;
   }
 }
 
@@ -1261,6 +1349,118 @@ $("#test-sms-bark").addEventListener("click", () => testBarkSettings("sms"));
 $("#call-bark-settings-form").addEventListener("submit", (event) => saveBarkSettings(event, "call"));
 $("#test-call-bark").addEventListener("click", () => testBarkSettings("call"));
 $("#refresh-calls").addEventListener("click", loadCalls);
+
+$("#initialize-voice-module").addEventListener("click", async () => {
+  const requiresPasscode = Boolean(currentVoiceSetup.requires_adb_passcode);
+  const passcodeInput = $("#adb-passcode");
+  const adbPasscode = passcodeInput.value.trim();
+  if (requiresPasscode && !adbPasscode) {
+    notice("请输入 Quectel 官方提供的 QADBKEY passcode");
+    passcodeInput.focus();
+    return;
+  }
+  const confirmed = await showModal({
+    title: requiresPasscode ? "解锁模块 ADB" : "初始化模块语音支持",
+    message: requiresPasscode
+      ? `将为 challenge ${currentVoiceSetup.adb_challenge || "未知"} 提交官方 passcode，再启用 ADB、USB Audio、IMS 与 VoLTE。passcode 不会保存或显示在日志中。模块随后会重启。`
+      : "将先按当前 Device ID 备份 USB、IMS 与 VoLTE 配置，再写入并回读验证。模块会重启；失败时自动恢复全部原始配置。",
+    confirmLabel: requiresPasscode ? "确认解锁并重启" : "确认备份并初始化",
+    danger: true,
+  });
+  if (!confirmed) return;
+  const button = $("#initialize-voice-module");
+  button.disabled = true;
+  try {
+    await api("/api/module/setup", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true, ...(requiresPasscode ? { adb_passcode: adbPasscode } : {}) }),
+    });
+    passcodeInput.value = "";
+    notice("初始化已开始，正在等待模块重新连接");
+    await loadVoiceSetup();
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("#install-voice-runtime").addEventListener("click", async () => {
+  const confirmed = await showModal({
+    title: "安装模块侧语音运行时",
+    message: "将从固定的 MaVo 上游提交下载三个模块文件。每个文件必须通过内置 SHA-256 校验才会保存，不会写入未校验内容。",
+    confirmLabel: "确认下载并校验",
+  });
+  if (!confirmed) return;
+  const button = $("#install-voice-runtime");
+  button.disabled = true;
+  try {
+    await api("/api/voice/provision", { method: "POST", body: JSON.stringify({ confirm: true }) });
+    notice("语音运行时已下载并校验");
+    await loadVoiceSetup();
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+async function runCallAction(button, path, successMessage, body) {
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  try {
+    await api(path, {
+      method: "POST",
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    notice(successMessage);
+    await loadCalls();
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    button.disabled = button.id === "dial-call" && currentCallState !== null;
+    button.textContent = originalLabel;
+  }
+}
+
+$("#dial-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const number = $("#dial-number").value.trim();
+  if (!number) {
+    notice("请输入电话号码");
+    return;
+  }
+  const button = $("#dial-call");
+  await runCallAction(button, "/api/calls/dial", `正在拨打 ${number}`, { number });
+  if (currentCallState) $("#dial-number").value = "";
+});
+
+$("#answer-call").addEventListener("click", () =>
+  runCallAction($("#answer-call"), "/api/calls/answer", "已发送接听命令"));
+$("#reject-call").addEventListener("click", () =>
+  runCallAction($("#reject-call"), "/api/calls/reject", "已拒接来电"));
+$("#hangup-call").addEventListener("click", () =>
+  runCallAction($("#hangup-call"), "/api/calls/hangup", "已发送挂断命令"));
+
+$("#mute-call").addEventListener("click", async () => {
+  await runCallAction($("#mute-call"), "/api/calls/audio/mute", currentAudioHostState.want_muted ? "已取消静音" : "已静音", {
+    muted: !currentAudioHostState.want_muted,
+  });
+});
+
+$("#record-call").addEventListener("click", async () => {
+  await runCallAction($("#record-call"), "/api/calls/audio/record", currentAudioHostState.want_recording ? "录音已停止" : "录音已开始", {
+    enabled: !currentAudioHostState.want_recording,
+  });
+});
+
+$("#dtmf-pad").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-dtmf]");
+  if (!button) return;
+  await runCallAction(button, "/api/calls/dtmf", `已发送按键 ${button.dataset.dtmf}`, {
+    digit: button.dataset.dtmf,
+  });
+});
 
 $("#at-form").addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -33,6 +33,10 @@ if ! command -v pkg-config >/dev/null 2>&1; then
   echo "pkg-config is required on the build Mac." >&2
   exit 1
 fi
+if ! command -v swift >/dev/null 2>&1; then
+  echo "Swift is required to build the macOS audio host." >&2
+  exit 1
+fi
 
 rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}/bin" "${STAGE_DIR}/lib" "${STAGE_DIR}/licenses"
@@ -99,6 +103,16 @@ MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build \
   -trimpath -buildvcs=false -ldflags="-s -w" \
   -o "${STAGE_DIR}/bin/djonehub-macos" ./cmd/djonehub-macos
 
+SWIFT_BUILD_DIR="${BUILD_ROOT}/swift-audio-host"
+rm -rf "${SWIFT_BUILD_DIR}"
+CLANG_MODULE_CACHE_PATH="${BUILD_ROOT}/clang-module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="${BUILD_ROOT}/swift-module-cache" \
+swift build \
+  --package-path "${ROOT_DIR}/macos/DJOneHubAudioHost" \
+  --scratch-path "${SWIFT_BUILD_DIR}" \
+  -c release
+cp "${SWIFT_BUILD_DIR}/release/DJOneHubAudioHost" "${STAGE_DIR}/bin/djonehub-audio-host"
+
 cp "${LIBUSB_PREFIX}/lib/libusb-1.0.0.dylib" "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 cp "${ROOT_DIR}/packaging/djonehub" "${STAGE_DIR}/djonehub"
 cp "${ROOT_DIR}/packaging/install" "${STAGE_DIR}/install"
@@ -107,9 +121,10 @@ cp "${ROOT_DIR}/LICENSE" "${STAGE_DIR}/LICENSE"
 cp "${LIBUSB_SOURCE}/COPYING" "${STAGE_DIR}/licenses/libusb-COPYING"
 cp "${ROOT_DIR}/packaging/THIRD_PARTY_NOTICES.md" "${STAGE_DIR}/THIRD_PARTY_NOTICES.md"
 
-chmod 755 "${STAGE_DIR}/djonehub" "${STAGE_DIR}/install" "${STAGE_DIR}/bin/djonehub-macos" "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
+chmod 755 "${STAGE_DIR}/djonehub" "${STAGE_DIR}/install" "${STAGE_DIR}/bin/djonehub-macos" "${STAGE_DIR}/bin/djonehub-audio-host" "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 codesign --force --sign - "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 codesign --force --sign - "${STAGE_DIR}/bin/djonehub-macos"
+codesign --force --sign - "${STAGE_DIR}/bin/djonehub-audio-host"
 
 if otool -L "${STAGE_DIR}/bin/djonehub-macos" | grep -q '/opt/homebrew\|/usr/local\|/Cellar/'; then
   echo "Release binary still contains a package-manager dependency." >&2

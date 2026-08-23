@@ -24,17 +24,20 @@ import (
 )
 
 type managedUSBDevice struct {
-	ID          string
-	Alias       string
-	IMEI        string
-	PhysicalID  string
-	State       string
-	Error       string
-	Runtime     *app
-	Cancel      context.CancelFunc
-	LastSeen    time.Time
-	LastAttempt time.Time
-	USB         *usbDeviceStatus
+	ID           string
+	Alias        string
+	IMEI         string
+	PhysicalID   string
+	State        string
+	Error        string
+	Runtime      *app
+	Cancel       context.CancelFunc
+	LastSeen     time.Time
+	LastAttempt  time.Time
+	MissingSince time.Time
+	Generation   uint64
+	Locator      usbDeviceLocator
+	USB          *usbDeviceStatus
 }
 
 type usbDeviceHub struct {
@@ -46,6 +49,7 @@ type usbDeviceHub struct {
 	aliasesPath           string
 	legacySettingsClaimed bool
 	networkOwner          string
+	voiceOwner            string
 	fallback              *app
 	ctx                   context.Context
 	cancel                context.CancelFunc
@@ -59,8 +63,19 @@ type usbDeviceSummary struct {
 	PhysicalID string           `json:"physical_id"`
 	IMEIMasked string           `json:"imei_masked,omitempty"`
 	USBDevice  *usbDeviceStatus `json:"usb_device,omitempty"`
+	Voice      voicePreparation `json:"voice"`
 	LastSeen   time.Time        `json:"last_seen"`
 }
+
+type voicePreparation struct {
+	State                  string `json:"state"`
+	Detail                 string `json:"detail"`
+	USBLocationID          string `json:"usb_location_id,omitempty"`
+	AudioInterface         bool   `json:"audio_interface"`
+	ADBInterfaceAdvertised bool   `json:"adb_interface_advertised"`
+}
+
+const usbReenumerationGrace = 12 * time.Second
 
 func newUSBDeviceHub() *usbDeviceHub {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -115,15 +130,34 @@ func (h *usbDeviceHub) reconcile() error {
 		h.mu.RLock()
 		deviceID, exists := h.physical[physicalID]
 		managed := h.devices[deviceID]
+		state := ""
+		lastAttempt := time.Time{}
+		previousLocator := usbDeviceLocator{}
+		hasRuntime := false
+		if managed != nil {
+			state = managed.State
+			lastAttempt = managed.LastAttempt
+			previousLocator = managed.Locator
+			hasRuntime = managed.Runtime != nil
+		}
 		h.mu.RUnlock()
-		if exists && managed != nil && managed.State == "ready" {
+		if exists && managed != nil && state == "ready" && sameUSBEnumeration(previousLocator, locator) {
 			h.mu.Lock()
 			managed.LastSeen = time.Now()
 			managed.USB = locator.Status
+			managed.Locator = locator
 			h.mu.Unlock()
 			continue
 		}
-		if exists && managed != nil && time.Since(managed.LastAttempt) < 2*time.Second {
+		if exists && managed != nil && state == "ready" {
+			h.beginPhysicalReconnect(physicalID, "USB device identity changed during re-enumeration")
+			state = "reconnecting"
+		}
+		if exists && managed != nil && time.Since(lastAttempt) < 2*time.Second {
+			continue
+		}
+		if exists && managed != nil && hasRuntime && (state == "reconnecting" || state == "error") {
+			h.resumePhysicalRuntime(locator)
 			continue
 		}
 		h.attach(locator)
@@ -138,34 +172,143 @@ func (h *usbDeviceHub) reconcile() error {
 	}
 	h.mu.RUnlock()
 	for _, physicalID := range missing {
-		h.detachPhysical(physicalID, "DJI USB device disconnected")
+		h.beginPhysicalReconnect(physicalID, "DJI USB device is re-enumerating or disconnected")
 	}
+	h.expirePhysicalReconnects(time.Now())
 	return nil
+}
+
+func sameUSBEnumeration(a, b usbDeviceLocator) bool {
+	return sameUSBDevice(a, b) && a.VendorID == b.VendorID && a.ProductID == b.ProductID && a.Address == b.Address
+}
+
+// beginPhysicalReconnect closes handles tied to the old USB enumeration while
+// retaining the logical device record. A mode change can therefore return on
+// the same physical port without losing its alias, device ID or setup progress.
+func (h *usbDeviceHub) beginPhysicalReconnect(physicalID, reason string) {
+	h.mu.Lock()
+	id, ok := h.physical[physicalID]
+	managed := h.devices[id]
+	if !ok || managed == nil || managed.State == "offline" {
+		h.mu.Unlock()
+		return
+	}
+	if managed.State != "reconnecting" {
+		managed.State = "reconnecting"
+		managed.MissingSince = time.Now()
+		managed.Generation++
+	}
+	managed.Error = reason
+	runtime := managed.Runtime
+	h.mu.Unlock()
+
+	if runtime != nil {
+		runtime.moduleVoiceOpMu.Lock()
+		runtime.closeModuleVoiceSessionLocked()
+		runtime.operationMu.Lock()
+		if runtime.usbAT != nil {
+			runtime.usbAT.Close()
+			runtime.usbAT = nil
+		}
+		runtime.usbDevice = nil
+		runtime.port = "正在等待模块重新枚举"
+		runtime.discoveryError = reason
+		runtime.usbATBackoffUntil = time.Now().Add(2 * time.Second)
+		runtime.usbATBackoffErr = reason
+		runtime.operationMu.Unlock()
+		runtime.moduleVoiceOpMu.Unlock()
+	}
+}
+
+func (h *usbDeviceHub) resumePhysicalRuntime(locator usbDeviceLocator) {
+	physicalID := locator.PhysicalID()
+	h.mu.RLock()
+	id := h.physical[physicalID]
+	managed := h.devices[id]
+	var runtime *app
+	if managed != nil {
+		runtime = managed.Runtime
+	}
+	h.mu.RUnlock()
+	if runtime == nil {
+		h.attach(locator)
+		return
+	}
+
+	opened, err := openDJIUSBAT(locator)
+	if err != nil {
+		h.recordAttachError(locator, err)
+		return
+	}
+	runtime.moduleVoiceOpMu.Lock()
+	runtime.closeModuleVoiceSessionLocked()
+	runtime.operationMu.Lock()
+	if runtime.usbAT != nil {
+		runtime.usbAT.Close()
+	}
+	runtime.usbAT = opened
+	runtime.usbLocator = &locator
+	runtime.usbDevice = locator.Status
+	runtime.port = opened.Description()
+	runtime.discoveryError = ""
+	runtime.usbATBackoffUntil = time.Time{}
+	runtime.usbATBackoffErr = ""
+	runtime.callMu.Lock()
+	runtime.callConfigured = false
+	runtime.callMu.Unlock()
+	runtime.initUSBATESIMManager()
+	runtime.operationMu.Unlock()
+	runtime.moduleVoiceOpMu.Unlock()
+
+	h.mu.Lock()
+	if current := h.devices[id]; current == managed {
+		managed.State = "ready"
+		managed.Error = ""
+		managed.MissingSince = time.Time{}
+		managed.LastSeen = time.Now()
+		managed.LastAttempt = time.Now()
+		managed.Locator = locator
+		managed.USB = locator.Status
+	}
+	h.mu.Unlock()
+	log.Printf("DJI module %s resumed after USB re-enumeration", id)
+	go runtime.resumeModuleSetup(h.ctx)
+	go runtime.warmModuleVoiceIfReady()
+}
+
+func (h *usbDeviceHub) expirePhysicalReconnects(now time.Time) {
+	var expired []string
+	h.mu.RLock()
+	for physicalID, id := range h.physical {
+		managed := h.devices[id]
+		if managed != nil && managed.State == "reconnecting" && !managed.MissingSince.IsZero() && now.Sub(managed.MissingSince) >= usbReenumerationGrace {
+			expired = append(expired, physicalID)
+		}
+	}
+	h.mu.RUnlock()
+	for _, physicalID := range expired {
+		h.detachPhysical(physicalID, "DJI USB device did not return after re-enumeration")
+	}
 }
 
 func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 	physicalID := locator.PhysicalID()
 	opened, err := openDJIUSBAT(locator)
 	if err != nil {
-		id := deviceIDFromIdentity(physicalID)
-		h.mu.Lock()
-		managed := h.devices[id]
-		if managed == nil {
-			managed = &managedUSBDevice{ID: id, Alias: defaultDeviceAlias(physicalID)}
-			h.devices[id] = managed
-		}
-		managed.PhysicalID = physicalID
-		managed.State = "error"
-		managed.Error = err.Error()
-		managed.LastSeen = time.Now()
-		managed.LastAttempt = time.Now()
-		managed.USB = locator.Status
-		h.physical[physicalID] = id
-		h.mu.Unlock()
+		h.recordAttachError(locator, err)
 		return
 	}
 
 	imei := probeUSBATIMEI(opened)
+	h.mu.RLock()
+	existingID := h.physical[physicalID]
+	existingDevice := h.devices[existingID]
+	h.mu.RUnlock()
+	if imei == "" && existingDevice != nil && existingDevice.IMEI != "" {
+		// A freshly re-enumerated module can answer AT a moment before AT+GSN.
+		// Keep its known identity instead of replacing it with a port-derived ID.
+		imei = existingDevice.IMEI
+	}
 	identity := imei
 	if identity == "" {
 		identity = physicalID
@@ -181,6 +324,7 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 		id = deviceIDFromIdentity(identity + "@" + physicalID)
 	}
 	runtime := &app{
+		deviceID:         id,
 		usbAT:            opened,
 		usbLocator:       &locator,
 		usbDevice:        locator.Status,
@@ -193,21 +337,21 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 	h.configureDeviceSettings(runtime, id)
 	deviceCtx, cancel := context.WithCancel(h.ctx)
 	runtime.onUSBDetached = func(reason string) {
-		go h.detachPhysical(physicalID, reason)
+		go h.beginPhysicalReconnect(physicalID, reason)
 	}
 	h.configureNetworkModeGuard(runtime, id)
+	h.configureVoiceRouteGuard(runtime, id)
 	runtime.initUSBATESIMManager()
 
 	h.mu.Lock()
 	alias := defaultDeviceAlias(physicalID)
+	generation := uint64(1)
 	if saved := strings.TrimSpace(h.aliases[id]); saved != "" {
 		alias = saved
 	}
 	if previous := h.devices[id]; previous != nil && strings.TrimSpace(previous.Alias) != "" {
 		alias = previous.Alias
-		if previous.Cancel != nil {
-			previous.Cancel()
-		}
+		generation = previous.Generation + 1
 	}
 	if provisionalID := h.physical[physicalID]; provisionalID != "" && provisionalID != id {
 		delete(h.devices, provisionalID)
@@ -222,6 +366,8 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 		Cancel:      cancel,
 		LastSeen:    time.Now(),
 		LastAttempt: time.Now(),
+		Generation:  generation,
+		Locator:     locator,
 		USB:         locator.Status,
 	}
 	h.physical[physicalID] = id
@@ -229,7 +375,33 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 
 	go runtime.startSMSPoller(deviceCtx)
 	go runtime.startCallPoller(deviceCtx)
+	go runtime.resumeModuleSetup(deviceCtx)
+	go runtime.warmModuleVoiceIfReady()
 	log.Printf("DJI module %s attached as %s (%s)", physicalID, id, maskIMEI(imei))
+}
+
+func (h *usbDeviceHub) recordAttachError(locator usbDeviceLocator, attachErr error) {
+	physicalID := locator.PhysicalID()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := h.physical[physicalID]
+	if id == "" {
+		id = deviceIDFromIdentity(physicalID)
+	}
+	managed := h.devices[id]
+	if managed == nil {
+		managed = &managedUSBDevice{ID: id, Alias: defaultDeviceAlias(physicalID)}
+		h.devices[id] = managed
+	}
+	managed.PhysicalID = physicalID
+	managed.State = "error"
+	managed.Error = attachErr.Error()
+	managed.LastSeen = time.Now()
+	managed.LastAttempt = time.Now()
+	managed.MissingSince = time.Time{}
+	managed.Locator = locator
+	managed.USB = locator.Status
+	h.physical[physicalID] = id
 }
 
 func (h *usbDeviceHub) configureNetworkModeGuard(runtime *app, id string) {
@@ -265,6 +437,25 @@ func (h *usbDeviceHub) configureNetworkModeGuard(runtime *app, id string) {
 	}
 }
 
+func (h *usbDeviceHub) configureVoiceRouteGuard(runtime *app, id string) {
+	runtime.authorizeVoiceRoute = func() error {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if h.voiceOwner != "" && h.voiceOwner != id {
+			return errors.New("另一台模块正在使用语音音频；请先结束该通话")
+		}
+		h.voiceOwner = id
+		return nil
+	}
+	runtime.releaseVoiceRoute = func() {
+		h.mu.Lock()
+		if h.voiceOwner == id {
+			h.voiceOwner = ""
+		}
+		h.mu.Unlock()
+	}
+}
+
 func (h *usbDeviceHub) detachPhysical(physicalID, reason string) {
 	h.mu.Lock()
 	id, ok := h.physical[physicalID]
@@ -281,6 +472,9 @@ func (h *usbDeviceHub) detachPhysical(physicalID, reason string) {
 		if h.networkOwner == id {
 			h.networkOwner = ""
 		}
+		if h.voiceOwner == id {
+			h.voiceOwner = ""
+		}
 	}
 	h.mu.Unlock()
 	if managed == nil {
@@ -290,9 +484,11 @@ func (h *usbDeviceHub) detachPhysical(physicalID, reason string) {
 		managed.Cancel()
 	}
 	if managed.Runtime != nil && managed.Runtime.usbAT != nil {
-		managed.Runtime.onUSBDetached = nil
 		managed.Runtime.usbAT.Close()
 		managed.Runtime.usbAT = nil
+	}
+	if managed.Runtime != nil {
+		managed.Runtime.resetModuleVoiceSession()
 	}
 	log.Printf("DJI module %s (%s) is offline: %s", id, physicalID, reason)
 }
@@ -371,6 +567,11 @@ func (h *usbDeviceHub) configureDeviceSettings(runtime *app, deviceID string) {
 	}
 	directory := filepath.Join(configDir, "DJOneHub", "devices", deviceID)
 	runtime.barkSettingsPath = filepath.Join(directory, "bark-settings.json")
+	runtime.moduleSetupPath = filepath.Join(directory, "voice-setup-state.json")
+	runtime.moduleSetupBackupDir = filepath.Join(directory, "module-backups")
+	if err := runtime.loadModuleSetupState(); err != nil {
+		log.Printf("load voice setup state for %s: %v", deviceID, err)
+	}
 
 	h.mu.Lock()
 	claimLegacy := !h.legacySettingsClaimed
@@ -411,7 +612,7 @@ func (h *usbDeviceHub) summaries() []usbDeviceSummary {
 		out = append(out, usbDeviceSummary{
 			ID: device.ID, Alias: device.Alias, State: device.State, Error: device.Error,
 			PhysicalID: device.PhysicalID, IMEIMasked: maskIMEI(device.IMEI),
-			USBDevice: device.USB, LastSeen: device.LastSeen,
+			USBDevice: device.USB, Voice: voicePreparationFor(device.State, device.USB), LastSeen: device.LastSeen,
 		})
 	}
 	h.mu.RUnlock()
@@ -422,6 +623,42 @@ func (h *usbDeviceHub) summaries() []usbDeviceSummary {
 		return out[i].Alias < out[j].Alias
 	})
 	return out
+}
+
+func voicePreparationFor(deviceState string, usb *usbDeviceStatus) voicePreparation {
+	preparation := voicePreparation{
+		State:  "offline",
+		Detail: "模块当前离线",
+	}
+	if usb == nil {
+		if deviceState == "reconnecting" {
+			preparation.State = "reconnecting"
+			preparation.Detail = "正在等待模块完成 USB 重枚举"
+		}
+		return preparation
+	}
+	preparation.USBLocationID = usb.LocationID
+	for _, usbInterface := range usb.Interfaces {
+		if usbInterface.Class == 1 {
+			preparation.AudioInterface = true
+		}
+		if usbInterface.Subclass == 66 || (usbInterface.Number == 6 && usbInterface.Class == 255) {
+			preparation.ADBInterfaceAdvertised = true
+		}
+	}
+	if deviceState == "reconnecting" {
+		preparation.State = "reconnecting"
+		preparation.Detail = "正在等待模块完成 USB 重枚举"
+		return preparation
+	}
+	if preparation.AudioInterface {
+		preparation.State = "usb_audio_available"
+		preparation.Detail = "已检测到 USB 音频接口，仍需完成通话组件初始化"
+		return preparation
+	}
+	preparation.State = "module_configuration_required"
+	preparation.Detail = "当前 USB 模式未提供音频接口"
+	return preparation
 }
 
 func (h *usbDeviceHub) runtime(id string) (*app, bool) {

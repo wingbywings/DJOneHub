@@ -12,6 +12,7 @@ while [ -L "${SOURCE}" ]; do
 done
 ROOT_DIR=$(CDPATH= cd -P -- "$(dirname -- "${SOURCE}")" && pwd)
 BINARY="${ROOT_DIR}/bin/djonehub-macos"
+AUDIO_HOST="${ROOT_DIR}/bin/djonehub-audio-host"
 URL="http://127.0.0.1:7575"
 DATA_DIR="${HOME}/Library/Application Support/DJOneHub"
 LOG_DIR="${HOME}/Library/Logs/DJOneHub"
@@ -97,6 +98,7 @@ start_service() {
     "${BINARY}" -listen 127.0.0.1:7575 >>"${LOG_FILE}" 2>&1 &
   fi
   child=$!
+  audio_child=""
   printf '%s\n' "${child}" >"${PID_FILE}"
 
   stopping=0
@@ -105,6 +107,9 @@ start_service() {
       stopping=1
       printf '\n正在停止 DJOneHub...\n'
       kill -TERM "${child}" 2>/dev/null || true
+      if [ -n "${audio_child}" ]; then
+        kill -TERM "${audio_child}" 2>/dev/null || true
+      fi
     fi
   }
   trap stop_child INT TERM HUP
@@ -125,6 +130,10 @@ start_service() {
   done
 
   if [ "${ready}" -eq 1 ]; then
+    if [ "${mode}" != "--demo" ] && [ -x "${AUDIO_HOST}" ]; then
+      "${AUDIO_HOST}" --base-url "${URL}" >>"${LOG_FILE}" 2>&1 &
+      audio_child=$!
+    fi
     printf 'DJOneHub 已启动：%s\n' "${URL}"
     printf '日志文件：%s\n' "${LOG_FILE}"
     printf '按 Ctrl+C 即可停止。\n'
@@ -135,6 +144,10 @@ start_service() {
 
   wait "${child}"
   status=$?
+  if [ -n "${audio_child}" ]; then
+    kill -TERM "${audio_child}" 2>/dev/null || true
+    wait "${audio_child}" 2>/dev/null || true
+  fi
   trap - INT TERM HUP
   if [ "${stopping}" -eq 0 ] && [ "${status}" -ne 0 ]; then
     printf 'DJOneHub 异常退出（状态码 %s），请查看日志：%s\n' "${status}" "${LOG_FILE}" >&2

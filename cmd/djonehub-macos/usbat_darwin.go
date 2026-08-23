@@ -18,11 +18,6 @@ import (
 	"unsafe"
 )
 
-const (
-	djiUSBVendorID  = 0x2ca3
-	djiUSBProductID = 0x4006
-)
-
 type usbAT struct {
 	ctx         *C.libusb_context
 	handle      *C.libusb_device_handle
@@ -60,7 +55,7 @@ func listDJIUSBDevices() ([]usbDeviceLocator, error) {
 		if rc := C.libusb_get_device_descriptor(device, &descriptor); rc != 0 {
 			continue
 		}
-		if uint16(descriptor.idVendor) != djiUSBVendorID || uint16(descriptor.idProduct) != djiUSBProductID {
+		if !isSupportedUSBModuleIdentity(uint16(descriptor.idVendor), uint16(descriptor.idProduct)) {
 			continue
 		}
 		locator := locatorForUSBDevice(device, descriptor)
@@ -80,22 +75,28 @@ func locatorForUSBDevice(device *C.libusb_device, descriptor C.struct_libusb_dev
 			path[i] = uint8(ports[i])
 		}
 	}
-	return usbDeviceLocator{
+	locator := usbDeviceLocator{
 		VendorID:  uint16(descriptor.idVendor),
 		ProductID: uint16(descriptor.idProduct),
 		Bus:       uint8(C.libusb_get_bus_number(device)),
 		Address:   uint8(C.libusb_get_device_address(device)),
 		PortPath:  path,
 	}
+	locator.LocationID, _ = macOSUSBLocationID(locator.Bus, locator.PortPath)
+	return locator
 }
 
 func statusForUSBDevice(device *C.libusb_device, descriptor C.struct_libusb_device_descriptor, locator usbDeviceLocator) *usbDeviceStatus {
+	locationID := locator.PhysicalID()
+	if locator.LocationID != 0 {
+		locationID = fmt.Sprintf("0x%08x", locator.LocationID)
+	}
 	status := &usbDeviceStatus{
 		Product:    "DJI 4G Module",
 		Vendor:     "DJI",
 		VendorID:   fmt.Sprintf("%04x", uint16(descriptor.idVendor)),
 		ProductID:  fmt.Sprintf("%04x", uint16(descriptor.idProduct)),
-		LocationID: locator.PhysicalID(),
+		LocationID: locationID,
 		Speed:      usbSpeedName(int(C.libusb_get_device_speed(device))),
 		Mode:       "vendor-specific USB mode",
 	}
@@ -143,7 +144,7 @@ func openDJIUSBAT(target ...usbDeviceLocator) (*usbAT, error) {
 		if rc := C.libusb_get_device_descriptor(device, &descriptor); rc != 0 {
 			continue
 		}
-		if uint16(descriptor.idVendor) != djiUSBVendorID || uint16(descriptor.idProduct) != djiUSBProductID {
+		if !isSupportedUSBModuleIdentity(uint16(descriptor.idVendor), uint16(descriptor.idProduct)) {
 			continue
 		}
 		candidate := locatorForUSBDevice(device, descriptor)
@@ -159,7 +160,7 @@ func openDJIUSBAT(target ...usbDeviceLocator) (*usbAT, error) {
 	}
 	if handle == nil {
 		C.libusb_exit(ctx)
-		return nil, errors.New("DJI USB AT device 2ca3:4006 not found")
+		return nil, errors.New("DJI/Quectel USB AT device (2ca3:4006 or 2c7c:0125) not found")
 	}
 	candidates, err := usbATCandidates(handle)
 	if err != nil {

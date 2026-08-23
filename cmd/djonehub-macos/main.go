@@ -77,6 +77,7 @@ type app struct {
 	// relative to background SMS and call polling for this one module. Each
 	// module owns a separate lock, so different modules still run in parallel.
 	operationMu                  sync.RWMutex
+	deviceID                     string
 	modem                        *modem.Manager
 	esimMu                       sync.RWMutex
 	esim                         *esim.Manager
@@ -111,6 +112,29 @@ type app struct {
 	callLastPoll      time.Time
 	callLastPollError string
 	callConfigured    bool
+	lastAnswerAt      time.Time
+	lastDialAt        time.Time
+
+	moduleSetupMu        sync.RWMutex
+	moduleSetup          moduleSetupStatus
+	moduleSetupPath      string
+	moduleSetupBackupDir string
+	moduleSetupResuming  bool
+
+	moduleVoiceMu        sync.Mutex
+	moduleVoiceOpMu      sync.Mutex
+	moduleVoiceSession   *moduleVoiceSession
+	moduleVoicePreparing bool
+	moduleVoicePrepared  bool
+	moduleVoiceReady     bool
+	moduleVoiceLast      time.Time
+	moduleVoiceErr       string
+	moduleVoiceDetail    string
+	authorizeVoiceRoute  func() error
+	releaseVoiceRoute    func()
+
+	audioHostMu sync.RWMutex
+	audioHost   audioHostState
 
 	profileNotesMu     sync.Mutex
 	profileNotes       map[string]profileNote
@@ -729,6 +753,7 @@ func (a *app) markUSBATDetached(reason string) {
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
+	go a.resetModuleVoiceSession()
 	a.callMu.Lock()
 	a.callConfigured = false
 	a.callMu.Unlock()
@@ -750,6 +775,21 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/sms/refresh", a.refreshSMS)
 	mux.HandleFunc("POST /api/sms/clear-module", a.clearModuleSMS)
 	mux.HandleFunc("GET /api/calls/status", a.callStatus)
+	mux.HandleFunc("POST /api/calls/reject", a.rejectCall)
+	mux.HandleFunc("POST /api/calls/answer", a.answerCall)
+	mux.HandleFunc("POST /api/calls/hangup", a.hangupCall)
+	mux.HandleFunc("POST /api/calls/dtmf", a.dtmfCall)
+	mux.HandleFunc("POST /api/calls/dial", a.dialCall)
+	mux.HandleFunc("GET /api/module/setup", a.moduleSetupStatusAPI)
+	mux.HandleFunc("POST /api/module/setup", a.moduleSetupStartAPI)
+	mux.HandleFunc("GET /api/voice/status", a.voiceStatusAPI)
+	mux.HandleFunc("POST /api/voice/provision", a.voiceProvisionAPI)
+	mux.HandleFunc("POST /api/voice/start", a.voiceStartAPI)
+	mux.HandleFunc("POST /api/voice/stop", a.voiceStopAPI)
+	mux.HandleFunc("POST /api/calls/audio/host/register", a.audioHostRegister)
+	mux.HandleFunc("GET /api/calls/audio/host/config", a.audioHostConfig)
+	mux.HandleFunc("POST /api/calls/audio/mute", a.audioHostMute)
+	mux.HandleFunc("POST /api/calls/audio/record", a.audioHostRecord)
 	mux.HandleFunc("GET /api/settings/bark", a.getSMSBarkSettings)
 	mux.HandleFunc("PUT /api/settings/bark", a.saveSMSBarkSettings)
 	mux.HandleFunc("POST /api/settings/bark/test", a.testSMSBarkSettings)

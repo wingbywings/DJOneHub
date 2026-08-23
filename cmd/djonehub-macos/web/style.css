@@ -156,10 +156,31 @@ input:focus, textarea:focus { border-color: #6698ed; box-shadow: 0 0 0 3px rgba(
 .notification-panel > .inline-status { margin: 0 16px 16px; }
 
 .call-monitor-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 16px; }
+.voice-setup-card { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 16px; padding: 16px 18px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.voice-setup-card h3 { margin: 3px 0 0; color: var(--text-strong); font-size: 16px; }
+.voice-setup-card p { margin: 7px 0 0; }
+.voice-setup-card small { display: block; max-width: 720px; margin-top: 5px; color: var(--text-muted); overflow-wrap: anywhere; }
+.adb-passcode-field { display: grid; max-width: 480px; gap: 6px; margin-top: 12px; color: var(--text-strong); font-size: 13px; }
+.adb-passcode-field[hidden] { display: none; }
+.adb-passcode-field input { width: 100%; box-sizing: border-box; }
+.adb-passcode-field small { margin-top: 0; }
+.voice-setup-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; }
+.dial-form { display: grid; gap: 7px; margin-top: 12px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.dial-form > label { color: var(--text-muted); font-size: 12px; font-weight: 650; }
+.dial-form > small { color: var(--text-soft); font-size: 12px; }
+.dial-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.dial-input-row input { min-height: 42px; font-size: 17px; letter-spacing: .02em; }
+.dial-input-row button { min-width: 84px; }
 .active-call-card { margin-top: 12px; padding: 18px; border: 1px solid #f0b8be; border-radius: 8px; background: color-mix(in srgb, var(--surface) 88%, #ef4444 12%); }
 .active-call-card[hidden] { display: none; }
 .active-call-card span, .active-call-card small { display: block; color: var(--text-muted); font-size: 12px; }
 .active-call-card strong { display: block; margin: 6px 0; overflow-wrap: anywhere; color: var(--text-strong); font-size: 25px; }
+.call-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.call-actions .danger { border-color: #c13d4c; background: #c13d4c; color: #fff; }
+.dtmf-panel { margin-top: 16px; padding-top: 14px; border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent); }
+.dtmf-panel[hidden] { display: none; }
+.dtmf-pad { display: grid; grid-template-columns: repeat(3, 48px); gap: 7px; margin-top: 8px; }
+.dtmf-pad button { min-height: 38px; padding: 0; border-color: var(--border); background: var(--surface); color: var(--text-strong); }
 .call-history-item p { color: var(--text-muted); }
 .call-history-item.missed p { color: #b45309; font-weight: 700; }
 

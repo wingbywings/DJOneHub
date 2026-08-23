@@ -155,6 +155,10 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 
 	var missed *callRecord
 	a.callMu.Lock()
+	previousState := ""
+	if a.activeCall != nil {
+		previousState = a.activeCall.State
+	}
 	if selected == nil {
 		if a.activeCall != nil {
 			ended := now
@@ -176,6 +180,7 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 		if missed != nil {
 			a.forwardMissedCallBark(*missed)
 		}
+		a.syncVoiceRouteForCall(previousState, "")
 		return
 	}
 
@@ -197,6 +202,32 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 		}
 	}
 	a.callMu.Unlock()
+	a.syncVoiceRouteForCall(previousState, selected.State)
+}
+
+func (a *app) syncVoiceRouteForCall(previousState, currentState string) {
+	if a.demo || a.usbLocator == nil {
+		return
+	}
+	if currentState == "active" && previousState != "active" {
+		go func() {
+			if err := a.ensureModuleVoiceRoute(); err != nil {
+				log.Printf("module voice route start failed: %v", err)
+			}
+		}()
+		return
+	}
+	if previousState == "" && (currentState == "incoming" || currentState == "waiting" || currentState == "dialing" || currentState == "alerting") {
+		go func() {
+			if err := a.prepareModuleVoiceSessionBudgeted(90 * time.Second); err != nil {
+				log.Printf("module voice preflight did not finish before call activation: %v", err)
+			}
+		}()
+	}
+	if previousState == "active" && currentState != "active" {
+		a.resetAudioHostIntent()
+		go a.stopModuleVoiceRoute()
+	}
 }
 
 func callStatePriority(state string) int {
@@ -242,5 +273,234 @@ func (a *app) callStatus(w http.ResponseWriter, _ *http.Request) {
 		"poll_interval_s": int(a.callInterval().Seconds()),
 		"last_poll":       a.callLastPoll,
 		"last_poll_error": a.callLastPollError,
+		"audio_host":      a.audioHostSnapshot(),
 	})
+}
+
+func (a *app) rejectCall(w http.ResponseWriter, _ *http.Request) {
+	if !a.callStateAllows("incoming", "waiting") {
+		writeError(w, http.StatusConflict, "当前没有可拒接的来电")
+		return
+	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	if a.demo {
+		a.applyCallPoll(nil, time.Now())
+		writeJSON(w, http.StatusOK, map[string]bool{"rejected": true})
+		return
+	}
+	response, err := a.runATCommand("AT+CHUP", 5*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if err := validateCallATResponse(response); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rejected": true, "response": response})
+}
+
+func (a *app) answerCall(w http.ResponseWriter, _ *http.Request) {
+	if !a.callStateAllows("incoming", "waiting") {
+		writeError(w, http.StatusConflict, "当前没有可接听的来电")
+		return
+	}
+	a.callMu.Lock()
+	if time.Since(a.lastAnswerAt) < 2*time.Second {
+		a.callMu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]bool{"answered": true})
+		return
+	}
+	a.lastAnswerAt = time.Now()
+	a.callMu.Unlock()
+
+	if a.demo {
+		a.setActiveCallState("active", time.Now())
+		writeJSON(w, http.StatusOK, map[string]bool{"answered": true})
+		return
+	}
+	if err := a.prepareModuleVoiceSessionBudgeted(20 * time.Second); err != nil {
+		writeError(w, http.StatusBadGateway, "接听前语音运行时准备失败："+err.Error())
+		return
+	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	response, err := a.runATCommand("ATA", 5*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if err := validateCallATResponse(response); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"answered": true, "response": response})
+}
+
+func (a *app) hangupCall(w http.ResponseWriter, _ *http.Request) {
+	if !a.hasActiveCall() {
+		writeError(w, http.StatusConflict, "当前没有可挂断的通话")
+		return
+	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	if a.demo {
+		a.applyCallPoll(nil, time.Now())
+		writeJSON(w, http.StatusOK, map[string]bool{"hung_up": true})
+		return
+	}
+	response, err := a.runATCommand("ATH", 5*time.Second)
+	if err != nil || validateCallATResponse(response) != nil {
+		response, err = a.runATCommand("AT+CHUP", 5*time.Second)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+	if err := validateCallATResponse(response); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hung_up": true, "response": response})
+}
+
+func (a *app) dtmfCall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Digit string `json:"digit"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if len(body.Digit) != 1 || !strings.ContainsRune("0123456789*#", rune(body.Digit[0])) {
+		writeError(w, http.StatusBadRequest, "DTMF 仅支持 0-9、* 和 #")
+		return
+	}
+	if !a.callStateAllows("active") {
+		writeError(w, http.StatusConflict, "DTMF 只能在已接通的通话中发送")
+		return
+	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	if a.demo {
+		writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+		return
+	}
+	response, err := a.runATCommand(fmt.Sprintf("AT+VTS=\"%s\"", body.Digit), 3*time.Second)
+	if err != nil || validateCallATResponse(response) != nil {
+		response, err = a.runATCommand(fmt.Sprintf("AT+CLDTMF=1,%s", body.Digit), 3*time.Second)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+	}
+	if err := validateCallATResponse(response); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+}
+
+func (a *app) dialCall(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Number string `json:"number"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	number := normalizeDialNumber(body.Number)
+	if number == "" {
+		writeError(w, http.StatusBadRequest, "号码为空或包含非法字符")
+		return
+	}
+	a.callMu.Lock()
+	if a.activeCall != nil {
+		a.callMu.Unlock()
+		writeError(w, http.StatusConflict, "当前模块已有通话")
+		return
+	}
+	if time.Since(a.lastDialAt) < 2*time.Second {
+		a.callMu.Unlock()
+		writeError(w, http.StatusConflict, "拨号请求过于频繁，请稍后重试")
+		return
+	}
+	a.lastDialAt = time.Now()
+	a.callMu.Unlock()
+
+	if a.demo {
+		a.applyCallPoll([]parsedCall{{Index: 1, Direction: "outgoing", State: "dialing", Number: number}}, time.Now())
+		writeJSON(w, http.StatusOK, map[string]any{"dialing": true, "number": number})
+		return
+	}
+	if err := a.prepareModuleVoiceSessionBudgeted(90 * time.Second); err != nil {
+		writeError(w, http.StatusBadGateway, "拨号前语音运行时准备失败："+err.Error())
+		return
+	}
+	a.operationMu.Lock()
+	defer a.operationMu.Unlock()
+	response, err := a.runATCommand("ATD"+number+";", 8*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if err := validateCallATResponse(response); err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	a.applyCallPoll([]parsedCall{{Index: 0, Direction: "outgoing", State: "dialing", Number: number}}, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{"dialing": true, "number": number, "response": response})
+}
+
+func (a *app) hasActiveCall() bool {
+	a.callMu.RLock()
+	defer a.callMu.RUnlock()
+	return a.activeCall != nil
+}
+
+func (a *app) callStateAllows(states ...string) bool {
+	a.callMu.RLock()
+	defer a.callMu.RUnlock()
+	if a.activeCall == nil {
+		return false
+	}
+	for _, state := range states {
+		if a.activeCall.State == state {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) setActiveCallState(state string, now time.Time) {
+	a.callMu.Lock()
+	defer a.callMu.Unlock()
+	if a.activeCall == nil {
+		return
+	}
+	a.activeCall.State = state
+	a.activeCall.UpdatedAt = now
+}
+
+func validateCallATResponse(response string) error {
+	if atResponseIsError(response) {
+		return fmt.Errorf("模块拒绝通话命令（ERROR）")
+	}
+	return nil
+}
+
+func normalizeDialNumber(raw string) string {
+	var normalized strings.Builder
+	for _, char := range strings.TrimSpace(raw) {
+		switch {
+		case char >= '0' && char <= '9':
+			normalized.WriteRune(char)
+		case char == '+' || char == '*' || char == '#':
+			normalized.WriteRune(char)
+		case char == ' ' || char == '-' || char == '(' || char == ')':
+			// Common display formatting is ignored.
+		default:
+			return ""
+		}
+	}
+	return normalized.String()
 }

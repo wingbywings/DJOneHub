@@ -114,14 +114,56 @@
 
     <section id="calls" class="view">
       <div class="view-intro"><div><span class="section-kicker">CALL MONITOR</span><h2>来电监控</h2></div><p>后台持续监听模块语音通话，并记录最近 100 条通话。</p></div>
+      <section class="voice-setup-card" aria-labelledby="voice-setup-title">
+        <div>
+          <span class="section-kicker">VOICE READINESS</span>
+          <h3 id="voice-setup-title">语音通话准备</h3>
+          <p id="voice-setup-summary" class="inline-status">正在检查模块配置与语音运行时...</p>
+          <small id="voice-setup-detail"></small>
+          <label id="adb-passcode-field" class="adb-passcode-field" for="adb-passcode" hidden>
+            <span>官方 QADBKEY passcode</span>
+            <input id="adb-passcode" type="password" inputmode="text" autocomplete="off" maxlength="128" spellcheck="false" placeholder="输入 Quectel 官方提供的 passcode">
+            <small id="adb-challenge"></small>
+          </label>
+          <small id="audio-host-status">Mac 音频宿主尚未连接</small>
+        </div>
+        <div class="voice-setup-actions">
+          <button id="initialize-voice-module" class="secondary" type="button" hidden>初始化模块</button>
+          <button id="install-voice-runtime" class="secondary" type="button" hidden>安装语音运行时</button>
+        </div>
+      </section>
       <div class="call-monitor-heading">
         <p id="call-monitor-status" class="inline-status">尚未读取来电状态</p>
         <button id="refresh-calls" class="secondary" type="button">刷新</button>
       </div>
+      <form id="dial-form" class="dial-form">
+        <label for="dial-number">电话号码</label>
+        <div class="dial-input-row">
+          <input id="dial-number" type="tel" inputmode="tel" autocomplete="tel" maxlength="40" placeholder="输入电话号码">
+          <button id="dial-call" type="submit">拨打</button>
+        </div>
+        <small>模块侧 D4/UAC 路由与 Mac 麦克风/扬声器宿主会在通话接通后自动启动；真机验收完成前此功能仍标记为实验性。</small>
+      </form>
       <div id="active-call" class="active-call-card" hidden>
         <span id="active-call-label">正在来电</span>
         <strong id="active-call-number">未知号码</strong>
         <small id="active-call-time"></small>
+        <div class="call-actions">
+          <button id="answer-call" type="button" hidden>接听</button>
+          <button id="reject-call" class="secondary danger" type="button" hidden>拒接</button>
+          <button id="hangup-call" class="danger" type="button" hidden>挂断</button>
+          <button id="mute-call" class="secondary" type="button" hidden>静音</button>
+          <button id="record-call" class="secondary" type="button" hidden>录音</button>
+        </div>
+        <div id="dtmf-panel" class="dtmf-panel" hidden>
+          <span>通话键盘</span>
+          <div id="dtmf-pad" class="dtmf-pad" aria-label="通话键盘">
+            <button type="button" data-dtmf="1">1</button><button type="button" data-dtmf="2">2</button><button type="button" data-dtmf="3">3</button>
+            <button type="button" data-dtmf="4">4</button><button type="button" data-dtmf="5">5</button><button type="button" data-dtmf="6">6</button>
+            <button type="button" data-dtmf="7">7</button><button type="button" data-dtmf="8">8</button><button type="button" data-dtmf="9">9</button>
+            <button type="button" data-dtmf="*">*</button><button type="button" data-dtmf="0">0</button><button type="button" data-dtmf="#">#</button>
+          </div>
+        </div>
       </div>
       <details id="call-bark-settings-panel" class="fold-panel notification-panel">
         <summary><span>未接来电 Bark 通知</span><small id="call-bark-summary">未配置</small></summary>

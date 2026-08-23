@@ -26,7 +26,7 @@ if [ "$(uname -m)" != "arm64" ]; then
   echo "当前安装包仅支持 Apple Silicon（M 系列芯片）。" >&2
   exit 1
 fi
-if [ ! -x "${PACKAGE_DIR}/djonehub" ] || [ ! -x "${PACKAGE_DIR}/bin/djonehub-macos" ]; then
+if [ ! -x "${PACKAGE_DIR}/djonehub" ] || [ ! -x "${PACKAGE_DIR}/bin/djonehub-macos" ] || [ ! -x "${PACKAGE_DIR}/bin/djonehub-audio-host" ]; then
   echo "安装失败：发行包内容不完整，请重新解压整个 ZIP。" >&2
   exit 1
 fi
@@ -40,7 +40,7 @@ echo "macOS 可能要求输入当前用户的管理员密码。"
 
 run_privileged mkdir -p "${INSTALL_DIR}" "$(dirname -- "${COMMAND_PATH}")"
 run_privileged ditto --norsrc --noextattr --noqtn --noacl "${PACKAGE_DIR}" "${INSTALL_DIR}"
-run_privileged chmod 755 "${INSTALL_DIR}/djonehub" "${INSTALL_DIR}/bin/djonehub-macos" "${INSTALL_DIR}/lib/libusb-1.0.0.dylib"
+run_privileged chmod 755 "${INSTALL_DIR}/djonehub" "${INSTALL_DIR}/bin/djonehub-macos" "${INSTALL_DIR}/bin/djonehub-audio-host" "${INSTALL_DIR}/lib/libusb-1.0.0.dylib"
 run_privileged ln -sfn "${INSTALL_DIR}/djonehub" "${COMMAND_PATH}"
 
 echo

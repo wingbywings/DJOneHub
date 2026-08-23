@@ -30,3 +30,15 @@ The source repository includes vendored dependencies under `third_party/` so the
 | multierr | `third_party/multierr/LICENSE.txt` |
 
 Dependencies fetched through Go modules retain their own licenses and copyright notices. This file is informational and does not replace any component's full license text.
+
+## MaVo macOS voice audio
+
+The macOS `DJOneHubAudioHost` contains host-side USB voice and CoreAudio code
+derived from MaVo, licensed under the MIT License. Source comments and SPDX
+identifiers from the reference implementation are retained under
+`macos/DJOneHubAudioHost/Sources/`.
+
+- Project: <https://github.com/moluncn/mavo>
+- Pinned module runtime source: commit `0443dfdaf8aec086fd76ba2ee9152fd908114524`
+- Module-side binary files are not included in this repository or release;
+  they are downloaded only after explicit confirmation and SHA-256 verification.
