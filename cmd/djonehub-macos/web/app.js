@@ -508,6 +508,8 @@ function renderCallHistory(history) {
 function voiceAgentEventLabel(type) {
   if (type.startsWith("transcript.input")) return "来电方";
   if (type.startsWith("transcript.output")) return "AI";
+  if (type === "recording.started") return "录音开始";
+  if (type === "recording.stopped") return "录音完成";
   if (type.startsWith("tool.")) return "工具";
   if (type === "error") return "错误";
   if (type === "speech.started") return "检测说话";
@@ -519,11 +521,43 @@ function voiceAgentEventLabel(type) {
   return type || "事件";
 }
 
+function voiceAgentToolArguments(argumentsValue) {
+  if (argumentsValue == null || argumentsValue === "") return "";
+  let parsed = argumentsValue;
+  if (typeof parsed === "string") {
+    try { parsed = JSON.parse(parsed); } catch (_) { return parsed; }
+  }
+  if (typeof parsed === "object" && !Array.isArray(parsed) && Object.keys(parsed).length === 0) return "";
+  try { return JSON.stringify(parsed); } catch (_) { return String(parsed); }
+}
+
+function voiceAgentUsageText(usage) {
+  if (!usage || typeof usage !== "object") return "用量统计未提供明细";
+  const fields = [
+    ["total_tokens", "总计"],
+    ["input_tokens", "输入"],
+    ["output_tokens", "输出"],
+  ];
+  const parts = fields
+    .filter(([key]) => usage[key] != null && Number.isFinite(Number(usage[key])))
+    .map(([key, label]) => `${label} ${usage[key]}`);
+  if (parts.length) return `${parts.join(" · ")} tokens`;
+  try { return JSON.stringify(usage); } catch (_) { return "用量统计格式无法解析"; }
+}
+
 function voiceAgentEventText(event) {
   if (event.error) return event.error;
+  if (String(event.type || "").startsWith("recording.")) {
+    const normalizedPath = String(event.text || "").replaceAll("\\", "/");
+    return normalizedPath.split("/").filter(Boolean).at(-1) || "通话录音.wav";
+  }
+  if (String(event.type || "").startsWith("transcript.")) {
+    return event.text || (String(event.type).endsWith(".final") ? "未识别到有效语音" : "正在识别…");
+  }
+  if (event.type === "usage") return voiceAgentUsageText(event.usage);
   if (event.text) return event.text;
   if (event.tool_call) {
-    return `${event.tool_call.name || "未知工具"} ${event.tool_call.arguments || ""}`.trim();
+    return `${event.tool_call.name || "未知工具"} ${voiceAgentToolArguments(event.tool_call.arguments)}`.trim();
   }
   if (event.type === "session.ready") return `已连接 ${event.provider || "Provider"}`;
   if (event.type === "session.closed") return "语音会话已关闭";
@@ -550,6 +584,26 @@ function renderVoiceAgentEvents(target, events, emptyText) {
     const text = document.createElement("div");
     text.className = "agent-event-text";
     text.textContent = voiceAgentEventText(event) || "—";
+    if (type.startsWith("recording.") && event.text) {
+      const actions = document.createElement("div");
+      actions.className = "agent-recording-actions";
+      if (type === "recording.stopped" && event.sequence) {
+        const player = document.createElement("audio");
+        player.className = "agent-recording-player";
+        player.controls = true;
+        player.preload = "none";
+        player.src = routedAPIPath(`/api/voice-agent/audit/${encodeURIComponent(event.sequence)}/recording`);
+        player.setAttribute("aria-label", `播放${voiceAgentEventText(event)}`);
+        actions.append(player);
+      }
+      const copyPath = document.createElement("button");
+      copyPath.className = "secondary compact";
+      copyPath.type = "button";
+      copyPath.textContent = "复制路径";
+      copyPath.addEventListener("click", () => copyIdentifier(event.text, "录音路径"));
+      actions.append(copyPath);
+      text.append(actions);
+    }
     const at = document.createElement("time");
     at.textContent = event.at ? new Date(event.at).toLocaleTimeString() : "";
     row.append(role, text, at);

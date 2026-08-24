@@ -32,6 +32,7 @@ type voiceAgentAuditEvent struct {
 	Text      string               `json:"text,omitempty"`
 	Error     string               `json:"error,omitempty"`
 	ToolCall  *voiceagent.ToolCall `json:"tool_call,omitempty"`
+	Usage     map[string]any       `json:"usage,omitempty"`
 	Persisted bool                 `json:"persisted"`
 	At        time.Time            `json:"at"`
 }
@@ -97,12 +98,21 @@ func redactVoiceAgentText(value string) string {
 	return voiceAgentIDPattern.ReplaceAllString(value, "[标识符已脱敏]")
 }
 
+func shouldStoreVoiceAgentAuditEvent(eventType voiceagent.EventType) bool {
+	return eventType != voiceagent.EventOutputTranscriptDelta
+}
+
+func isVoiceAgentRecordingEvent(eventType voiceagent.EventType) bool {
+	return eventType == "recording.started" || eventType == "recording.stopped"
+}
+
 func (c *voiceAgentController) recordEvent(callID string, event voiceagent.Event) {
 	if c.runtime == nil || event.Type == voiceagent.EventAudio {
 		return
 	}
 	state := c.snapshot()
-	entry := voiceAgentAuditEvent{CallID: callID, Type: event.Type, Provider: event.Provider, Text: event.Text, ToolCall: event.ToolCall, At: event.At, Persisted: state.AuditEnabled}
+	storeInAudit := shouldStoreVoiceAgentAuditEvent(event.Type)
+	entry := voiceAgentAuditEvent{CallID: callID, Type: event.Type, Provider: event.Provider, Text: event.Text, ToolCall: event.ToolCall, Usage: event.Usage, At: event.At, Persisted: state.AuditEnabled && storeInAudit}
 	if entry.At.IsZero() {
 		entry.At = time.Now()
 	}
@@ -110,7 +120,9 @@ func (c *voiceAgentController) recordEvent(callID string, event voiceagent.Event
 		entry.Error = event.Err.Error()
 	}
 	if state.RedactPII {
-		entry.Text = redactVoiceAgentText(entry.Text)
+		if !isVoiceAgentRecordingEvent(entry.Type) {
+			entry.Text = redactVoiceAgentText(entry.Text)
+		}
 		entry.Error = redactVoiceAgentText(entry.Error)
 		if entry.ToolCall != nil {
 			copy := *entry.ToolCall
@@ -118,16 +130,18 @@ func (c *voiceAgentController) recordEvent(callID string, event voiceagent.Event
 			entry.ToolCall = &copy
 		}
 	}
-	c.runtime.publish(entry, state.AuditEnabled)
+	c.runtime.publish(entry, state.AuditEnabled && storeInAudit, storeInAudit)
 }
 
-func (r *voiceAgentRuntime) publish(entry voiceAgentAuditEvent, persist bool) {
+func (r *voiceAgentRuntime) publish(entry voiceAgentAuditEvent, persist, storeInAudit bool) {
 	r.mu.Lock()
 	r.sequence++
 	entry.Sequence = r.sequence
-	r.audit = append(r.audit, entry)
-	if len(r.audit) > voiceAgentAuditLimit {
-		r.audit = append([]voiceAgentAuditEvent(nil), r.audit[len(r.audit)-voiceAgentAuditLimit:]...)
+	if storeInAudit {
+		r.audit = append(r.audit, entry)
+		if len(r.audit) > voiceAgentAuditLimit {
+			r.audit = append([]voiceAgentAuditEvent(nil), r.audit[len(r.audit)-voiceAgentAuditLimit:]...)
+		}
 	}
 	for _, subscriber := range r.subscribers {
 		select {
@@ -183,7 +197,7 @@ func (c *voiceAgentController) loadAudit() {
 	var entries []voiceAgentAuditEvent
 	for scanner.Scan() {
 		var entry voiceAgentAuditEvent
-		if json.Unmarshal(scanner.Bytes(), &entry) == nil {
+		if json.Unmarshal(scanner.Bytes(), &entry) == nil && shouldStoreVoiceAgentAuditEvent(entry.Type) {
 			entries = append(entries, entry)
 		}
 	}
@@ -213,6 +227,74 @@ func (a *app) voiceAgentAudit(w http.ResponseWriter, r *http.Request) {
 		events = events[len(events)-limit:]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events, "count": len(events)})
+}
+
+func (a *app) voiceAgentAuditRecording(w http.ResponseWriter, r *http.Request) {
+	sequence, err := strconv.ParseUint(r.PathValue("sequence"), 10, 64)
+	if err != nil || sequence == 0 {
+		writeError(w, http.StatusBadRequest, "invalid audit sequence")
+		return
+	}
+	controller := a.ensureVoiceAgent()
+	controller.runtime.mu.Lock()
+	var entry voiceAgentAuditEvent
+	for _, candidate := range controller.runtime.audit {
+		if candidate.Sequence == sequence {
+			entry = candidate
+			break
+		}
+	}
+	controller.runtime.mu.Unlock()
+	if !isVoiceAgentRecordingEvent(entry.Type) {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	path, err := a.resolveVoiceAgentRecording(entry.Text)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		writeError(w, http.StatusNotFound, "recording not found")
+		return
+	}
+	w.Header().Set("Content-Type", "audio/wav")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filepath.Base(path)))
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), file)
+}
+
+func (a *app) resolveVoiceAgentRecording(path string) (string, error) {
+	if !strings.EqualFold(filepath.Ext(path), ".wav") {
+		return "", errors.New("unsupported recording format")
+	}
+	root := strings.TrimSpace(a.recordingRoot)
+	if root == "" {
+		configDir, err := os.UserConfigDir()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(configDir, "DJOneHub", "recordings")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("recording path is outside the recording directory")
+	}
+	return resolvedPath, nil
 }
 
 func (a *app) clearVoiceAgentAudit(w http.ResponseWriter, r *http.Request) {

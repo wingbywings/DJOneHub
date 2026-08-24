@@ -135,6 +135,7 @@ type app struct {
 
 	audioHostMu            sync.RWMutex
 	audioHost              audioHostState
+	recordingRoot          string
 	voiceAgentOnce         sync.Once
 	voiceAgent             *voiceAgentController
 	voiceAgentSettingsPath string
@@ -797,6 +798,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PUT /api/voice-agent/config", a.voiceAgentConfigure)
 	mux.HandleFunc("GET /api/voice-agent/events", a.voiceAgentEvents)
 	mux.HandleFunc("GET /api/voice-agent/audit", a.voiceAgentAudit)
+	mux.HandleFunc("GET /api/voice-agent/audit/{sequence}/recording", a.voiceAgentAuditRecording)
 	mux.HandleFunc("DELETE /api/voice-agent/audit", a.clearVoiceAgentAudit)
 	mux.HandleFunc("GET /api/voice-agent/tools/pending", a.voiceAgentPendingTools)
 	mux.HandleFunc("POST /api/voice-agent/tools/{toolID}", a.voiceAgentToolDecision)

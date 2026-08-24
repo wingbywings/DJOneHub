@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -248,6 +249,120 @@ func TestVoiceAgentAuditRedactsPersistsAndClears(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(path), "voice-agent-audit.jsonl")); !os.IsNotExist(err) {
 		t.Fatalf("audit file still exists: %v", err)
+	}
+}
+
+func TestVoiceAgentAuditStoresOnlyCompleteAIReplies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "voice-agent.json")
+	controller := newVoiceAgentController(path)
+	controller.state.AuditEnabled = true
+
+	controller.runtime.mu.Lock()
+	controller.runtime.nextSubscriber++
+	subscriberID := controller.runtime.nextSubscriber
+	events := make(chan voiceAgentAuditEvent, 2)
+	controller.runtime.subscribers[subscriberID] = events
+	controller.runtime.mu.Unlock()
+
+	controller.recordEvent("call-1", voiceagent.Event{Type: voiceagent.EventOutputTranscriptDelta, Provider: "minimax", Text: "第一段", At: time.Now()})
+	controller.recordEvent("call-1", voiceagent.Event{Type: voiceagent.EventOutputTranscriptFinal, Provider: "minimax", Text: "第一段完整回复。", At: time.Now()})
+
+	wantTypes := []voiceagent.EventType{voiceagent.EventOutputTranscriptDelta, voiceagent.EventOutputTranscriptFinal}
+	for _, wantType := range wantTypes {
+		select {
+		case event := <-events:
+			if event.Type != wantType {
+				t.Fatalf("live event type = %q, want %q", event.Type, wantType)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for live transcript event")
+		}
+	}
+
+	controller.runtime.mu.Lock()
+	audit := append([]voiceAgentAuditEvent(nil), controller.runtime.audit...)
+	controller.runtime.mu.Unlock()
+	if len(audit) != 1 || audit[0].Type != voiceagent.EventOutputTranscriptFinal || audit[0].Text != "第一段完整回复。" {
+		t.Fatalf("audit = %#v", audit)
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(path), "voice-agent-audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(`"type":"transcript.output.delta"`)) {
+		t.Fatalf("audit persisted an intermediate AI reply: %s", data)
+	}
+	if !bytes.Contains(data, []byte("第一段完整回复。")) {
+		t.Fatalf("audit did not persist the complete AI reply: %s", data)
+	}
+	auditPath := filepath.Join(filepath.Dir(path), "voice-agent-audit.jsonl")
+	if err := appendVoiceAgentAudit(auditPath, voiceAgentAuditEvent{Type: voiceagent.EventOutputTranscriptDelta, Text: "历史中间片段", Persisted: true, At: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := newVoiceAgentController(path)
+	reloaded.runtime.mu.Lock()
+	reloadedAudit := append([]voiceAgentAuditEvent(nil), reloaded.runtime.audit...)
+	reloaded.runtime.mu.Unlock()
+	if len(reloadedAudit) != 1 || reloadedAudit[0].Type != voiceagent.EventOutputTranscriptFinal {
+		t.Fatalf("reloaded audit = %#v", reloadedAudit)
+	}
+}
+
+func TestVoiceAgentAuditServesRecordingFromRecordingDirectory(t *testing.T) {
+	recordingRoot := t.TempDir()
+	recordingPath := filepath.Join(recordingRoot, "call.wav")
+	wav := []byte("RIFF\x04\x00\x00\x00WAVE")
+	if err := os.WriteFile(recordingPath, wav, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controller := newVoiceAgentController("")
+	controller.recordEvent("call-1", voiceagent.Event{Type: "recording.stopped", Text: recordingPath, At: time.Now()})
+	controller.runtime.mu.Lock()
+	sequence := controller.runtime.audit[0].Sequence
+	controller.runtime.mu.Unlock()
+	instance := newDemoApp()
+	instance.recordingRoot = recordingRoot
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/voice-agent/audit/%d/recording", sequence), nil)
+	instance.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), wav) {
+		t.Fatalf("recording status=%d body=%q", response.Code, response.Body.Bytes())
+	}
+	if response.Header().Get("Content-Type") != "audio/wav" {
+		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+	}
+
+	outsidePath := filepath.Join(t.TempDir(), "outside.wav")
+	if err := os.WriteFile(outsidePath, wav, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controller.recordEvent("call-1", voiceagent.Event{Type: "recording.stopped", Text: outsidePath, At: time.Now()})
+	controller.runtime.mu.Lock()
+	outsideSequence := controller.runtime.audit[len(controller.runtime.audit)-1].Sequence
+	controller.runtime.mu.Unlock()
+	response = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/voice-agent/audit/%d/recording", outsideSequence), nil)
+	instance.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound || bytes.Contains(response.Body.Bytes(), []byte(outsidePath)) {
+		t.Fatalf("outside recording status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestVoiceAgentAuditPreservesUsageDetails(t *testing.T) {
+	controller := newVoiceAgentController("")
+	controller.recordEvent("call-1", voiceagent.Event{
+		Type:     voiceagent.EventUsage,
+		Provider: "qwen",
+		Usage:    map[string]any{"input_tokens": 12, "output_tokens": 8, "total_tokens": 20},
+		At:       time.Now(),
+	})
+	controller.runtime.mu.Lock()
+	audit := append([]voiceAgentAuditEvent(nil), controller.runtime.audit...)
+	controller.runtime.mu.Unlock()
+	if len(audit) != 1 || audit[0].Usage["total_tokens"] != 20 {
+		t.Fatalf("usage audit = %#v", audit)
 	}
 }
 

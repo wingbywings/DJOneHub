@@ -216,6 +216,8 @@ input:focus, textarea:focus, select:focus { border-color: #6698ed; outline: 0; b
 .agent-event:last-child { border-bottom: 0; }
 .agent-event-role { color: var(--text-muted); font-size: 11px; font-weight: 750; }
 .agent-event-text { color: var(--text-strong); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-recording-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.agent-recording-player { width: min(360px, 100%); height: 34px; }
 .agent-event time { color: var(--text-soft); font-size: 11px; white-space: nowrap; }
 .agent-event.error .agent-event-text { color: #b4404e; }
 .agent-event.tool .agent-event-text { color: #b45309; }
