@@ -141,9 +141,10 @@ Profile 不包含 API Key。单设备模式保存于 `~/Library/Application Supp
 ## Web、工具与审计
 
 - `GET /api/voice-agent/events` 使用 SSE 推送标准化转写、VAD、错误、工具和会话状态。
-- `GET /api/voice-agent/audit` 读取最近记录；`DELETE` 必须提交 `{"confirm":true}`。
+- 审计内容不在 Web 页面展示；启用后只写入本机 `voice-agent-audit.jsonl`。
 - 审计文件为 `voice-agent-audit.jsonl`，权限 `0600`，达到 5 MiB 自动轮转；内存和文件各最多保留有界数据。
-- 审计不保存 PCM。录音仍保存在 recordings 目录，审计只记录录音开始、停止和路径元数据。
+- 每通由 AI 接听的来电会自动全程录音，并把双方最终转写独立归档到 `voice-agent-calls.json`（权限 `0600`，最多 100 通）；Web 的“AI 通话记录”按通展示内容，支持播放和下载最终 WAV。
+- 审计不保存 PCM。录音仍保存在 recordings 目录，通话归档只保存录音路径元数据。
 - 电话状态查询和挂断会直接执行；Voice Agent 的 DTMF 工具暂时停用，网页人工通话键盘不受影响。
 - MiniMax 工具多轮保留完整 assistant `tool_calls` 与 `tool_call_id` 历史，确认后可以继续生成和播报结果。
 

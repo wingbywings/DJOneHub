@@ -6,6 +6,7 @@ let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
 let callPollInFlight = false;
+let voiceAgentCallsInFlight = false;
 let voiceSetupInFlight = false;
 let currentVoiceSetup = {};
 let adbPasscodeContext = "";
@@ -16,6 +17,9 @@ let voiceAgentFormDirty = false;
 let voiceAgentLoadedDevice = null;
 let voiceAgentEventSource = null;
 let liveVoiceAgentEvents = [];
+let renderedVoiceAgentCallsSignature = "";
+let currentVoiceAgentCalls = [];
+let selectedVoiceAgentCallID = "";
 let activeDeviceID = localStorage.getItem("djonehub-active-device") || "";
 let knownDevices = [];
 
@@ -143,9 +147,12 @@ async function refreshActiveDevice() {
   networkTrafficPrevious = null;
   voiceAgentFormDirty = false;
   voiceAgentLoadedDevice = null;
+  renderedVoiceAgentCallsSignature = "";
+  currentVoiceAgentCalls = [];
+  closeVoiceAgentCallDetail();
   closeVoiceAgentEvents();
   const tasks = [loadStatus(), loadSMS(), loadBarkSettings("sms")];
-  if ($("#calls").classList.contains("active")) tasks.push(loadCalls());
+  if ($("#calls").classList.contains("active")) tasks.push(loadCalls(), loadVoiceAgentCalls());
   if ($("#esim").classList.contains("active")) tasks.push(loadESIM());
   if ($("#network").classList.contains("active")) tasks.push(loadNetwork());
   await Promise.allSettled(tasks);
@@ -569,11 +576,11 @@ function voiceAgentEventText(event) {
 
 function renderVoiceAgentEvents(target, events, emptyText) {
   if (!events.length) {
-    target.className = target.id === "voice-agent-transcript" ? "agent-transcript empty" : "agent-audit-list empty";
+    target.className = "agent-transcript empty";
     target.textContent = emptyText;
     return;
   }
-  target.className = target.id === "voice-agent-transcript" ? "agent-transcript" : "agent-audit-list";
+  target.className = "agent-transcript";
   target.replaceChildren(...events.map((event) => {
     const row = document.createElement("article");
     const type = String(event.type || "");
@@ -649,7 +656,11 @@ function connectVoiceAgentEvents() {
     $("#voice-agent-stream-status").textContent = "实时事件流已连接";
   });
   source.addEventListener("voice-agent", (message) => {
-    try { appendLiveVoiceAgentEvent(JSON.parse(message.data)); } catch (_) {}
+    try {
+      const event = JSON.parse(message.data);
+      appendLiveVoiceAgentEvent(event);
+      if (event.type === "recording.stopped") void loadVoiceAgentCalls();
+    } catch (_) {}
   });
   source.onerror = () => {
     $("#voice-agent-stream-status").textContent = "事件流中断，正在自动重连";
@@ -819,16 +830,160 @@ async function loadVoiceAgentPendingTools() {
   } catch (_) {}
 }
 
-async function loadVoiceAgentAudit() {
+function renderVoiceAgentCallMessages(target, call) {
+  const messages = Array.isArray(call.messages) ? call.messages : [];
+  if (!messages.length) {
+    const empty = document.createElement("div");
+    empty.className = "agent-call-empty-transcript";
+    empty.textContent = call.ended_at ? "本通电话没有识别到有效通话内容" : "正在等待双方通话内容…";
+    target.replaceChildren(empty);
+    return;
+  }
+  target.replaceChildren(...messages.map((message) => {
+    const row = document.createElement("div");
+    row.className = "agent-call-message";
+    const role = document.createElement("span");
+    role.className = "agent-call-message-role";
+    role.textContent = message.role === "ai" ? "AI" : "来电方";
+    const text = document.createElement("p");
+    text.textContent = message.text || "—";
+    const at = document.createElement("time");
+    at.textContent = message.at ? new Date(message.at).toLocaleTimeString() : "";
+    row.append(role, text, at);
+    return row;
+  }));
+}
+
+function renderVoiceAgentCallRecording(target, call) {
+  if (call.recording_available) {
+    const endpoint = `/api/voice-agent/calls/${encodeURIComponent(call.call_id)}/recording`;
+    const player = document.createElement("audio");
+    player.controls = true;
+    player.preload = "none";
+    player.src = routedAPIPath(endpoint);
+    player.setAttribute("aria-label", `播放 ${call.number || "本通电话"} 的通话录音`);
+    const download = document.createElement("a");
+    download.href = `${routedAPIPath(endpoint)}?download=1`;
+    download.textContent = "下载录音";
+    download.setAttribute("download", call.recording_filename || "AI通话录音.wav");
+    target.replaceChildren(player, download);
+    return;
+  }
+  const pending = document.createElement("small");
+  pending.textContent = call.ended_at ? "录音文件尚未生成或已被移除" : "通话结束后可播放和下载完整录音";
+  target.replaceChildren(pending);
+}
+
+function voiceAgentCallMetaItem(label, value) {
+  const item = document.createElement("div");
+  const name = document.createElement("span");
+  name.textContent = label;
+  const content = document.createElement("strong");
+  content.textContent = value || "—";
+  item.append(name, content);
+  return item;
+}
+
+function renderVoiceAgentCallDetail(call) {
+  const messages = Array.isArray(call.messages) ? call.messages : [];
+  $("#voice-agent-call-detail-title").textContent = call.number || "未知号码";
+  $("#voice-agent-call-detail-status").textContent = call.ended_at ? "已结束" : "通话中";
+  $("#voice-agent-call-detail-status").className = `agent-status-badge${call.ended_at ? "" : " connected"}`;
+  $("#voice-agent-call-detail-message-count").textContent = `${messages.length} 条`;
+  $("#voice-agent-call-detail-meta").replaceChildren(
+    voiceAgentCallMetaItem("开始时间", call.started_at ? new Date(call.started_at).toLocaleString() : "—"),
+    voiceAgentCallMetaItem("通话时长", call.ended_at ? callDuration(call) : "通话中"),
+    voiceAgentCallMetaItem("AI Provider", call.provider || "默认 Provider"),
+    voiceAgentCallMetaItem("通话方向", call.direction === "outgoing" ? "AI 外呼" : "AI 接听"),
+  );
+  renderVoiceAgentCallMessages($("#voice-agent-call-detail-messages"), call);
+  renderVoiceAgentCallRecording($("#voice-agent-call-detail-recording"), call);
+}
+
+function openVoiceAgentCallDetail(callID) {
+  const call = currentVoiceAgentCalls.find((item) => item.call_id === callID);
+  if (!call) return;
+  selectedVoiceAgentCallID = callID;
+  renderVoiceAgentCallDetail(call);
+  $("#calls-overview-intro").hidden = true;
+  $("#call-module-list").hidden = true;
+  $("#voice-agent-call-detail").hidden = false;
+  $("#back-to-voice-agent-calls").focus({ preventScroll: true });
+  $("#calls").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeVoiceAgentCallDetail() {
+  selectedVoiceAgentCallID = "";
+  const intro = $("#calls-overview-intro");
+  const modules = $("#call-module-list");
+  const detail = $("#voice-agent-call-detail");
+  if (!intro || !modules || !detail) return;
+  intro.hidden = false;
+  modules.hidden = false;
+  detail.hidden = true;
+}
+
+function renderVoiceAgentCalls(calls) {
+  const list = $("#voice-agent-call-list");
+  const rows = Array.isArray(calls) ? calls : [];
+  currentVoiceAgentCalls = rows;
+  const signature = JSON.stringify(rows);
+  if (signature === renderedVoiceAgentCallsSignature) return;
+  const detailPlayer = $("#voice-agent-call-detail-recording audio");
+  if (detailPlayer && !detailPlayer.paused && !detailPlayer.ended) return;
+  renderedVoiceAgentCallsSignature = signature;
+  $("#voice-agent-call-count").textContent = `${rows.length} 通`;
+  if (!rows.length) {
+    list.className = "agent-call-list empty";
+    list.textContent = "暂无 AI 通话记录";
+    if (selectedVoiceAgentCallID) closeVoiceAgentCallDetail();
+    return;
+  }
+  list.className = "agent-call-list";
+  list.replaceChildren(...rows.map((call) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "agent-call-list-item";
+    button.setAttribute("aria-label", `查看 ${call.number || "未知号码"} 的 AI 通话详情`);
+    const identity = document.createElement("span");
+    identity.className = "agent-call-list-identity";
+    const number = document.createElement("strong");
+    number.textContent = call.number || "未知号码";
+    const messages = Array.isArray(call.messages) ? call.messages : [];
+    const meta = document.createElement("small");
+    const status = call.ended_at ? callDuration(call) : "通话中";
+    meta.textContent = [call.provider ? `AI · ${call.provider}` : "AI 接听", status, `${messages.length} 条转写`].filter(Boolean).join(" · ");
+    const preview = document.createElement("span");
+    preview.className = "agent-call-list-preview";
+    preview.textContent = messages.length ? messages[messages.length - 1].text : (call.ended_at ? "没有识别到有效通话内容" : "正在等待通话内容…");
+    identity.append(number, meta, preview);
+    const started = document.createElement("time");
+    started.className = "agent-call-list-time";
+    started.textContent = call.started_at ? new Date(call.started_at).toLocaleString() : "";
+    button.append(identity, started);
+    button.addEventListener("click", () => openVoiceAgentCallDetail(call.call_id));
+    return button;
+  }));
+  if (selectedVoiceAgentCallID) {
+    const selected = rows.find((call) => call.call_id === selectedVoiceAgentCallID);
+    if (selected) renderVoiceAgentCallDetail(selected);
+    else closeVoiceAgentCallDetail();
+  }
+}
+
+async function loadVoiceAgentCalls() {
+  if (voiceAgentCallsInFlight) return;
+  voiceAgentCallsInFlight = true;
   try {
-    const result = await api("/api/voice-agent/audit?limit=200");
-    const events = result.events || [];
-    $("#voice-agent-audit-count").textContent = `${events.length} 条`;
-    renderVoiceAgentEvents($("#voice-agent-audit-list"), events, "暂无审计记录");
-    return events;
+    const result = await api("/api/voice-agent/calls?limit=50");
+    renderVoiceAgentCalls(result.calls || []);
   } catch (error) {
-    $("#voice-agent-audit-list").textContent = error.message;
-    return [];
+    const list = $("#voice-agent-call-list");
+    renderedVoiceAgentCallsSignature = "";
+    list.className = "agent-call-list empty";
+    list.textContent = error.message;
+  } finally {
+    voiceAgentCallsInFlight = false;
   }
 }
 
@@ -838,15 +993,20 @@ async function loadCalls() {
   try {
     const status = await api("/api/calls/status");
     const active = status.active;
+    const callJustEnded = currentCallState !== null && !active;
     const audioHost = status.audio_host || {};
     currentAudioHostState = audioHost;
     const panel = $("#active-call");
     const pollText = status.polling
       ? `每 ${status.poll_interval_s || 3} 秒检查`
       : "演示模式";
-    $("#call-monitor-status").textContent = status.last_poll_error
-      ? `${pollText} · ${status.last_poll_error}`
-      : `${pollText} · 监听正常`;
+    const monitorStatus = $("#call-monitor-status");
+    monitorStatus.classList.toggle("attention", Boolean(active || status.last_poll_error));
+    monitorStatus.textContent = status.last_poll_error
+      ? `监听异常 · ${status.last_poll_error}`
+      : (active
+        ? `${callStateLabel(active)} · ${active.number || "未知号码"}`
+        : `${pollText} · 监听正常`);
     if (active) {
       currentCallState = active.state || null;
       panel.hidden = false;
@@ -862,7 +1022,8 @@ async function loadCalls() {
       $("#mute-call").hidden = !mediaActive;
       $("#record-call").hidden = !mediaActive;
       $("#mute-call").textContent = audioHost.want_muted ? "取消静音" : "静音";
-      $("#record-call").textContent = audioHost.want_recording ? "停止录音" : "录音";
+      $("#record-call").disabled = Boolean(active.ai_handled);
+      $("#record-call").textContent = active.ai_handled ? "AI 自动录音中" : (audioHost.want_recording ? "停止录音" : "录音");
       $("#dial-call").disabled = true;
     } else {
       currentCallState = null;
@@ -873,6 +1034,7 @@ async function loadCalls() {
       $("#dtmf-panel").hidden = true;
       $("#mute-call").hidden = true;
       $("#record-call").hidden = true;
+      $("#record-call").disabled = false;
       $("#dial-call").disabled = false;
     }
     $("#audio-host-status").textContent = audioHost.registered
@@ -881,8 +1043,10 @@ async function loadCalls() {
         : `Mac 音频宿主在线${audioHost.error ? ` · ${audioHost.error}` : "，等待通话媒体"}`)
       : "Mac 音频宿主尚未连接；发行包请用 djonehub start，源码运行需同时启动 DJOneHubAudioHost";
     renderCallHistory(status.history);
+    if (callJustEnded) void loadVoiceAgentCalls();
   } catch (error) {
     $("#call-monitor-status").textContent = `监听异常：${error.message}`;
+    $("#call-monitor-status").classList.add("attention");
   } finally {
     callPollInFlight = false;
   }
@@ -1631,7 +1795,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
     if (tab.dataset.view === "calls") {
       loadCalls();
       loadBarkSettings("call");
-      loadVoiceAgentAudit();
+      loadVoiceAgentCalls();
       connectVoiceAgentEvents();
     } else {
       closeVoiceAgentEvents();
@@ -1691,6 +1855,7 @@ $("#test-sms-bark").addEventListener("click", () => testBarkSettings("sms"));
 $("#call-bark-settings-form").addEventListener("submit", (event) => saveBarkSettings(event, "call"));
 $("#test-call-bark").addEventListener("click", () => testBarkSettings("call"));
 $("#refresh-calls").addEventListener("click", loadCalls);
+$("#refresh-call-history").addEventListener("click", loadCalls);
 
 $("#voice-agent-form").addEventListener("input", (event) => {
   voiceAgentFormDirty = true;
@@ -1718,29 +1883,11 @@ $("#clear-live-transcript").addEventListener("click", () => {
   liveVoiceAgentEvents = [];
   renderVoiceAgentEvents($("#voice-agent-transcript"), [], "等待 Voice Agent 事件...");
 });
-$("#refresh-voice-agent-audit").addEventListener("click", loadVoiceAgentAudit);
-$("#export-voice-agent-audit").addEventListener("click", async () => {
-  const events = await loadVoiceAgentAudit();
-  const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), events }, null, 2)], { type: "application/json" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `djonehub-voice-agent-audit-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
-});
-$("#clear-voice-agent-audit").addEventListener("click", async () => {
-  const confirmed = await showModal({
-    title: "清空 Voice Agent 审计",
-    message: "将删除当前设备的转写和工具审计文件。通话录音不会被删除。",
-    confirmLabel: "确认清空",
-    danger: true,
-  });
-  if (!confirmed) return;
-  try {
-    await api("/api/voice-agent/audit", { method: "DELETE", body: JSON.stringify({ confirm: true }) });
-    await loadVoiceAgentAudit();
-    notice("Voice Agent 审计已清空");
-  } catch (error) { notice(error.message); }
+$("#refresh-voice-agent-calls").addEventListener("click", loadVoiceAgentCalls);
+$("#back-to-voice-agent-calls").addEventListener("click", () => {
+  closeVoiceAgentCallDetail();
+  $("#voice-agent-call-panel").open = true;
+  $("#voice-agent-call-panel").scrollIntoView({ behavior: "smooth", block: "start" });
 });
 
 $("#initialize-voice-module").addEventListener("click", async () => {

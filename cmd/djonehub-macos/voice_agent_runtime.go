@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -67,9 +68,12 @@ type pendingVoiceAgentHangup struct {
 type voiceAgentRuntime struct {
 	mu                sync.Mutex
 	auditFileMu       sync.Mutex
+	callFileMu        sync.Mutex
 	sequence          uint64
 	audit             []voiceAgentAuditEvent
 	auditPath         string
+	callRecords       []voiceAgentCallRecord
+	callRecordsPath   string
 	subscribers       map[uint64]chan voiceAgentAuditEvent
 	nextSubscriber    uint64
 	pendingTools      map[string]*pendingVoiceAgentTool
@@ -79,18 +83,23 @@ type voiceAgentRuntime struct {
 }
 
 func (c *voiceAgentController) initializeRuntime() {
-	path := ""
+	auditPath := ""
+	callRecordsPath := ""
 	if c.settingsPath != "" {
-		path = filepath.Join(filepath.Dir(c.settingsPath), "voice-agent-audit.jsonl")
+		directory := filepath.Dir(c.settingsPath)
+		auditPath = filepath.Join(directory, "voice-agent-audit.jsonl")
+		callRecordsPath = filepath.Join(directory, "voice-agent-calls.json")
 	}
 	c.runtime = &voiceAgentRuntime{
-		auditPath:      path,
-		subscribers:    make(map[uint64]chan voiceAgentAuditEvent),
-		pendingTools:   make(map[string]*pendingVoiceAgentTool),
-		pendingHangups: make(map[string]*pendingVoiceAgentHangup),
-		providerHealth: make(map[string]voiceAgentProviderHealth),
+		auditPath:       auditPath,
+		callRecordsPath: callRecordsPath,
+		subscribers:     make(map[uint64]chan voiceAgentAuditEvent),
+		pendingTools:    make(map[string]*pendingVoiceAgentTool),
+		pendingHangups:  make(map[string]*pendingVoiceAgentHangup),
+		providerHealth:  make(map[string]voiceAgentProviderHealth),
 	}
 	c.loadAudit()
+	c.loadCallRecords()
 }
 
 var (
@@ -123,6 +132,7 @@ func (c *voiceAgentController) recordEvent(callID string, event voiceagent.Event
 	if c.runtime == nil || event.Type == voiceagent.EventAudio {
 		return
 	}
+	c.recordCallEvent(callID, event)
 	state := c.snapshot()
 	storeInAudit := shouldStoreVoiceAgentAuditEvent(event.Type)
 	entry := voiceAgentAuditEvent{CallID: callID, Type: event.Type, Provider: event.Provider, Text: event.Text, ToolCall: event.ToolCall, Usage: event.Usage, At: event.At, Persisted: state.AuditEnabled && storeInAudit}
@@ -166,7 +176,9 @@ func (r *voiceAgentRuntime) publish(entry voiceAgentAuditEvent, persist, storeIn
 	r.mu.Unlock()
 	if persist && path != "" {
 		r.auditFileMu.Lock()
-		_ = appendVoiceAgentAudit(path, entry)
+		if err := appendVoiceAgentAudit(path, entry); err != nil {
+			log.Printf("persist voice agent audit: %v", err)
+		}
 		r.auditFileMu.Unlock()
 	}
 }

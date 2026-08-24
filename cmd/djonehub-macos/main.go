@@ -800,6 +800,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/voice-agent/audit", a.voiceAgentAudit)
 	mux.HandleFunc("GET /api/voice-agent/audit/{sequence}/recording", a.voiceAgentAuditRecording)
 	mux.HandleFunc("DELETE /api/voice-agent/audit", a.clearVoiceAgentAudit)
+	mux.HandleFunc("GET /api/voice-agent/calls", a.voiceAgentCalls)
+	mux.HandleFunc("GET /api/voice-agent/calls/{callID}/recording", a.voiceAgentCallRecording)
 	mux.HandleFunc("GET /api/voice-agent/tools/pending", a.voiceAgentPendingTools)
 	mux.HandleFunc("POST /api/voice-agent/tools/{toolID}", a.voiceAgentToolDecision)
 	mux.HandleFunc("GET /api/calls/audio/agent/media", a.voiceAgentMedia)

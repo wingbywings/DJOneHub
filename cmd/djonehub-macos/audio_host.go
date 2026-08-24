@@ -10,15 +10,16 @@ import (
 )
 
 type audioHostState struct {
-	Registered    bool      `json:"registered"`
-	Running       bool      `json:"running"`
-	Muted         bool      `json:"muted"`
-	Recording     bool      `json:"recording"`
-	WantMuted     bool      `json:"want_muted"`
-	WantRecording bool      `json:"want_recording"`
-	RecordingPath string    `json:"recording_path,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	LastSeen      time.Time `json:"last_seen,omitempty"`
+	Registered      bool      `json:"registered"`
+	Running         bool      `json:"running"`
+	Muted           bool      `json:"muted"`
+	Recording       bool      `json:"recording"`
+	WantMuted       bool      `json:"want_muted"`
+	WantRecording   bool      `json:"want_recording"`
+	RecordingPath   string    `json:"recording_path,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	LastSeen        time.Time `json:"last_seen,omitempty"`
+	recordingCallID string
 }
 
 type audioHostConfigResponse struct {
@@ -61,9 +62,16 @@ func (a *app) audioHostRegister(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	a.callMu.RLock()
+	activeCallID := ""
+	if a.activeCall != nil {
+		activeCallID = a.activeCall.ID
+	}
+	a.callMu.RUnlock()
 	a.audioHostMu.Lock()
 	wasRecording := a.audioHost.Recording
 	previousPath := a.audioHost.RecordingPath
+	recordingCallID := a.audioHost.recordingCallID
 	a.audioHost.Registered = body.Enabled
 	a.audioHost.Running = body.Running
 	a.audioHost.Muted = body.Muted
@@ -71,20 +79,26 @@ func (a *app) audioHostRegister(w http.ResponseWriter, r *http.Request) {
 	a.audioHost.RecordingPath = body.RecordingPath
 	a.audioHost.Error = body.Error
 	a.audioHost.LastSeen = time.Now()
+	if body.Recording {
+		if !wasRecording || recordingCallID == "" {
+			recordingCallID = activeCallID
+		}
+		a.audioHost.recordingCallID = recordingCallID
+	} else if wasRecording {
+		a.audioHost.recordingCallID = ""
+	}
 	state := a.audioHost
 	a.audioHostMu.Unlock()
 	if wasRecording != body.Recording || (body.Recording && previousPath != body.RecordingPath) {
-		a.callMu.RLock()
-		callID := ""
-		if a.activeCall != nil {
-			callID = a.activeCall.ID
-		}
-		a.callMu.RUnlock()
+		callID := activeCallID
 		eventType := voiceagent.EventType("recording.stopped")
 		text := previousPath
 		if body.Recording {
 			eventType = "recording.started"
 			text = body.RecordingPath
+			callID = recordingCallID
+		} else if recordingCallID != "" {
+			callID = recordingCallID
 		}
 		a.ensureVoiceAgent().recordEvent(callID, voiceagent.Event{Type: eventType, Text: text, At: time.Now()})
 	}
@@ -163,6 +177,15 @@ func (a *app) audioHostRecord(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled && !a.callStateAllows("active") {
 		writeError(w, http.StatusConflict, "当前没有已接通的通话")
 		return
+	}
+	if !body.Enabled {
+		a.callMu.RLock()
+		recordingRequired := a.activeCall != nil && a.activeCall.State == "active" && a.activeCall.AIHandled
+		a.callMu.RUnlock()
+		if recordingRequired {
+			writeError(w, http.StatusConflict, "AI 接听的电话必须保留完整录音")
+			return
+		}
 	}
 	a.audioHostMu.Lock()
 	a.audioHost.WantRecording = body.Enabled

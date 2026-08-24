@@ -78,3 +78,19 @@ func TestAudioHostRegistrationIsReportedInCallStatus(t *testing.T) {
 		t.Fatalf("audio host state = %#v", state)
 	}
 }
+
+func TestAudioHostCannotStopRequiredAIRecording(t *testing.T) {
+	instance := newDemoApp()
+	now := time.Now()
+	instance.activeCall = &callRecord{ID: "call-ai-recording", Direction: "incoming", State: "active", AIHandled: true, StartedAt: now, UpdatedAt: now}
+	instance.audioHost.WantRecording = true
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/calls/audio/record", bytes.NewBufferString(`{"enabled":false}`))
+	instance.routes().ServeHTTP(response, request)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if !instance.audioHost.WantRecording {
+		t.Fatal("required AI recording intent was cleared")
+	}
+}

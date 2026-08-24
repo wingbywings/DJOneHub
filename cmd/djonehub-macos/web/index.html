@@ -113,7 +113,40 @@
     </section>
 
     <section id="calls" class="view">
-      <div class="view-intro"><div><span class="section-kicker">CALL MONITOR</span><h2>来电监控</h2></div><p>后台持续监听模块语音通话，并记录最近 100 条通话。</p></div>
+      <div id="calls-overview-intro" class="view-intro"><div><span class="section-kicker">CALL CENTER</span><h2>来电</h2></div><p>按需展开通话功能，重要状态会直接显示在模块摘要中。</p></div>
+      <div id="call-module-list" class="call-module-list">
+      <details id="call-monitor-panel" class="call-feature-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon monitor-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>来电监控</strong><small>接听控制、语音准备与 AI 通话能力</small></span>
+          <span id="call-monitor-status" class="call-feature-status">尚未读取来电状态</span>
+        </summary>
+        <div class="call-feature-content">
+      <div id="active-call" class="active-call-card" hidden>
+        <span id="active-call-label">正在来电</span>
+        <strong id="active-call-number">未知号码</strong>
+        <small id="active-call-time"></small>
+        <div class="call-actions">
+          <button id="answer-call" type="button" hidden>接听</button>
+          <button id="reject-call" class="secondary danger" type="button" hidden>拒接</button>
+          <button id="hangup-call" class="danger" type="button" hidden>挂断</button>
+          <button id="mute-call" class="secondary" type="button" hidden>静音</button>
+          <button id="record-call" class="secondary" type="button" hidden>录音</button>
+        </div>
+        <div id="dtmf-panel" class="dtmf-panel" hidden>
+          <span>通话键盘</span>
+          <div id="dtmf-pad" class="dtmf-pad" aria-label="通话键盘">
+            <button type="button" data-dtmf="1">1</button><button type="button" data-dtmf="2">2</button><button type="button" data-dtmf="3">3</button>
+            <button type="button" data-dtmf="4">4</button><button type="button" data-dtmf="5">5</button><button type="button" data-dtmf="6">6</button>
+            <button type="button" data-dtmf="7">7</button><button type="button" data-dtmf="8">8</button><button type="button" data-dtmf="9">9</button>
+            <button type="button" data-dtmf="*">*</button><button type="button" data-dtmf="0">0</button><button type="button" data-dtmf="#">#</button>
+          </div>
+        </div>
+      </div>
+      <div class="call-content-heading">
+        <span>后台监听保持运行，无需展开此模块。</span>
+        <button id="refresh-calls" class="secondary compact" type="button">刷新状态</button>
+      </div>
       <section class="voice-setup-card" aria-labelledby="voice-setup-title">
         <div>
           <span class="section-kicker">VOICE READINESS</span>
@@ -132,15 +165,12 @@
           <button id="install-voice-runtime" class="secondary" type="button" hidden>安装语音运行时</button>
         </div>
       </section>
-      <section class="agent-console" aria-labelledby="voice-agent-title">
-        <div class="agent-console-heading">
-          <div>
-            <span class="section-kicker">AI VOICE AGENT</span>
-            <h3 id="voice-agent-title">智能语音接听与拨号</h3>
-            <p id="voice-agent-status" class="inline-status">正在读取 Voice Agent 状态...</p>
-          </div>
+      <details id="voice-agent-settings-panel" class="call-submodule">
+        <summary class="agent-settings-summary">
+          <span class="call-feature-copy"><strong id="voice-agent-title">智能语音接听与拨号</strong><small id="voice-agent-status">正在读取 Voice Agent 状态...</small></span>
           <span id="voice-agent-connection" class="agent-status-badge">人工模式</span>
-        </div>
+        </summary>
+        <div class="call-submodule-content">
         <form id="voice-agent-form" class="agent-settings-grid">
           <label class="checkbox-field agent-switch">
             <input id="voice-agent-enabled" type="checkbox">
@@ -202,7 +232,7 @@
             </label>
             <label class="checkbox-field">
               <input id="voice-agent-audit-enabled" type="checkbox">
-              <span><strong>持久化转写审计</strong><small>只保存文本、状态和工具事件，不保存音频数据。</small></span>
+              <span><strong>写入审计日志文件</strong><small>文本、状态和工具事件只写入本机日志，不在 Web 页面展示。</small></span>
             </label>
             <label class="checkbox-field">
               <input id="voice-agent-redact-pii" type="checkbox">
@@ -227,27 +257,30 @@
           <div class="section-heading compact-heading"><h3>待确认工具操作</h3><small>45 秒后自动拒绝</small></div>
           <div id="voice-agent-pending-list"></div>
         </div>
-        <div class="agent-transcript-panel">
-          <div class="section-heading compact-heading">
-            <div><h3>实时转写与运行事件</h3><small id="voice-agent-stream-status">尚未连接事件流</small></div>
+        </div>
+      </details>
+      <details id="voice-agent-transcript-panel" class="call-submodule agent-transcript-panel">
+        <summary>
+          <span class="call-feature-copy"><strong>实时转写与运行事件</strong><small id="voice-agent-stream-status">尚未连接事件流</small></span>
+        </summary>
+        <div class="call-submodule-content">
+          <div class="call-content-heading">
+            <span>仅显示当前运行期内的实时事件。</span>
             <button id="clear-live-transcript" class="secondary compact" type="button">清空面板</button>
           </div>
           <div id="voice-agent-transcript" class="agent-transcript empty">通话接通并启用 Agent 后，将在这里显示实时转写。</div>
         </div>
-        <details class="fold-panel agent-audit-panel">
-          <summary><span>审计记录</span><small id="voice-agent-audit-count">0 条</small></summary>
-          <div class="agent-audit-actions">
-            <button id="refresh-voice-agent-audit" class="secondary compact" type="button">刷新</button>
-            <button id="export-voice-agent-audit" class="secondary compact" type="button">导出 JSON</button>
-            <button id="clear-voice-agent-audit" class="secondary danger compact" type="button">清空审计</button>
-          </div>
-          <div id="voice-agent-audit-list" class="agent-audit-list empty">暂无审计记录</div>
-        </details>
-      </section>
-      <div class="call-monitor-heading">
-        <p id="call-monitor-status" class="inline-status">尚未读取来电状态</p>
-        <button id="refresh-calls" class="secondary" type="button">刷新</button>
-      </div>
+      </details>
+        </div>
+      </details>
+
+      <details id="manual-dial-panel" class="call-feature-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon dial-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>手动拨号</strong><small>使用当前模块发起语音通话</small></span>
+          <span class="call-feature-status">实验性</span>
+        </summary>
+        <div class="call-feature-content">
       <form id="dial-form" class="dial-form">
         <label for="dial-number">电话号码</label>
         <div class="dial-input-row">
@@ -256,29 +289,16 @@
         </div>
         <small>模块侧 D4/UAC 路由与 Mac 麦克风/扬声器宿主会在通话接通后自动启动；真机验收完成前此功能仍标记为实验性。</small>
       </form>
-      <div id="active-call" class="active-call-card" hidden>
-        <span id="active-call-label">正在来电</span>
-        <strong id="active-call-number">未知号码</strong>
-        <small id="active-call-time"></small>
-        <div class="call-actions">
-          <button id="answer-call" type="button" hidden>接听</button>
-          <button id="reject-call" class="secondary danger" type="button" hidden>拒接</button>
-          <button id="hangup-call" class="danger" type="button" hidden>挂断</button>
-          <button id="mute-call" class="secondary" type="button" hidden>静音</button>
-          <button id="record-call" class="secondary" type="button" hidden>录音</button>
         </div>
-        <div id="dtmf-panel" class="dtmf-panel" hidden>
-          <span>通话键盘</span>
-          <div id="dtmf-pad" class="dtmf-pad" aria-label="通话键盘">
-            <button type="button" data-dtmf="1">1</button><button type="button" data-dtmf="2">2</button><button type="button" data-dtmf="3">3</button>
-            <button type="button" data-dtmf="4">4</button><button type="button" data-dtmf="5">5</button><button type="button" data-dtmf="6">6</button>
-            <button type="button" data-dtmf="7">7</button><button type="button" data-dtmf="8">8</button><button type="button" data-dtmf="9">9</button>
-            <button type="button" data-dtmf="*">*</button><button type="button" data-dtmf="0">0</button><button type="button" data-dtmf="#">#</button>
-          </div>
-        </div>
-      </div>
-      <details id="call-bark-settings-panel" class="fold-panel notification-panel">
-        <summary><span>来电 Bark 通知</span><small id="call-bark-summary">未配置</small></summary>
+      </details>
+
+      <details id="call-bark-settings-panel" class="call-feature-panel notification-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon notification-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>来电 Bark 通知</strong><small>未接来电与 AI 接听结果推送</small></span>
+          <span id="call-bark-summary" class="call-feature-status">未配置</span>
+        </summary>
+        <div class="call-feature-content">
         <form id="call-bark-settings-form" class="bark-settings-grid">
           <label class="checkbox-field">
             <input id="call-bark-enabled" type="checkbox">
@@ -305,12 +325,50 @@
           </div>
         </form>
         <p id="call-bark-status" class="inline-status">正在读取来电 Bark 配置...</p>
+        </div>
       </details>
-      <div class="section-heading">
-        <h2>最近通话记录</h2>
-        <small id="call-history-count">0 条</small>
+
+      <details id="call-history-panel" class="call-feature-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon history-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>最近通话记录</strong><small>当前运行期内最近 100 条来电与外呼</small></span>
+          <span id="call-history-count" class="call-feature-status">0 条</span>
+        </summary>
+        <div class="call-feature-content">
+          <div class="call-content-heading"><span>按时间从近到远排列。</span><button id="refresh-call-history" class="secondary compact" type="button">刷新记录</button></div>
+          <div id="call-history" class="list empty">暂无记录</div>
+        </div>
+      </details>
+
+      <details id="voice-agent-call-panel" class="call-feature-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon ai-history-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>AI 通话记录</strong><small>每通 AI 来电的转写与录音归档</small></span>
+          <span id="voice-agent-call-count" class="call-feature-status">0 通</span>
+        </summary>
+        <div class="call-feature-content">
+          <div class="call-content-heading"><span>选择一通电话进入完整详情。</span><button id="refresh-voice-agent-calls" class="secondary compact" type="button">刷新记录</button></div>
+          <div id="voice-agent-call-list" class="agent-call-list empty">暂无 AI 通话记录</div>
+        </div>
+      </details>
       </div>
-      <div id="call-history" class="list empty">暂无记录</div>
+
+      <section id="voice-agent-call-detail" class="agent-call-detail-page" aria-labelledby="voice-agent-call-detail-title" hidden>
+        <button id="back-to-voice-agent-calls" class="detail-back-button" type="button">← 返回 AI 通话记录</button>
+        <div class="agent-call-detail-heading">
+          <div><span class="section-kicker">AI CALL DETAIL</span><h2 id="voice-agent-call-detail-title">通话详情</h2></div>
+          <span id="voice-agent-call-detail-status" class="agent-status-badge">已结束</span>
+        </div>
+        <div id="voice-agent-call-detail-meta" class="agent-call-detail-meta"></div>
+        <section class="agent-call-detail-section">
+          <div class="section-heading compact-heading"><h3>通话转写</h3><small id="voice-agent-call-detail-message-count">0 条</small></div>
+          <div id="voice-agent-call-detail-messages" class="agent-call-messages"></div>
+        </section>
+        <section class="agent-call-detail-section">
+          <div class="section-heading compact-heading"><h3>通话录音</h3></div>
+          <div id="voice-agent-call-detail-recording" class="agent-call-recording"></div>
+        </section>
+      </section>
     </section>
 
     <section id="esim" class="view">

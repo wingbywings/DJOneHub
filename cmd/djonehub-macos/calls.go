@@ -155,6 +155,7 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 	}
 
 	var notify *callRecord
+	var finishedAIRecord *callRecord
 	a.callMu.Lock()
 	previousState := ""
 	if a.activeCall != nil {
@@ -175,9 +176,15 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 			if completed.Missed || completed.AIHandled {
 				notify = &completed
 			}
+			if completed.AIHandled {
+				finishedAIRecord = &completed
+			}
 			a.activeCall = nil
 		}
 		a.callMu.Unlock()
+		if finishedAIRecord != nil {
+			a.ensureVoiceAgent().finishCallRecord(finishedAIRecord.ID, now)
+		}
 		a.syncVoiceAgentPreparation()
 		if notify != nil {
 			a.forwardCallBark(*notify)
@@ -251,7 +258,9 @@ func (a *app) syncVoiceAgentRecording(previousState, currentState string) {
 		return
 	}
 	a.activeCall.AIHandled = true
+	call := *a.activeCall
 	a.callMu.Unlock()
+	a.ensureVoiceAgent().startCallRecord(call, a.ensureVoiceAgent().snapshot().Provider)
 
 	a.audioHostMu.Lock()
 	a.audioHost.WantRecording = true
