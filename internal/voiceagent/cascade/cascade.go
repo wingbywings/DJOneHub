@@ -107,13 +107,15 @@ type session struct {
 	pending   map[string]*voiceagent.ToolCall
 	response  context.CancelFunc
 	closeOnce sync.Once
+	eventMu   sync.RWMutex
+	eventsEnd bool
 }
 
 func (s *session) Events() <-chan voiceagent.Event                 { return s.events }
 func (s *session) SendAudio(ctx context.Context, pcm []byte) error { return s.stt.SendAudio(ctx, pcm) }
 
-// Start asks the cascade model to produce the configured opening turn. The
-// caller decides when the initial silence window has elapsed.
+// Start asks the cascade model to produce the configured opening turn after
+// the telephone playback path is ready.
 func (s *session) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
@@ -162,7 +164,7 @@ func (s *session) SubmitToolResult(ctx context.Context, callID string, output an
 
 func (s *session) run() {
 	s.emit(voiceagent.Event{Type: voiceagent.EventSessionReady})
-	defer func() { s.emit(voiceagent.Event{Type: voiceagent.EventClosed}); close(s.events) }()
+	defer s.finishEvents()
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -399,11 +401,36 @@ func (s *session) interruptResponse() {
 func (s *session) emit(event voiceagent.Event) {
 	event.Provider = s.provider
 	event.At = time.Now()
+	s.eventMu.RLock()
+	defer s.eventMu.RUnlock()
+	if s.eventsEnd {
+		return
+	}
 	select {
 	case s.events <- event:
 	case <-s.ctx.Done():
 	}
 }
+
+func (s *session) finishEvents() {
+	// Stop every response producer before closing their shared output channel.
+	// Prepared sessions can be cancelled while an LLM/TTS goroutine is still
+	// emitting, so close and send must be serialized explicitly.
+	s.cancel()
+	s.eventMu.Lock()
+	defer s.eventMu.Unlock()
+	if s.eventsEnd {
+		return
+	}
+	s.eventsEnd = true
+	closed := voiceagent.Event{Type: voiceagent.EventClosed, Provider: s.provider, At: time.Now()}
+	select {
+	case s.events <- closed:
+	default:
+	}
+	close(s.events)
+}
+
 func (s *session) Close() error {
 	s.closeOnce.Do(func() { s.cancel(); _ = s.stt.Close() })
 	return nil

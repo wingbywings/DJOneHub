@@ -49,12 +49,12 @@ func TestRenderBarkTemplatesUseChannelSpecificVariables(t *testing.T) {
 	}
 
 	ended := time.Date(2026, 8, 10, 13, 0, 8, 0, time.Local)
-	call := barkChannelSettings{Alias: "电话卡", MessageTemplate: "{alias_prefix}{number}|{started_at}|{duration}"}
-	callMessage := renderMissedCallBarkMessage(call, callRecord{
+	call := barkChannelSettings{Alias: "电话卡", MessageTemplate: "{alias_prefix}{status}|{number}|{started_at}|{duration}"}
+	callMessage := renderCallBarkMessage(call, callRecord{
 		Number: "13800138000", StartedAt: ended.Add(-8 * time.Second), EndedAt: &ended, Missed: true,
 	})
-	if callMessage != "[电话卡]13800138000|2026-08-10 13:00:00|8秒" {
-		t.Fatalf("renderMissedCallBarkMessage() = %q", callMessage)
+	if callMessage != "[电话卡]未接来电|13800138000|2026-08-10 13:00:00|8秒" {
+		t.Fatalf("renderCallBarkMessage() = %q", callMessage)
 	}
 }
 
@@ -203,6 +203,38 @@ func TestAnsweredCallDoesNotForwardBark(t *testing.T) {
 	instance.applyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: "10086"}}, started.Add(3*time.Second))
 	instance.applyCallPoll(nil, started.Add(12*time.Second))
 	assertNoBarkRequest(t, received)
+}
+
+func TestVoiceAgentCallForwardsBarkAfterCallEnds(t *testing.T) {
+	received := make(chan string, 1)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		received <- r.URL.Path
+		return barkSuccessResponse(r), nil
+	})}
+	instance := &app{
+		demo:               true,
+		barkSettingsLoaded: true,
+		barkSettings: normalizeBarkSettings(barkSettings{MissedCall: barkChannelSettings{
+			Enabled: true, APIURL: "https://example.invalid/{message}", MessageTemplate: "{status}：{number}",
+		}}),
+		barkHTTPClient: client,
+	}
+	controller := newVoiceAgentController("")
+	controller.state = voiceAgentState{Enabled: true, Provider: "qwen"}
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	started := time.Date(2026, 8, 10, 16, 0, 0, 0, time.Local)
+	instance.applyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "incoming", Number: "10010"}}, started)
+	instance.applyCallPoll([]parsedCall{{Index: 1, Direction: "incoming", State: "active", Number: "10010"}}, started.Add(3*time.Second))
+	instance.applyCallPoll(nil, started.Add(12*time.Second))
+
+	select {
+	case path := <-received:
+		if path != "/AI 已接听：10010" {
+			t.Fatalf("forwarded path = %q", path)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AI-handled call was not forwarded")
+	}
 }
 
 func barkSuccessResponse(request *http.Request) *http.Response {

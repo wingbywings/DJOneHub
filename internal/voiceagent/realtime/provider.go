@@ -24,7 +24,7 @@ type Dialect interface {
 }
 
 type openingDialect interface {
-	OpeningResponse(voiceagent.SessionConfig) any
+	OpeningEvents(voiceagent.SessionConfig) []any
 }
 
 type Config struct {
@@ -97,7 +97,7 @@ func (p *Provider) Open(ctx context.Context, sessionConfig voiceagent.SessionCon
 	session.inputUpsampler = voiceagent.NewStreamingPCM16Upsampler(voiceagent.TelephoneSampleRate, p.config.InputSampleRate)
 	session.outputDownsampler = voiceagent.NewStreamingPCM16Downsampler(p.config.OutputSampleRate, voiceagent.TelephoneSampleRate)
 	if dialect, ok := p.config.Dialect.(openingDialect); ok {
-		session.openingResponse = dialect.OpeningResponse(sessionConfig)
+		session.openingEvents = dialect.OpeningEvents(sessionConfig)
 	}
 	if err := session.writeJSON(p.config.Dialect.SessionUpdate(sessionConfig)); err != nil {
 		conn.Close()
@@ -120,7 +120,11 @@ type session struct {
 	closingOnce       sync.Once
 	startMu           sync.Mutex
 	started           bool
-	openingResponse   any
+	openingEvents     []any
+	responseMu        sync.Mutex
+	responseActive    bool
+	callerHasSpoken   bool
+	pendingResponse   any
 	inputMu           sync.Mutex
 	inputUpsampler    *voiceagent.StreamingPCM16Upsampler
 	outputDownsampler *voiceagent.StreamingPCM16Downsampler
@@ -138,10 +142,26 @@ func (s *session) Start(ctx context.Context) error {
 	}
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
-	if s.started || s.openingResponse == nil {
+	if s.started || len(s.openingEvents) == 0 {
 		return nil
 	}
-	if err := s.writeJSON(s.openingResponse); err != nil {
+	s.responseMu.Lock()
+	if s.callerHasSpoken || s.responseActive {
+		s.responseMu.Unlock()
+		s.started = true
+		return nil
+	}
+	startsResponse := containsClientEvent(s.openingEvents, "response.create")
+	if startsResponse {
+		s.responseActive = true
+	}
+	s.responseMu.Unlock()
+	if err := s.writeJSONBatch(s.openingEvents); err != nil {
+		if startsResponse {
+			s.responseMu.Lock()
+			s.responseActive = false
+			s.responseMu.Unlock()
+		}
 		return err
 	}
 	s.started = true
@@ -179,6 +199,12 @@ func (s *session) SubmitToolResult(ctx context.Context, callID string, output an
 	default:
 	}
 	for _, event := range s.dialect.ToolResult(callID, output) {
+		if clientEventType(event) == "response.create" {
+			if err := s.sendOrQueueResponse(event); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := s.writeJSON(event); err != nil {
 			return err
 		}
@@ -193,6 +219,92 @@ func (s *session) writeJSON(value any) error {
 	return s.conn.WriteJSON(value)
 }
 
+func (s *session) writeJSONBatch(values []any) error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	for _, value := range values {
+		_ = s.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := s.conn.WriteJSON(value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func clientEventType(value any) string {
+	if event, ok := value.(map[string]any); ok {
+		if eventType, ok := event["type"].(string); ok {
+			return eventType
+		}
+	}
+	return ""
+}
+
+func containsClientEvent(events []any, eventType string) bool {
+	for _, event := range events {
+		if clientEventType(event) == eventType {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *session) sendOrQueueResponse(event any) error {
+	s.responseMu.Lock()
+	if s.responseActive {
+		// A single model turn may contain a tool call while its audio is still
+		// streaming. Coalesce response.create requests and start the follow-up
+		// turn only after response.done arrives.
+		if s.pendingResponse == nil {
+			s.pendingResponse = event
+		}
+		s.responseMu.Unlock()
+		return nil
+	}
+	s.responseActive = true
+	s.responseMu.Unlock()
+	if err := s.writeJSON(event); err != nil {
+		s.responseMu.Lock()
+		s.responseActive = false
+		s.responseMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (s *session) observeServerEvent(raw []byte) error {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil // The dialect parser reports malformed provider events.
+	}
+	s.responseMu.Lock()
+	switch envelope.Type {
+	case "input_audio_buffer.speech_started":
+		s.callerHasSpoken = true
+	case "response.created":
+		s.responseActive = true
+	case "response.done":
+		s.responseActive = false
+		pending := s.pendingResponse
+		s.pendingResponse = nil
+		if pending != nil {
+			s.responseActive = true
+			s.responseMu.Unlock()
+			if err := s.writeJSON(pending); err != nil {
+				s.responseMu.Lock()
+				s.responseActive = false
+				s.responseMu.Unlock()
+				return err
+			}
+			return nil
+		}
+	}
+	s.responseMu.Unlock()
+	return nil
+}
+
 func (s *session) readLoop() {
 	defer s.finish()
 	for {
@@ -201,6 +313,10 @@ func (s *session) readLoop() {
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				s.emit(voiceagent.Event{Type: voiceagent.EventError, Err: err})
 			}
+			return
+		}
+		if err := s.observeServerEvent(message); err != nil {
+			s.emit(voiceagent.Event{Type: voiceagent.EventError, Err: err})
 			return
 		}
 		events, err := s.dialect.ParseEvent(message)

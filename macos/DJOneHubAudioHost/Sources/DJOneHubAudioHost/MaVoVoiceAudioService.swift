@@ -68,6 +68,10 @@ final class VoiceAudioService {
     private let usbReceiveBufferBytes = 4_096
     private let transmitChunkBytes = 1_600
     private let maximumUploadBytes = 6_400
+    // UAC input and output callbacks advance independently. Retain accepted
+    // uplink PCM until the downlink clock consumes it for the stereo recorder;
+    // otherwise AI frames written between downlink reads disappear from WAV.
+    private let maximumRecordingUplinkBytes = 8_000 * 2 * 3
     // Realtime providers can deliver generated audio much faster than the
     // telephone's 8 kHz playout clock. Keep a full spoken turn instead of
     // applying the microphone queue's 400 ms latency cap.
@@ -645,6 +649,7 @@ final class VoiceAudioService {
     private func runUACLoop(_ uac: OpaquePointer, session: UInt64) -> String? {
         var downlinkSamples = [Int16](repeating: 0, count: uacTransferFrames)
         var uplinkSamples = [Int16](repeating: 0, count: uacTransferFrames)
+        var recordingUplinkBytes = Data()
         var lastInputCallbacks = mavo_uac_probe_input_callbacks(uac)
         var lastOutputCallbacks = mavo_uac_probe_output_callbacks(uac)
         var inputProgressAt = DispatchTime.now().uptimeNanoseconds
@@ -661,6 +666,7 @@ final class VoiceAudioService {
             let now = DispatchTime.now().uptimeNanoseconds
             guard state.1 else {
                 clearUploadBytes()
+                recordingUplinkBytes.removeAll(keepingCapacity: true)
                 mavo_uac_probe_flush_pcm(uac)
                 lastInputCallbacks = mavo_uac_probe_input_callbacks(uac)
                 lastOutputCallbacks = mavo_uac_probe_output_callbacks(uac)
@@ -674,6 +680,7 @@ final class VoiceAudioService {
             if !mediaWasEnabled {
                 mavo_uac_probe_flush_pcm(uac)
                 clearUploadBytes()
+                recordingUplinkBytes.removeAll(keepingCapacity: true)
                 lastInputCallbacks = mavo_uac_probe_input_callbacks(uac)
                 lastOutputCallbacks = mavo_uac_probe_output_callbacks(uac)
                 inputProgressAt = now
@@ -682,6 +689,7 @@ final class VoiceAudioService {
             }
             if state.2 != muteWasEnabled {
                 clearUploadBytes()
+                recordingUplinkBytes.removeAll(keepingCapacity: true)
                 mavo_uac_probe_flush_uplink_pcm(uac)
             }
             muteWasEnabled = state.2
@@ -706,6 +714,7 @@ final class VoiceAudioService {
                     }
                 }
             }
+            appendRecordingUplink(uplinkPCM, to: &recordingUplinkBytes)
 
             let downlinkFrames = downlinkSamples.withUnsafeMutableBufferPointer { samples in
                 Int(mavo_uac_probe_read_downlink_pcm16(
@@ -725,7 +734,11 @@ final class VoiceAudioService {
                 } else {
                     schedulePlayback(pcm, session: session)
                 }
-                recorder.enqueue(far: pcm, near: uplinkPCM)
+                let recordedUplink = takeRecordingUplink(
+                    byteCount: byteCount,
+                    from: &recordingUplinkBytes
+                )
+                recorder.enqueue(far: pcm, near: recordedUplink)
             }
 
             if mavo_uac_probe_is_running(uac) == 0 {
@@ -937,6 +950,25 @@ final class VoiceAudioService {
             compactAgentAudioIfNeeded()
             return samples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
         }
+    }
+
+    private func appendRecordingUplink(_ pcm: Data, to buffer: inout Data) {
+        guard !pcm.isEmpty else { return }
+        buffer.append(pcm)
+        if buffer.count > maximumRecordingUplinkBytes {
+            var overflow = buffer.count - maximumRecordingUplinkBytes
+            overflow += overflow % MemoryLayout<Int16>.size
+            buffer.removeFirst(min(overflow, buffer.count))
+        }
+    }
+
+    private func takeRecordingUplink(byteCount: Int, from buffer: inout Data) -> Data {
+        let availableBytes = min(byteCount, buffer.count)
+        let alignedBytes = availableBytes - availableBytes % MemoryLayout<Int16>.size
+        guard alignedBytes > 0 else { return Data() }
+        let pcm = Data(buffer.prefix(alignedBytes))
+        buffer.removeFirst(alignedBytes)
+        return pcm
     }
 
     private func compactAgentAudioIfNeeded() {

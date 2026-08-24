@@ -390,7 +390,7 @@ function barkEndpoint(kind) {
 
 function renderBarkSettings(kind, settings) {
   const prefix = kind === "call" ? "call" : "sms";
-  const label = kind === "call" ? "未接来电" : "短信";
+  const label = kind === "call" ? "来电" : "短信";
   const enabled = Boolean(settings?.enabled);
   $(`#${prefix}-bark-enabled`).checked = enabled;
   $(`#${prefix}-bark-api-url`).value = settings?.api_url || "";
@@ -496,7 +496,7 @@ function renderCallHistory(history) {
     const state = document.createElement("p");
     const result = call.missed
       ? "未接来电"
-      : (call.direction === "incoming" ? "已接来电" : "外呼");
+      : (call.ai_handled ? "AI 已接听" : (call.direction === "incoming" ? "已接来电" : "外呼"));
     state.textContent = [result, callDuration(call)].filter(Boolean).join(" · ");
     const time = document.createElement("time");
     time.textContent = new Date(call.started_at).toLocaleString();

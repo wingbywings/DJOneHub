@@ -66,6 +66,39 @@ func TestAnsweredCallIsNotMissed(t *testing.T) {
 	}
 }
 
+func TestVoiceAgentIncomingCallRecordsUntilCallEnds(t *testing.T) {
+	a := &app{
+		demo:               true,
+		barkSettingsLoaded: true,
+		barkSettings:       normalizeBarkSettings(barkSettings{}),
+	}
+	controller := newVoiceAgentController("")
+	controller.state = voiceAgentState{Enabled: true, Provider: "qwen"}
+	a.voiceAgentOnce.Do(func() { a.voiceAgent = controller })
+	started := time.Date(2026, 8, 10, 11, 0, 0, 0, time.Local)
+	a.applyCallPoll([]parsedCall{{
+		Index: 1, Direction: "incoming", State: "incoming", Number: "10010",
+	}}, started)
+	a.applyCallPoll([]parsedCall{{
+		Index: 1, Direction: "incoming", State: "active", Number: "10010",
+	}}, started.Add(2*time.Second))
+
+	if a.activeCall == nil || !a.activeCall.AIHandled {
+		t.Fatalf("active call = %#v, want AI handled", a.activeCall)
+	}
+	if !a.audioHost.WantRecording {
+		t.Fatal("AI-handled call did not enable recording")
+	}
+
+	a.applyCallPoll(nil, started.Add(10*time.Second))
+	if a.audioHost.WantRecording {
+		t.Fatal("recording intent was not reset after call ended")
+	}
+	if len(a.callHistory) != 1 || !a.callHistory[0].AIHandled || a.callHistory[0].Missed {
+		t.Fatalf("history = %#v", a.callHistory)
+	}
+}
+
 func TestNormalizeDialNumber(t *testing.T) {
 	for _, test := range []struct {
 		input string

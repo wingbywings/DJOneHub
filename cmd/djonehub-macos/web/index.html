@@ -278,11 +278,11 @@
         </div>
       </div>
       <details id="call-bark-settings-panel" class="fold-panel notification-panel">
-        <summary><span>未接来电 Bark 通知</span><small id="call-bark-summary">未配置</small></summary>
+        <summary><span>来电 Bark 通知</span><small id="call-bark-summary">未配置</small></summary>
         <form id="call-bark-settings-form" class="bark-settings-grid">
           <label class="checkbox-field">
             <input id="call-bark-enabled" type="checkbox">
-            <span><strong>未接来电结束后自动转发</strong><small>已接听和外呼不会触发；每个未接来电只推送一次。</small></span>
+            <span><strong>来电结束后自动转发</strong><small>未接来电和 AI 接听会触发；人工接听和外呼不会触发，每通电话只推送一次。</small></span>
           </label>
           <label class="settings-field settings-field-wide">
             <span>来电 Bark API 链接</span>
@@ -295,9 +295,9 @@
             <small>在消息模板中使用 <code>{alias}</code> 或 <code>{alias_prefix}</code>。</small>
           </label>
           <label class="settings-field settings-field-wide">
-            <span>未接来电消息模板</span>
-            <textarea id="call-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}未接来电：{number}&#10;时间：{started_at}"></textarea>
-            <small>可用变量：<code>{number}</code>、<code>{started_at}</code>、<code>{ended_at}</code>、<code>{duration}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
+            <span>来电消息模板</span>
+            <textarea id="call-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}{status}：{number}&#10;时间：{started_at}"></textarea>
+            <small>可用变量：<code>{status}</code>（未接来电或 AI 已接听）、<code>{number}</code>、<code>{started_at}</code>、<code>{ended_at}</code>、<code>{duration}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
           </label>
           <div class="settings-actions">
             <button id="test-call-bark" class="secondary" type="button">发送测试通知</button>

@@ -28,41 +28,121 @@ func (f *fakeVoiceAgentSession) SubmitToolResult(_ context.Context, _ string, ou
 }
 func (f *fakeVoiceAgentSession) Close() error { return nil }
 
-type fakeOpeningVoiceAgentSession struct {
+type trackedVoiceAgentSession struct {
 	fakeVoiceAgentSession
-	starts chan struct{}
+	closed chan struct{}
 }
 
-func (f *fakeOpeningVoiceAgentSession) Start(context.Context) error {
-	f.starts <- struct{}{}
+func (f *trackedVoiceAgentSession) Close() error {
+	select {
+	case <-f.closed:
+	default:
+		close(f.closed)
+	}
 	return nil
 }
 
-func TestVoiceAgentOpeningWaitsForSilenceAndCanBeCancelledBySpeech(t *testing.T) {
-	session := &fakeOpeningVoiceAgentSession{starts: make(chan struct{}, 2)}
-	opening := newVoiceAgentOpeningTimer(session, 20*time.Millisecond)
+func TestIncomingCallPreparesVoiceAgentSessionBeforeActivation(t *testing.T) {
+	instance := &app{barkSettingsLoaded: true, callPollInterval: time.Second}
+	controller := newVoiceAgentController("")
+	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", Revision: 7}
+	opened := make(chan voiceagent.SessionConfig, 1)
+	session := &trackedVoiceAgentSession{closed: make(chan struct{})}
+	controller.openSessionOverride = func(_ context.Context, state voiceAgentState, config voiceagent.SessionConfig) (voiceagent.Session, voiceAgentState, error) {
+		opened <- config
+		return session, state, nil
+	}
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	now := time.Now()
+	instance.applyCallPoll([]parsedCall{{Index: 3, Direction: "incoming", State: "incoming"}}, now)
 	select {
-	case <-opening.channel():
-		if err := opening.start(context.Background()); err != nil {
-			t.Fatal(err)
+	case config := <-opened:
+		if config.ID == "" || config.OpeningPrompt == "" {
+			t.Fatalf("prepared config = %#v", config)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("opening silence timer did not fire")
+		t.Fatal("voice agent session was not prepared while the call was ringing")
 	}
-	select {
-	case <-session.starts:
-	case <-time.After(time.Second):
-		t.Fatal("opening turn was not started after silence")
+	instance.callMu.RLock()
+	callID := instance.activeCall.ID
+	instance.callMu.RUnlock()
+	prepared, _, cancel, found, err := controller.takePreparedSession(context.Background(), callID, 7)
+	if err != nil || !found || prepared != session {
+		t.Fatalf("prepared session = %v, found=%v, err=%v", prepared, found, err)
 	}
+	cancel()
+	_ = prepared.Close()
+}
 
-	cancelled := newVoiceAgentOpeningTimer(session, 20*time.Millisecond)
-	cancelled.cancel()
-	time.Sleep(40 * time.Millisecond)
-	select {
-	case <-session.starts:
-		t.Fatal("opening turn started after caller speech cancelled it")
-	default:
+func TestEndedCallClosesPreparedVoiceAgentSession(t *testing.T) {
+	instance := &app{barkSettingsLoaded: true, callPollInterval: time.Second}
+	controller := newVoiceAgentController("")
+	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", Revision: 1}
+	opened := make(chan struct{}, 1)
+	session := &trackedVoiceAgentSession{closed: make(chan struct{})}
+	controller.openSessionOverride = func(_ context.Context, state voiceAgentState, _ voiceagent.SessionConfig) (voiceagent.Session, voiceAgentState, error) {
+		opened <- struct{}{}
+		return session, state, nil
 	}
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	now := time.Now()
+	instance.applyCallPoll([]parsedCall{{Index: 3, Direction: "incoming", State: "incoming"}}, now)
+	select {
+	case <-opened:
+	case <-time.After(time.Second):
+		t.Fatal("voice agent session was not prepared")
+	}
+	instance.applyCallPoll(nil, now.Add(time.Second))
+	select {
+	case <-session.closed:
+	case <-time.After(time.Second):
+		t.Fatal("prepared voice agent session remained open after the call ended")
+	}
+}
+
+func TestConnectedCallDoesNotPrepareDuplicateVoiceAgentSession(t *testing.T) {
+	instance := &app{barkSettingsLoaded: true}
+	controller := newVoiceAgentController("")
+	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", Revision: 2, Connected: true, CallID: "call-1"}
+	opened := make(chan struct{}, 1)
+	controller.openSessionOverride = func(_ context.Context, state voiceAgentState, _ voiceagent.SessionConfig) (voiceagent.Session, voiceAgentState, error) {
+		opened <- struct{}{}
+		return &trackedVoiceAgentSession{closed: make(chan struct{})}, state, nil
+	}
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	now := time.Now()
+	instance.activeCall = &callRecord{ID: "call-1", State: "active", Direction: "incoming", StartedAt: now, UpdatedAt: now}
+	instance.syncVoiceAgentPreparation()
+	select {
+	case <-opened:
+		t.Fatal("connected media session started a duplicate prepared provider session")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestProfileChangePreparesReplacementWhileOldSessionIsConnected(t *testing.T) {
+	instance := &app{barkSettingsLoaded: true}
+	controller := newVoiceAgentController("")
+	state := voiceAgentState{Enabled: true, Provider: "qwen", Revision: 3, Connected: true, CallID: "call-1"}
+	controller.state = state
+	opened := make(chan voiceagent.SessionConfig, 1)
+	controller.openSessionOverride = func(_ context.Context, profile voiceAgentState, config voiceagent.SessionConfig) (voiceagent.Session, voiceAgentState, error) {
+		opened <- config
+		return &trackedVoiceAgentSession{closed: make(chan struct{})}, profile, nil
+	}
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	now := time.Now()
+	instance.activeCall = &callRecord{ID: "call-1", State: "active", Direction: "incoming", StartedAt: now, UpdatedAt: now}
+	instance.prepareVoiceAgentForCurrentCall(state, true)
+	select {
+	case config := <-opened:
+		if config.ID != "call-1" {
+			t.Fatalf("replacement config = %#v", config)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("profile change did not prepare a replacement provider session")
+	}
+	controller.discardPreparedSession("")
 }
 
 func TestVoiceAgentStatusDoesNotExposeCredentials(t *testing.T) {
@@ -251,7 +331,20 @@ func TestVoiceAgentAutoAnswerRechecksRingingCall(t *testing.T) {
 	instance.activeCall = &callRecord{ID: "call-auto", State: "incoming", Direction: "incoming", StartedAt: now, UpdatedAt: now}
 	instance.scheduleVoiceAgentAutoAnswer("", "incoming")
 	time.Sleep(80 * time.Millisecond)
-	if instance.activeCall == nil || instance.activeCall.State != "active" {
-		t.Fatalf("call = %#v", instance.activeCall)
+	instance.callMu.RLock()
+	call := instance.activeCall
+	if call != nil {
+		copy := *call
+		call = &copy
+	}
+	instance.callMu.RUnlock()
+	if call == nil || call.State != "active" || !call.AIHandled {
+		t.Fatalf("call = %#v", call)
+	}
+	instance.audioHostMu.RLock()
+	wantRecording := instance.audioHost.WantRecording
+	instance.audioHostMu.RUnlock()
+	if !wantRecording {
+		t.Fatal("AI auto-answer did not enable recording")
 	}
 }

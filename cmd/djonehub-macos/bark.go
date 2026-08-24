@@ -22,6 +22,7 @@ const (
 	barkMessagePlaceholder        = "{message}"
 	defaultSMSBarkTemplate        = "{alias_prefix}{content}"
 	defaultMissedCallBarkTemplate = "{alias_prefix}未接来电：{number}\n时间：{started_at}"
+	defaultCallBarkTemplate       = "{alias_prefix}{status}：{number}\n时间：{started_at}"
 )
 
 type barkChannelSettings struct {
@@ -70,20 +71,23 @@ func normalizeBarkChannelSettings(settings barkChannelSettings, defaultTemplate 
 func normalizeBarkSettings(settings barkSettings) barkSettings {
 	settings.Version = barkConfigVersion
 	settings.SMS = normalizeBarkChannelSettings(settings.SMS, defaultSMSBarkTemplate)
-	settings.MissedCall = normalizeBarkChannelSettings(settings.MissedCall, defaultMissedCallBarkTemplate)
+	settings.MissedCall = normalizeBarkChannelSettings(settings.MissedCall, defaultCallBarkTemplate)
+	if settings.MissedCall.MessageTemplate == defaultMissedCallBarkTemplate {
+		settings.MissedCall.MessageTemplate = defaultCallBarkTemplate
+	}
 	return settings
 }
 
 func barkChannelLabel(kind barkChannelKind) string {
 	if kind == barkChannelMissedCall {
-		return "未接来电"
+		return "来电"
 	}
 	return "短信"
 }
 
 func barkChannelDefaultTemplate(kind barkChannelKind) string {
 	if kind == barkChannelMissedCall {
-		return defaultMissedCallBarkTemplate
+		return defaultCallBarkTemplate
 	}
 	return defaultSMSBarkTemplate
 }
@@ -98,6 +102,7 @@ func barkChannelAllowedVariables(kind barkChannelKind) map[string]bool {
 		common["{started_at}"] = true
 		common["{ended_at}"] = true
 		common["{duration}"] = true
+		common["{status}"] = true
 		return common
 	}
 	common["{sender}"] = true
@@ -191,7 +196,7 @@ func renderSMSBarkMessage(settings barkChannelSettings, message receivedSMS) str
 	})
 }
 
-func renderMissedCallBarkMessage(settings barkChannelSettings, call callRecord) string {
+func renderCallBarkMessage(settings barkChannelSettings, call callRecord) string {
 	endedAt := ""
 	duration := ""
 	if call.EndedAt != nil {
@@ -202,6 +207,10 @@ func renderMissedCallBarkMessage(settings barkChannelSettings, call callRecord) 
 	if number == "" {
 		number = "未知号码"
 	}
+	status := "未接来电"
+	if call.AIHandled {
+		status = "AI 已接听"
+	}
 	return renderBarkTemplate(settings.MessageTemplate, map[string]string{
 		"alias":        settings.Alias,
 		"alias_prefix": formatBarkAliasPrefix(settings.Alias),
@@ -209,6 +218,7 @@ func renderMissedCallBarkMessage(settings barkChannelSettings, call callRecord) 
 		"started_at":   call.StartedAt.Local().Format("2006-01-02 15:04:05"),
 		"ended_at":     endedAt,
 		"duration":     duration,
+		"status":       status,
 	})
 }
 
@@ -372,21 +382,21 @@ func (a *app) forwardSMSBark(message receivedSMS) {
 	go a.sendBarkAsync(channel, content, "SMS")
 }
 
-func (a *app) forwardMissedCallBark(call callRecord) {
-	if !call.Missed {
+func (a *app) forwardCallBark(call callRecord) {
+	if !call.Missed && !call.AIHandled {
 		return
 	}
 	settings, err := a.currentBarkSettings()
 	if err != nil {
-		log.Printf("Bark missed-call forwarding skipped: %v", err)
+		log.Printf("Bark call forwarding skipped: %v", err)
 		return
 	}
 	channel := settings.MissedCall
 	if !channel.Enabled {
 		return
 	}
-	content := renderMissedCallBarkMessage(channel, call)
-	go a.sendBarkAsync(channel, content, "missed call")
+	content := renderCallBarkMessage(channel, call)
+	go a.sendBarkAsync(channel, content, "call")
 }
 
 func (a *app) sendBarkAsync(settings barkChannelSettings, content, label string) {
@@ -474,7 +484,7 @@ func (a *app) testBarkChannelSettings(w http.ResponseWriter, kind barkChannelKin
 	})
 	if kind == barkChannelMissedCall {
 		ended := now
-		content = renderMissedCallBarkMessage(channel, callRecord{
+		content = renderCallBarkMessage(channel, callRecord{
 			Number: "13800138000", StartedAt: now.Add(-8 * time.Second), EndedAt: &ended, Missed: true,
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -67,7 +68,20 @@ type voiceAgentController struct {
 	settingsPath        string
 	mediaToken          string
 	sessionMu           sync.Mutex
+	preparedMu          sync.Mutex
+	prepared            *preparedVoiceAgentSession
+	openSessionOverride func(context.Context, voiceAgentState, voiceagent.SessionConfig) (voiceagent.Session, voiceAgentState, error)
 	runtime             *voiceAgentRuntime
+}
+
+type preparedVoiceAgentSession struct {
+	callID   string
+	revision uint64
+	ready    chan struct{}
+	cancel   context.CancelFunc
+	session  voiceagent.Session
+	profile  voiceAgentState
+	err      error
 }
 
 func newVoiceAgentController(settingsPath string) *voiceAgentController {
@@ -396,6 +410,8 @@ func (a *app) voiceAgentConfigure(w http.ResponseWriter, r *http.Request) {
 	controller.state = candidate
 	state := controller.state
 	controller.mu.Unlock()
+	controller.discardPreparedSession("")
+	a.prepareVoiceAgentForCurrentCall(state, true)
 	writeJSON(w, http.StatusOK, state)
 }
 
@@ -411,45 +427,150 @@ var voiceAgentUpgrader = websocket.Upgrader{
 	},
 }
 
-const voiceAgentOpeningSilenceDelay = 3 * time.Second
-
-type voiceAgentOpeningTimer struct {
-	starter voiceagent.SessionStarter
-	timer   *time.Timer
+func voiceAgentSessionConfig(callID string, state voiceAgentState) voiceagent.SessionConfig {
+	tools := []voiceagent.Tool(nil)
+	if state.ToolsEnabled {
+		tools = voiceAgentTools()
+	}
+	return voiceagent.SessionConfig{
+		ID: callID, Model: state.Model, TranscriptionModel: state.STTModel,
+		Voice: state.Voice, Instructions: state.Instructions,
+		OpeningPrompt: "电话已经接通。请立即主动、简短而自然地问候对方，并依据系统角色与通话指令开始会话。不要提及这条触发指令。",
+		Language:      "zh",
+		Tools:         tools,
+	}
 }
 
-func newVoiceAgentOpeningTimer(session voiceagent.Session, delay time.Duration) *voiceAgentOpeningTimer {
+func (c *voiceAgentController) openVoiceAgentSession(ctx context.Context, state voiceAgentState, config voiceagent.SessionConfig) (voiceagent.Session, voiceAgentState, error) {
+	if c.openSessionOverride != nil {
+		return c.openSessionOverride(ctx, state, config)
+	}
+	return c.openSession(ctx, state, config)
+}
+
+func closePreparedVoiceAgentSession(prepared *preparedVoiceAgentSession) {
+	if prepared == nil {
+		return
+	}
+	prepared.cancel()
+	if prepared.session != nil {
+		_ = prepared.session.Close()
+	}
+}
+
+func (c *voiceAgentController) prepareSession(callID string, state voiceAgentState, config voiceagent.SessionConfig) {
+	if callID == "" || !state.Enabled {
+		c.discardPreparedSession("")
+		return
+	}
+	c.preparedMu.Lock()
+	if current := c.prepared; current != nil && current.callID == callID && current.revision == state.Revision {
+		c.preparedMu.Unlock()
+		return
+	}
+	previous := c.prepared
+	ctx, cancel := context.WithCancel(context.Background())
+	prepared := &preparedVoiceAgentSession{callID: callID, revision: state.Revision, ready: make(chan struct{}), cancel: cancel}
+	c.prepared = prepared
+	c.preparedMu.Unlock()
+	closePreparedVoiceAgentSession(previous)
+
+	go func() {
+		session, profile, err := c.openVoiceAgentSession(ctx, state, config)
+		c.preparedMu.Lock()
+		if c.prepared != prepared {
+			c.preparedMu.Unlock()
+			cancel()
+			if session != nil {
+				_ = session.Close()
+			}
+			return
+		}
+		prepared.session = session
+		prepared.profile = profile
+		prepared.err = err
+		close(prepared.ready)
+		c.preparedMu.Unlock()
+		if err != nil && !errors.Is(err, context.Canceled) {
+			c.setError(fmt.Errorf("prepare voice agent session: %w", err))
+		}
+	}()
+}
+
+func (c *voiceAgentController) discardPreparedSession(callID string) {
+	c.preparedMu.Lock()
+	prepared := c.prepared
+	if prepared == nil || (callID != "" && prepared.callID != callID) {
+		c.preparedMu.Unlock()
+		return
+	}
+	c.prepared = nil
+	c.preparedMu.Unlock()
+	closePreparedVoiceAgentSession(prepared)
+}
+
+func (c *voiceAgentController) takePreparedSession(ctx context.Context, callID string, revision uint64) (voiceagent.Session, voiceAgentState, context.CancelFunc, bool, error) {
+	c.preparedMu.Lock()
+	prepared := c.prepared
+	if prepared == nil || prepared.callID != callID || prepared.revision != revision {
+		c.preparedMu.Unlock()
+		return nil, voiceAgentState{}, nil, false, nil
+	}
+	ready := prepared.ready
+	c.preparedMu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, voiceAgentState{}, nil, true, ctx.Err()
+	case <-ready:
+	}
+	c.preparedMu.Lock()
+	if c.prepared != prepared {
+		c.preparedMu.Unlock()
+		return nil, voiceAgentState{}, nil, false, nil
+	}
+	c.prepared = nil
+	session, profile, err := prepared.session, prepared.profile, prepared.err
+	prepared.session = nil
+	c.preparedMu.Unlock()
+	if err != nil {
+		prepared.cancel()
+		return nil, voiceAgentState{}, nil, true, err
+	}
+	return session, profile, prepared.cancel, true, nil
+}
+
+func (a *app) prepareVoiceAgentForCurrentCall(state voiceAgentState, force bool) {
+	controller := a.ensureVoiceAgent()
+	if a.demo {
+		controller.discardPreparedSession("")
+		return
+	}
+	if state.Connected && !force {
+		controller.discardPreparedSession("")
+		return
+	}
+	a.callMu.RLock()
+	callID := ""
+	if a.activeCall != nil {
+		callID = a.activeCall.ID
+	}
+	a.callMu.RUnlock()
+	if callID == "" || !state.Enabled {
+		controller.discardPreparedSession("")
+		return
+	}
+	controller.prepareSession(callID, state, voiceAgentSessionConfig(callID, state))
+}
+
+func (a *app) syncVoiceAgentPreparation() {
+	a.prepareVoiceAgentForCurrentCall(a.ensureVoiceAgent().snapshot(), false)
+}
+
+func startVoiceAgentSession(ctx context.Context, session voiceagent.Session) error {
 	starter, ok := session.(voiceagent.SessionStarter)
 	if !ok {
 		return nil
 	}
-	return &voiceAgentOpeningTimer{starter: starter, timer: time.NewTimer(delay)}
-}
-
-func (o *voiceAgentOpeningTimer) channel() <-chan time.Time {
-	if o == nil || o.timer == nil {
-		return nil
-	}
-	return o.timer.C
-}
-
-func (o *voiceAgentOpeningTimer) cancel() {
-	if o == nil {
-		return
-	}
-	if o.timer != nil {
-		o.timer.Stop()
-		o.timer = nil
-	}
-	o.starter = nil
-}
-
-func (o *voiceAgentOpeningTimer) start(ctx context.Context) error {
-	if o == nil || o.starter == nil {
-		return nil
-	}
-	starter := o.starter
-	o.cancel()
 	return starter.Start(ctx)
 }
 
@@ -480,11 +601,14 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "there is no active call")
 		return
 	}
-	tools := []voiceagent.Tool(nil)
-	if state.ToolsEnabled {
-		tools = voiceAgentTools()
+	session, activeProfile, preparedCancel, foundPrepared, err := controller.takePreparedSession(r.Context(), callID, state.Revision)
+	if err != nil && foundPrepared && !errors.Is(err, context.Canceled) {
+		log.Printf("prepared voice agent session was unavailable; reconnecting: %v", err)
+		session = nil
 	}
-	session, activeProfile, err := controller.openSession(r.Context(), state, voiceagent.SessionConfig{ID: callID, Model: state.Model, TranscriptionModel: state.STTModel, Voice: state.Voice, Instructions: state.Instructions, OpeningPrompt: "电话已经接通，但对方连续 3 秒没有说话。请立即主动、简短而自然地询问对方，并依据系统角色与通话指令开始会话。不要提及等待时间或这条触发指令。", Language: "zh", Tools: tools})
+	if session == nil && r.Context().Err() == nil {
+		session, activeProfile, err = controller.openVoiceAgentSession(r.Context(), state, voiceAgentSessionConfig(callID, state))
+	}
 	if err != nil {
 		controller.setError(err)
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -493,12 +617,39 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 	conn, err := voiceAgentUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		_ = session.Close()
+		if preparedCancel != nil {
+			preparedCancel()
+		}
 		return
 	}
 	defer conn.Close()
-	defer session.Close()
-	opening := newVoiceAgentOpeningTimer(session, voiceAgentOpeningSilenceDelay)
-	defer opening.cancel()
+	defer func() {
+		if session != nil {
+			_ = session.Close()
+		}
+		if preparedCancel != nil {
+			preparedCancel()
+		}
+	}()
+	if err := startVoiceAgentSession(r.Context(), session); err != nil && preparedCancel != nil && r.Context().Err() == nil {
+		// An idle preconnected session may have expired while the phone kept
+		// ringing. Reconnect inside the existing local media bridge instead of
+		// forcing the audio host through its reconnect backoff.
+		_ = session.Close()
+		preparedCancel()
+		preparedCancel = nil
+		session, activeProfile, err = controller.openVoiceAgentSession(r.Context(), state, voiceAgentSessionConfig(callID, state))
+		if err == nil {
+			err = startVoiceAgentSession(r.Context(), session)
+		}
+		if err != nil {
+			controller.setError(fmt.Errorf("restart expired voice agent greeting: %w", err))
+			return
+		}
+	} else if err != nil {
+		controller.setError(fmt.Errorf("start voice agent greeting: %w", err))
+		return
+	}
 	activeProvider := voiceAgentProviderKey(activeProfile)
 	controller.setConnected(callID, activeProvider, true, "")
 	defer controller.setConnected("", "", false, "")
@@ -523,11 +674,6 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-opening.channel():
-			if err := opening.start(r.Context()); err != nil {
-				controller.setError(fmt.Errorf("start voice agent greeting: %w", err))
-				return
-			}
 		case err := <-readFailures:
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				controller.setError(err)
@@ -547,9 +693,6 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 			}
 			if event.Type == voiceagent.EventSessionReady {
 				controller.markProviderReady(activeProvider)
-			}
-			if event.Type == voiceagent.EventSpeechStarted {
-				opening.cancel()
 			}
 			if event.Type == voiceagent.EventClosed && r.Context().Err() == nil {
 				controller.markProviderFailure(activeProvider, fmt.Errorf("provider session closed unexpectedly"))
@@ -604,6 +747,11 @@ func (c *voiceAgentController) setConnected(callID, activeProvider string, conne
 	}
 	c.state.UpdatedAt = time.Now()
 	c.mu.Unlock()
+	if connected {
+		// The media handler owns the active session. Close a duplicate prepared
+		// session if a call-state poll raced with the handoff.
+		c.discardPreparedSession(callID)
+	}
 }
 func (c *voiceAgentController) setError(err error) {
 	if err == nil {

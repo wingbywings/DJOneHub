@@ -2,7 +2,7 @@
 
 DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理工具。它通过 USB 与模块现有接口通信，让模块无需虚拟机即可在 Mac 上完成短信收发、语音通话、AI Agent 接听/拨打、eSIM Profile 管理、AT 指令调试和 USB 4G 上网。
 
-程序及管理页面均在本机运行，默认只监听 `127.0.0.1:7575`。只有在用户主动启用相应的 Bark 转发时，新短信或未接来电信息才会发送到该通道独立配置的 Bark API。
+程序及管理页面均在本机运行，默认只监听 `127.0.0.1:7575`。只有在用户主动启用相应的 Bark 转发时，新短信、未接来电或 AI 接听通话信息才会发送到该通道独立配置的 Bark API。
 
 > [!IMPORTANT]
 > DJOneHub 是非官方第三方项目，与 DJI、Quectel、运营商及 eSIM 卡片厂商不存在隶属、授权或合作关系。
@@ -18,7 +18,7 @@ DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理�
 | 来电监控 | 已实现 | 实时显示语音来电状态，并在 Web 端保留最近 100 条运行期记录 |
 | 双向语音通话 | 预览 | 使用原生 macOS 音频宿主接听或拨打电话，支持麦克风、扬声器、静音和录音 |
 | AI Voice Agent | 预览 | 支持 Qwen/OpenAI 实时语音，以及 Qwen/OpenAI STT + MiniMax LLM/TTS 级联；包含 Web Profile、实时转写、降级、审计和受控工具 |
-| Bark 通知 | 已实现 | 为短信和未接来电分别配置 API URL、别名和消息模板 |
+| Bark 通知 | 已实现 | 为短信和来电分别配置 API URL、别名和消息模板；未接及 AI 接听通话均可通知 |
 | eSIM Profile | 已实现 | 读取、下载、启用、改名和删除兼容 eUICC 卡片中的 Profile |
 | Profile 号码资料 | 已实现 | 将手动填写的号码保存到模块通讯录，并按 ICCID 关联 Profile |
 | USB 4G 上网 | 已实现 | 切换 USB 网卡模式，让 macOS 使用 SIM 卡流量上网 |
@@ -190,9 +190,9 @@ xattr -dr com.apple.quarantine ./djonehub ./bin ./lib
 https://api.day.app/你的Key/{message}?group=短信通知
 ```
 
-收到新短信后，DJOneHub 会将通知内容拼成 `[自定义别名]短信内容`，对整段内容进行 URL 编码，再替换链接中的 `{message}`。页面提供测试通知按钮；测试使用已经保存的配置。通过本机发送的短信不会触发 Bark 转发。
+收到新短信后，DJOneHub 会将通知内容拼成 `[自定义别名]短信内容`，对整段内容进行 URL 编码，再替换链接中的 `{message}`。页面提供测试通知按钮；测试使用已经保存的配置。通过本机发送的短信不会触发 Bark 转发。来电页面提供独立的 Bark 配置：未接来电或由 AI 接听的来电结束后会各发送一次，人工接听和外呼不会触发；模板中的 `{status}` 会显示“未接来电”或“AI 已接听”。
 
-Bark API Key 和相关设置保存在本机 `~/Library/Application Support/DJOneHub/bark-settings.json`，文件权限为仅当前用户可读写。启用该功能意味着短信内容会发送给 Bark 服务，请根据短信敏感程度自行决定是否启用。
+Bark API Key 和相关设置保存在本机 `~/Library/Application Support/DJOneHub/bark-settings.json`，文件权限为仅当前用户可读写。启用该功能意味着短信内容或来电号码会发送给 Bark 服务，请根据数据敏感程度自行决定是否启用。
 
 ### eSIM 与卡片管理
 
@@ -256,7 +256,9 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 进入“来电”页面即可管理完整 Voice Agent Profile，并查看 Provider 就绪状态、实时转写、运行事件、待确认工具和脱敏审计。自动接听默认关闭；开启后会在延迟结束时再次确认同一来电仍在振铃，才会发送接听指令。完整的 OpenAI、MiniMax、STT 模型、Endpoint 覆盖和人工模式回退示例见 [`docs/voice-agent-first-batch.md`](docs/voice-agent-first-batch.md)。
 
-电话媒体通道建立后，AI Agent 会先等待来电方说话；若连续 3 秒未检测到语音，则主动、简短地询问对方。该策略同时适用于 Qwen/OpenAI Realtime 和 MiniMax 级联模式。音色是 Provider 专属配置：OpenAI 推荐 `marin` 或 `cedar`，Qwen 默认 `Cherry`；Web 页面切换 Provider 时会自动修正已知的不兼容音色。
+检测到来电或外呼状态后，AI Agent 会在电话接通前预先建立 Provider WebSocket；媒体通道就绪后会立即主动、简短地问候对方，不再额外等待 3 秒。未接、拒接、换来电或修改 AI Profile 时会回收预连接。该策略同时适用于 Qwen/OpenAI Realtime 和 MiniMax 级联模式。音色是 Provider 专属配置：OpenAI 推荐 `marin` 或 `cedar`，Qwen 默认 `Cherry`；Web 页面切换 Provider 时会自动修正已知的不兼容音色。
+
+AI 模式处理的入站通话会在接通时自动开始 WAV 录音，并在通话结束时停止；录音左声道保存来电方语音，右声道保存实际播放给通话方的 AI 语音，文件仍保存在本机 `recordings` 目录。若已启用来电 Bark，通话结束后还会发送一次“AI 已接听”通知。
 
 Qwen/OpenAI 的 Realtime PCM 输出固定使用 24 kHz，进入模块前由后端经过抗混叠滤波转换为电话原生 8 kHz；Qwen 会话使用其协议规定的 `pcm` 格式名。Swift 音频宿主按 UAC 实际接收帧数推进 Agent 播放队列，并在首包播放前保留约 200 ms 抖动缓冲，云端快速推送的长回复不会再被 400 ms 本地缓冲截断。普通话通话默认使用 `zh`、中文上下文提示、近场降噪和 `gpt-4o-transcribe` 转写。
 

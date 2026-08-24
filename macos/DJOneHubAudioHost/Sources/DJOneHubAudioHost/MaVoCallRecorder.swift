@@ -43,9 +43,11 @@ final class MaVoCallRecorder {
         queue.async { [weak self] in
             defer { self?.lock.withLock { self?.pendingBlocks = max(0, (self?.pendingBlocks ?? 1) - 1) } }
             guard let self else { return }
-            // The module downlink is the clock source. Never write an extra
-            // record for uplink-only data: that stretches the WAV timeline
-            // and was the source of the apparent dropped/catching-up audio.
+            // The module downlink is the clock source. The left channel is the
+            // caller and the right channel is the accepted uplink (microphone
+            // in manual mode, actual AI playout in agent mode). Never write an
+            // extra record for uplink-only data: that stretches the WAV
+            // timeline and was the source of dropped/catching-up audio.
             let frames = far.count / 2
             guard frames > 0 else { return }
             var interleaved = Data(capacity: frames * 4)
@@ -93,4 +95,3 @@ final class MaVoCallRecorder {
         return data
     }
 }
-

@@ -56,14 +56,20 @@ func (dialect) SessionUpdate(config voiceagent.SessionConfig) any {
 func (dialect) InputAudio(audio string) any {
 	return map[string]any{"type": "input_audio_buffer.append", "audio": audio}
 }
-func (dialect) OpeningResponse(config voiceagent.SessionConfig) any {
+func (dialect) OpeningEvents(config voiceagent.SessionConfig) []any {
 	prompt := config.OpeningPrompt
 	if prompt == "" {
 		prompt = "电话刚刚接通。请立即主动、简短而自然地问候对方，并依据会话指令开始通话。不要提及这条触发指令。"
 	}
-	return map[string]any{"type": "response.create", "response": map[string]any{
-		"modalities": []string{"text", "audio"}, "instructions": prompt,
-	}}
+	return []any{
+		map[string]any{"type": "conversation.item.create", "item": map[string]any{
+			"type": "message", "role": "user",
+			"content": []map[string]any{{"type": "input_text", "text": prompt}},
+		}},
+		map[string]any{"type": "response.create", "response": map[string]any{
+			"modalities": []string{"text", "audio"},
+		}},
+	}
 }
 func (dialect) ToolResult(callID string, output any) []any {
 	data, _ := json.Marshal(output)

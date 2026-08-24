@@ -8,8 +8,12 @@ import (
 	"github.com/iniwex5/vohive/internal/voiceagent"
 )
 
-func TestOpeningResponseRequestsAudio(t *testing.T) {
-	raw, err := json.Marshal((dialect{}).OpeningResponse(voiceagent.SessionConfig{OpeningPrompt: "主动问候"}))
+func TestOpeningEventsRequestAudio(t *testing.T) {
+	events := (dialect{}).OpeningEvents(voiceagent.SessionConfig{OpeningPrompt: "主动问候"})
+	if len(events) != 1 {
+		t.Fatalf("opening events = %#v, want one event", events)
+	}
+	raw, err := json.Marshal(events[0])
 	if err != nil {
 		t.Fatal(err)
 	}

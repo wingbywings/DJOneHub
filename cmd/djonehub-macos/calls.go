@@ -23,6 +23,7 @@ type callRecord struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	Missed    bool       `json:"missed"`
+	AIHandled bool       `json:"ai_handled,omitempty"`
 }
 
 type parsedCall struct {
@@ -153,7 +154,7 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 		}
 	}
 
-	var missed *callRecord
+	var notify *callRecord
 	a.callMu.Lock()
 	previousState := ""
 	if a.activeCall != nil {
@@ -171,14 +172,15 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 			if len(a.callHistory) > 100 {
 				a.callHistory = a.callHistory[:100]
 			}
-			if completed.Missed {
-				missed = &completed
+			if completed.Missed || completed.AIHandled {
+				notify = &completed
 			}
 			a.activeCall = nil
 		}
 		a.callMu.Unlock()
-		if missed != nil {
-			a.forwardMissedCallBark(*missed)
+		a.syncVoiceAgentPreparation()
+		if notify != nil {
+			a.forwardCallBark(*notify)
 		}
 		a.syncVoiceRouteForCall(previousState, "")
 		return
@@ -202,11 +204,21 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 		}
 	}
 	a.callMu.Unlock()
+	a.syncVoiceAgentPreparation()
 	a.syncVoiceRouteForCall(previousState, selected.State)
+	a.syncVoiceAgentRecording(previousState, selected.State)
 	a.scheduleVoiceAgentAutoAnswer(previousState, selected.State)
 }
 
 func (a *app) syncVoiceRouteForCall(previousState, currentState string) {
+	if previousState == "active" && currentState != "active" {
+		a.resetAudioHostIntent()
+		if a.demo || a.usbLocator == nil {
+			return
+		}
+		go a.stopModuleVoiceRoute()
+		return
+	}
 	if a.demo || a.usbLocator == nil {
 		return
 	}
@@ -225,10 +237,25 @@ func (a *app) syncVoiceRouteForCall(previousState, currentState string) {
 			}
 		}()
 	}
-	if previousState == "active" && currentState != "active" {
-		a.resetAudioHostIntent()
-		go a.stopModuleVoiceRoute()
+}
+
+// syncVoiceAgentRecording marks incoming calls whose media is handled by the
+// Voice Agent and enables full-call recording as soon as they become active.
+func (a *app) syncVoiceAgentRecording(previousState, currentState string) {
+	if previousState == "active" || currentState != "active" || !a.ensureVoiceAgent().snapshot().Enabled {
+		return
 	}
+	a.callMu.Lock()
+	if a.activeCall == nil || a.activeCall.State != "active" || a.activeCall.Direction != "incoming" {
+		a.callMu.Unlock()
+		return
+	}
+	a.activeCall.AIHandled = true
+	a.callMu.Unlock()
+
+	a.audioHostMu.Lock()
+	a.audioHost.WantRecording = true
+	a.audioHostMu.Unlock()
 }
 
 func callStatePriority(state string) int {
@@ -480,12 +507,15 @@ func (a *app) callStateAllows(states ...string) bool {
 
 func (a *app) setActiveCallState(state string, now time.Time) {
 	a.callMu.Lock()
-	defer a.callMu.Unlock()
 	if a.activeCall == nil {
+		a.callMu.Unlock()
 		return
 	}
+	previousState := a.activeCall.State
 	a.activeCall.State = state
 	a.activeCall.UpdatedAt = now
+	a.callMu.Unlock()
+	a.syncVoiceAgentRecording(previousState, state)
 }
 
 func validateCallATResponse(response string) error {
