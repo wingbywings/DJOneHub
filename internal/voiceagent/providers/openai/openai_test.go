@@ -33,7 +33,9 @@ func TestSessionUpdateOptimizesMandarinTelephoneRecognition(t *testing.T) {
 		`"language":"zh"`,
 		`"model":"gpt-4o-transcribe"`,
 		`"noise_reduction":{"type":"near_field"}`,
-		`"threshold":0.35`,
+		`"threshold":0.65`,
+		`"prefix_padding_ms":400`,
+		`"silence_duration_ms":700`,
 		`普通话中文`,
 		`简体中文`,
 	} {

@@ -223,7 +223,7 @@ private final class AudioHostController {
             else { return }
             if type == "speech.started" {
                 self?.audio.clearAgentOutput()
-            } else if type == "usage" {
+            } else if type == "audio.done" {
                 self?.audio.finishAgentOutputTurn()
             }
         }

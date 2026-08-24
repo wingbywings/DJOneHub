@@ -15,7 +15,11 @@ func TestTranscriptionDialectUsesCurrentSessionSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, expected := range []string{`"type":"transcription"`, `"rate":24000`, `"languages":["zh-cn"]`, `"model":"gpt-live-transcribe"`} {
+	for _, expected := range []string{
+		`"type":"transcription"`, `"rate":24000`, `"languages":["zh-cn"]`,
+		`"model":"gpt-live-transcribe"`, `"noise_reduction":{"type":"near_field"}`,
+		`"threshold":0.65`, `"prefix_padding_ms":400`, `"silence_duration_ms":700`,
+	} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("session update %s does not contain %s", text, expected)
 		}

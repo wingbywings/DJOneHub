@@ -303,6 +303,10 @@ func ParseCommonEvent(raw []byte, eventNames map[string]voiceagent.EventType) ([
 		}
 		_ = json.Unmarshal(envelope.Response, &response)
 		event.Usage = response.Usage
+		// response.done is the most portable end-of-audio signal across
+		// Realtime protocol revisions. Emit an explicit playout boundary even
+		// when a provider omits its more specific response.audio.done event.
+		return []voiceagent.Event{{Type: voiceagent.EventAudioDone}, event}, nil
 	}
 	return []voiceagent.Event{event}, nil
 }

@@ -14,7 +14,7 @@ func TestTranscriptionDialectKeepsTelephoneSampleRate(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	for _, expected := range []string{`"sample_rate":8000`, `"input_audio_format":"pcm"`, `"type":"server_vad"`} {
+	for _, expected := range []string{`"sample_rate":8000`, `"input_audio_format":"pcm"`, `"type":"server_vad"`, `"threshold":0.6`, `"silence_duration_ms":700`} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("session update %s does not contain %s", text, expected)
 		}

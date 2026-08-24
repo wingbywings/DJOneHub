@@ -26,6 +26,7 @@ const (
 	EventOutputTranscriptDelta EventType = "transcript.output.delta"
 	EventOutputTranscriptFinal EventType = "transcript.output.final"
 	EventAudio                 EventType = "audio.delta"
+	EventAudioDone             EventType = "audio.done"
 	EventToolCall              EventType = "tool.call"
 	EventUsage                 EventType = "usage"
 	EventError                 EventType = "error"

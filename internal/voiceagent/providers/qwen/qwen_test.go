@@ -19,6 +19,7 @@ func TestSessionUpdateUsesQwenPCMFormat(t *testing.T) {
 	for _, expected := range []string{
 		`"input_audio_format":"pcm"`,
 		`"output_audio_format":"pcm"`,
+		`"turn_detection":{"type":"smart_turn"}`,
 		`每轮语音尽量控制在 20 秒内`,
 	} {
 		if !strings.Contains(value, expected) {

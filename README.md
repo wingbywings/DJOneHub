@@ -258,9 +258,9 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 电话媒体通道建立后，AI Agent 会先等待来电方说话；若连续 3 秒未检测到语音，则主动、简短地询问对方。该策略同时适用于 Qwen/OpenAI Realtime 和 MiniMax 级联模式。音色是 Provider 专属配置：OpenAI 推荐 `marin` 或 `cedar`，Qwen 默认 `Cherry`；Web 页面切换 Provider 时会自动修正已知的不兼容音色。
 
-Qwen/OpenAI 的 Realtime PCM 输出固定使用 24 kHz，进入模块前由后端经过抗混叠滤波转换为电话原生 8 kHz；Qwen 会话使用其协议规定的 `pcm` 格式名。Swift 音频宿主按 UAC 实际接收帧数推进 Agent 播放队列，并在首包播放前保留约 80 ms 抖动缓冲，云端快速推送的长回复不会再被 400 ms 本地缓冲截断。普通话通话默认使用 `zh`、中文上下文提示、近场降噪和 `gpt-4o-transcribe` 转写。
+Qwen/OpenAI 的 Realtime PCM 输出固定使用 24 kHz，进入模块前由后端经过抗混叠滤波转换为电话原生 8 kHz；Qwen 会话使用其协议规定的 `pcm` 格式名。Swift 音频宿主按 UAC 实际接收帧数推进 Agent 播放队列，并在首包播放前保留约 200 ms 抖动缓冲，云端快速推送的长回复不会再被 400 ms 本地缓冲截断。普通话通话默认使用 `zh`、中文上下文提示、近场降噪和 `gpt-4o-transcribe` 转写。
 
-长回复使用跨 Realtime audio delta 保持状态的流式 FIR 降采样器，上行 8→16 kHz 插值也跨媒体消息保持连续，不会在云端分块边界重新初始化。Swift 播放队列采用读指针推进，UAC 满载时不会反复复制或重排整段 PCM；默认提示 Agent 将单轮语音控制在约 20 秒内，复杂内容分段播报。
+长回复使用跨 Realtime audio delta 保持状态的流式 FIR 降采样器，上行 8→16 kHz 插值也跨媒体消息保持连续，不会在云端分块边界重新初始化。Swift 播放队列采用读指针推进，并使用约 200 ms 首包缓冲和欠载后重新蓄水；UAC 满载时不会反复复制或重排整段 PCM。播放结束由独立的 `audio.done` 事件确认，不再受 usage 事件到达时机影响；默认提示 Agent 将单轮语音控制在约 20 秒内，复杂内容分段播报。
 
 可靠性与安全默认值：
 

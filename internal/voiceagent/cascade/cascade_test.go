@@ -174,6 +174,42 @@ func TestCascadeRunsSTTThroughTextAndSpeech(t *testing.T) {
 	}
 }
 
+func TestCascadeMarksAudioDoneBeforeUsage(t *testing.T) {
+	stt := &fakeTranscriptionSession{events: make(chan Transcript, 1)}
+	provider := &Provider{ProviderName: "minimax", STT: fakeTranscriber{session: stt}, LLM: fakeTextModel{}, TTS: fakeSynthesizer{}}
+	session, err := provider.Open(context.Background(), voiceagent.SessionConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	stt.events <- Transcript{Text: "请详细介绍", Final: true}
+
+	deadline := time.After(time.Second)
+	sawAudio := false
+	sawDone := false
+	for {
+		select {
+		case event := <-session.Events():
+			switch event.Type {
+			case voiceagent.EventAudio:
+				sawAudio = true
+			case voiceagent.EventAudioDone:
+				if !sawAudio {
+					t.Fatal("audio.done arrived before audio")
+				}
+				sawDone = true
+			case voiceagent.EventUsage:
+				if !sawDone {
+					t.Fatal("usage arrived before audio.done")
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("audio completion events were not emitted")
+		}
+	}
+}
+
 func TestCascadeStartsOpeningTurnOnlyOnce(t *testing.T) {
 	stt := &fakeTranscriptionSession{events: make(chan Transcript, 1)}
 	provider := &Provider{ProviderName: "minimax", STT: fakeTranscriber{session: stt}, LLM: fakeTextModel{}, TTS: fakeSynthesizer{}}

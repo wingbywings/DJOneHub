@@ -67,8 +67,12 @@ func (dialect) SessionUpdate(config voiceagent.SessionConfig) any {
 			"input": map[string]any{
 				"format":          map[string]any{"type": "audio/pcm", "rate": 24000},
 				"noise_reduction": map[string]any{"type": "near_field"},
-				"turn_detection":  map[string]any{"type": "server_vad", "threshold": 0.35, "prefix_padding_ms": 300, "silence_duration_ms": 600, "create_response": true, "interrupt_response": true},
-				"transcription":   map[string]any{"model": transcriptionModel, "language": language, "prompt": "普通话中文电话通话，请输出准确的简体中文；可能包含姓名、电话号码、地址和业务术语。"},
+				// Telephone downlinks commonly contain codec hiss, sidetone, and
+				// short switching transients. A threshold above the API default,
+				// combined with a longer stop window, makes barge-in require a
+				// clearer sustained utterance instead of a single noise burst.
+				"turn_detection": map[string]any{"type": "server_vad", "threshold": 0.65, "prefix_padding_ms": 400, "silence_duration_ms": 700, "create_response": true, "interrupt_response": true},
+				"transcription":  map[string]any{"model": transcriptionModel, "language": language, "prompt": "普通话中文电话通话，请输出准确的简体中文；可能包含姓名、电话号码、地址和业务术语。"},
 			},
 			"output": map[string]any{"format": map[string]any{"type": "audio/pcm", "rate": 24000}, "voice": config.Voice},
 		},
@@ -107,6 +111,8 @@ func (dialect) ParseEvent(raw []byte) ([]voiceagent.Event, error) {
 		"response.audio_transcript.delta":                       voiceagent.EventOutputTranscriptDelta,
 		"response.output_audio_transcript.done":                 voiceagent.EventOutputTranscriptFinal,
 		"response.audio_transcript.done":                        voiceagent.EventOutputTranscriptFinal,
+		"response.output_audio.done":                            voiceagent.EventAudioDone,
+		"response.audio.done":                                   voiceagent.EventAudioDone,
 		"response.done":                                         voiceagent.EventUsage,
 	})
 }

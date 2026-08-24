@@ -28,8 +28,9 @@ swift run --package-path macos/DJOneHubAudioHost \
 只允许一个 Agent 媒体会话。
 
 Agent 媒体桥断线后会按最长 8 秒的指数退避自动重连。Profile revision 改变时会主动
-重建媒体会话；收到后端的 `speech.started` 事件时会清空尚未写入模块的 Agent PCM，
-让来电方可以打断 AI 播报。
+重建媒体会话；收到后端确认的 `speech.started` 事件时会清空尚未写入模块的 Agent PCM，
+让来电方可以打断 AI 播报。Agent 输出使用首包与欠载重蓄水缓冲，并由 `audio.done`
+明确释放最后不足一个缓冲窗口的尾包。
 
 制作发行包时无需单独复制该产物，根目录的 `scripts/package-macos-arm64.sh`
 会执行 release 构建并将其打包为 `bin/djonehub-audio-host`。

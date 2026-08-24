@@ -144,3 +144,19 @@ func TestProviderResamplesTelephoneAudioBothDirections(t *testing.T) {
 		t.Fatal("timed out waiting for output audio")
 	}
 }
+
+func TestResponseDoneAlsoMarksAudioDone(t *testing.T) {
+	events, err := ParseCommonEvent(
+		[]byte(`{"type":"response.done","response":{"usage":{"total_tokens":9}}}`),
+		map[string]voiceagent.EventType{"response.done": voiceagent.EventUsage},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Type != voiceagent.EventAudioDone || events[1].Type != voiceagent.EventUsage {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[1].Usage["total_tokens"].(float64) != 9 {
+		t.Fatalf("usage = %#v", events[1].Usage)
+	}
+}

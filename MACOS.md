@@ -131,8 +131,8 @@ development workflow.
 The Calls page now provides the complete profile editor, provider/STT fallback,
 live transcripts, redacted audit history, and operator approval for sensitive
 tools. The local media WebSocket reconnects with exponential backoff; a profile
-revision change rebuilds the active media session, and server VAD speech-start
-events clear queued assistant audio for barge-in. MiniMax text generation uses
+revision change rebuilds the active media session. Qwen smart-turn detection and
+noise-tuned OpenAI/STT VAD speech-start events clear queued assistant audio for barge-in. MiniMax text generation uses
 SSE sentence streaming so TTS can begin before the full answer completes.
 
 The profile is stored as `voice-agent.json` under DJOneHub's Application Support

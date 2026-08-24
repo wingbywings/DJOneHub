@@ -378,7 +378,7 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 Qwen/OpenAI Realtime 的输出 PCM 为 24 kHz，DJOneHub 会经过抗混叠滤波转换为模块电话链路使用的 8 kHz PCM；Qwen 会话的音频格式字段使用其协议规定的 `pcm`。音频宿主必须重新编译并和 Go 后端一起重启，才能应用抖动缓冲、长回复排队与 UAC 流控修复。中文识别默认传入 `zh` 和中文电话上下文，并使用 `gpt-4o-transcribe`。
 
-长回复优化同时位于 Go 后端和 Swift 音频宿主：Go 使用跨 audio delta 连续的流式 FIR，并跨上行媒体消息保持插值状态；Swift 使用约 80 ms 首包抖动缓冲和零大块重排的读指针 PCM 队列，并根据 UAC 实际接收帧数推进。升级时必须同时替换两端二进制。
+长回复优化同时位于 Go 后端和 Swift 音频宿主：Go 使用跨 audio delta 连续的流式 FIR，并跨上行媒体消息保持插值状态；Swift 使用约 200 ms 首包抖动缓冲、欠载重新蓄水和零大块重排的读指针 PCM 队列，并根据 UAC 实际接收帧数推进。Go 通过独立 `audio.done` 事件释放尾包，不再把 usage 时序当作播放完成。升级时必须同时替换两端二进制。
 
 ## 6. 开发运行时的数据与日志
 

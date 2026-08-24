@@ -242,9 +242,6 @@ func (s *session) generate() {
 		return
 	}
 	s.emit(voiceagent.Event{Type: voiceagent.EventOutputTranscriptFinal, Text: text})
-	if usage != nil {
-		s.emit(voiceagent.Event{Type: voiceagent.EventUsage, Usage: usage})
-	}
 	s.mu.Lock()
 	s.history = append(s.history, Message{Role: "assistant", Content: text})
 	s.mu.Unlock()
@@ -273,6 +270,10 @@ func (s *session) generate() {
 			}
 		}
 	}
+	s.emit(voiceagent.Event{Type: voiceagent.EventAudioDone})
+	if usage != nil {
+		s.emit(voiceagent.Event{Type: voiceagent.EventUsage, Usage: usage})
+	}
 }
 
 func (s *session) generateStreaming(ctx context.Context, model StreamingTextModel, history []Message) error {
@@ -292,6 +293,7 @@ func (s *session) generateStreaming(ctx context.Context, model StreamingTextMode
 		audioDone <- nil
 	}()
 	var full, pending string
+	var finalUsage map[string]any
 	for event := range stream {
 		if event.Err != nil {
 			close(sentences)
@@ -299,7 +301,7 @@ func (s *session) generateStreaming(ctx context.Context, model StreamingTextMode
 			return event.Err
 		}
 		if event.Usage != nil {
-			s.emit(voiceagent.Event{Type: voiceagent.EventUsage, Usage: event.Usage})
+			finalUsage = event.Usage
 		}
 		if event.Delta == "" {
 			continue
@@ -325,6 +327,10 @@ func (s *session) generateStreaming(ctx context.Context, model StreamingTextMode
 	close(sentences)
 	if err := <-audioDone; err != nil {
 		return err
+	}
+	s.emit(voiceagent.Event{Type: voiceagent.EventAudioDone})
+	if finalUsage != nil {
+		s.emit(voiceagent.Event{Type: voiceagent.EventUsage, Usage: finalUsage})
 	}
 	full = strings.TrimSpace(full)
 	if full == "" {

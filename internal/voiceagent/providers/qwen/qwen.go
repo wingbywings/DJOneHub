@@ -47,7 +47,10 @@ func (dialect) SessionUpdate(config voiceagent.SessionConfig) any {
 		// the OpenAI Realtime spelling and is not part of Qwen's protocol.
 		"input_audio_format": "pcm", "output_audio_format": "pcm", "tools": tools,
 		"input_audio_transcription": map[string]any{"language": config.Language},
-		"turn_detection":            map[string]any{"type": "server_vad", "threshold": 0.5, "silence_duration_ms": 500},
+		// smart_turn combines acoustic and semantic detection. In particular,
+		// it keeps filler sounds and non-semantic background audio from
+		// interrupting an assistant response.
+		"turn_detection": map[string]any{"type": "smart_turn"},
 	}}
 }
 func (dialect) InputAudio(audio string) any {
@@ -76,6 +79,7 @@ func (dialect) ParseEvent(raw []byte) ([]voiceagent.Event, error) {
 		"conversation.item.input_audio_transcription.delta":     voiceagent.EventInputTranscriptDelta,
 		"conversation.item.input_audio_transcription.completed": voiceagent.EventInputTranscriptFinal,
 		"response.audio.delta":                                  voiceagent.EventAudio, "response.audio_transcript.delta": voiceagent.EventOutputTranscriptDelta,
-		"response.audio_transcript.done": voiceagent.EventOutputTranscriptFinal, "response.done": voiceagent.EventUsage,
+		"response.audio_transcript.done": voiceagent.EventOutputTranscriptFinal, "response.audio.done": voiceagent.EventAudioDone,
+		"response.done": voiceagent.EventUsage,
 	})
 }

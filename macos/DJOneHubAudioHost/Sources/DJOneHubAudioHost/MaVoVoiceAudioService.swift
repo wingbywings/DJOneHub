@@ -36,6 +36,7 @@ final class VoiceAudioService {
     private var agentAudioReadOffset = 0
     private var agentPlayoutStarted = false
     private var agentTurnFinished = false
+    private var agentPrebufferTargetBytes = 0
     private var uacCleanupPending = false
     private var sessionGeneration: UInt64 = 0
     private var uploadBytes = Data()
@@ -71,9 +72,12 @@ final class VoiceAudioService {
     // telephone's 8 kHz playout clock. Keep a full spoken turn instead of
     // applying the microphone queue's 400 ms latency cap.
     private let maximumAgentAudioBytes = 8_000 * 2 * 300
-    // Hold the first few cloud deltas long enough to absorb normal WebSocket
-    // jitter. Once playout starts, the native UAC ring supplies another 256 ms.
-    private let minimumAgentPrebufferBytes = 8_000 * 2 * 80 / 1_000
+    // Hold enough cloud audio to survive normal WebSocket and scheduler jitter.
+    // The native UAC ring supplies another 256 ms after playout starts. If the
+    // Swift queue still drains mid-turn, briefly refill it behind that ring
+    // instead of feeding tiny deltas separated by silence.
+    private let initialAgentPrebufferBytes = 8_000 * 2 * 200 / 1_000
+    private let recoveryAgentPrebufferBytes = 8_000 * 2 * 160 / 1_000
     private let uacTransferFrames = 512
     private let uacIdleInterval = 0.005
     private let uacCallbackStallNanoseconds: UInt64 = 3_000_000_000
@@ -428,6 +432,12 @@ final class VoiceAudioService {
     func enqueueAgentOutput(_ pcm: Data) {
         guard !pcm.isEmpty else { return }
         agentAudioLock.withLock {
+            let unreadBeforeAppend = agentAudioBytes.count - agentAudioReadOffset
+            if agentTurnFinished && unreadBeforeAppend == 0 {
+                agentTurnFinished = false
+                agentPlayoutStarted = false
+                agentPrebufferTargetBytes = initialAgentPrebufferBytes
+            }
             agentAudioBytes.append(pcm)
             let unreadBytes = agentAudioBytes.count - agentAudioReadOffset
             if unreadBytes > maximumAgentAudioBytes {
@@ -444,6 +454,7 @@ final class VoiceAudioService {
             agentAudioReadOffset = 0
             agentPlayoutStarted = false
             agentTurnFinished = false
+            agentPrebufferTargetBytes = initialAgentPrebufferBytes
         }
         if let uac = stateLock.withLock({ activeUAC }) {
             mavo_uac_probe_flush_uplink_pcm(uac)
@@ -884,8 +895,15 @@ final class VoiceAudioService {
         agentAudioLock.withLock {
             let requestedBytes = samples.count * MemoryLayout<Int16>.size
             let unreadBytes = agentAudioBytes.count - agentAudioReadOffset
+            if agentPlayoutStarted && unreadBytes < MemoryLayout<Int16>.size && !agentTurnFinished {
+                agentPlayoutStarted = false
+                agentPrebufferTargetBytes = recoveryAgentPrebufferBytes
+            }
             if !agentPlayoutStarted {
-                guard unreadBytes >= minimumAgentPrebufferBytes ||
+                let target = agentPrebufferTargetBytes > 0
+                    ? agentPrebufferTargetBytes
+                    : initialAgentPrebufferBytes
+                guard unreadBytes >= target ||
                         (agentTurnFinished && unreadBytes > 0) else {
                     return Data()
                 }
@@ -912,6 +930,10 @@ final class VoiceAudioService {
             }
             guard acceptedFrames > 0 else { return Data() }
             agentAudioReadOffset += Int(acceptedFrames) * MemoryLayout<Int16>.size
+            if agentAudioReadOffset == agentAudioBytes.count && !agentTurnFinished {
+                agentPlayoutStarted = false
+                agentPrebufferTargetBytes = recoveryAgentPrebufferBytes
+            }
             compactAgentAudioIfNeeded()
             return samples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
         }

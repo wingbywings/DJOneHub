@@ -514,6 +514,7 @@ function voiceAgentEventLabel(type) {
   if (type === "speech.stopped") return "停止说话";
   if (type === "session.ready") return "会话就绪";
   if (type === "session.closed") return "会话结束";
+  if (type === "audio.done") return "播放就绪";
   if (type === "usage") return "用量";
   return type || "事件";
 }
@@ -528,6 +529,7 @@ function voiceAgentEventText(event) {
   if (event.type === "session.closed") return "语音会话已关闭";
   if (event.type === "speech.started") return "检测到来电方开始说话，已打断待播放语音";
   if (event.type === "speech.stopped") return "来电方本轮说话结束";
+  if (event.type === "audio.done") return "本轮 AI 语音已全部进入播放队列";
   return event.provider || "";
 }
 

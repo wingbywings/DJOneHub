@@ -43,7 +43,8 @@ func (d transcriptionDialect) SessionUpdate(config voiceagent.SessionConfig) any
 	}
 	return map[string]any{"type": "session.update", "session": map[string]any{"type": "transcription", "audio": map[string]any{"input": map[string]any{
 		"format": map[string]any{"type": "audio/pcm", "rate": 24000}, "transcription": settings,
-		"turn_detection": map[string]any{"type": "server_vad", "threshold": 0.5, "prefix_padding_ms": 300, "silence_duration_ms": 500},
+		"noise_reduction": map[string]any{"type": "near_field"},
+		"turn_detection":  map[string]any{"type": "server_vad", "threshold": 0.65, "prefix_padding_ms": 400, "silence_duration_ms": 700},
 	}}}}
 }
 func (transcriptionDialect) InputAudio(audio string) any {
