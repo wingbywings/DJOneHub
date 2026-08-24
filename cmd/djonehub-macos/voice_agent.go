@@ -429,12 +429,16 @@ var voiceAgentUpgrader = websocket.Upgrader{
 
 func voiceAgentSessionConfig(callID string, state voiceAgentState) voiceagent.SessionConfig {
 	tools := []voiceagent.Tool(nil)
+	instructions := state.Instructions
 	if state.ToolsEnabled {
 		tools = voiceAgentTools()
+		instructions = strings.TrimSpace(instructions + `
+
+结束通话规则：当对方明确道别、要求结束通话，或当前任务已经完成且适合结束时，必须在当前轮立即调用 hang_up_call，不要让对方再确认一次。该工具会等待你的最后一句语音实际播放完毕后才挂断；工具返回成功后，请立即说一句简短、自然的告别语，不要再询问是否挂断。`)
 	}
 	return voiceagent.SessionConfig{
 		ID: callID, Model: state.Model, TranscriptionModel: state.STTModel,
-		Voice: state.Voice, Instructions: state.Instructions,
+		Voice: state.Voice, Instructions: instructions,
 		OpeningPrompt: "电话已经接通。请立即主动、简短而自然地问候对方，并依据系统角色与通话指令开始会话。不要提及这条触发指令。",
 		Language:      "zh",
 		Tools:         tools,
@@ -653,13 +657,28 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 	activeProvider := voiceAgentProviderKey(activeProfile)
 	controller.setConnected(callID, activeProvider, true, "")
 	defer controller.setConnected("", "", false, "")
+	defer controller.cancelPendingHangup(callID)
 	readFailures := make(chan error, 1)
+	mediaEvents := make(chan string, 8)
 	go func() {
 		for {
 			kind, payload, err := conn.ReadMessage()
 			if err != nil {
 				readFailures <- err
 				return
+			}
+			if kind == websocket.TextMessage {
+				var message struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(payload, &message) == nil && message.Type != "" {
+					select {
+					case mediaEvents <- message.Type:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				continue
 			}
 			if kind != websocket.BinaryMessage {
 				continue
@@ -679,6 +698,10 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 				controller.setError(err)
 			}
 			return
+		case eventType := <-mediaEvents:
+			if eventType == "playout.done" {
+				a.completeVoiceAgentHangup(controller, callID)
+			}
 		case event, open := <-session.Events():
 			if !open {
 				if r.Context().Err() == nil {
@@ -686,6 +709,7 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 				}
 				return
 			}
+			a.observeVoiceAgentHangupEvent(controller, callID, event)
 			controller.recordEvent(callID, event)
 			if event.Err != nil {
 				controller.setError(event.Err)

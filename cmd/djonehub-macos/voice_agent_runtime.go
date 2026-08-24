@@ -53,6 +53,17 @@ type pendingVoiceAgentTool struct {
 	session   voiceagent.Session
 }
 
+// pendingVoiceAgentHangup keeps the call alive while the model produces and
+// the local audio host plays its final spoken reply. A hang-up is armed only
+// after audio generated after the tool call reaches an audio.done boundary.
+type pendingVoiceAgentHangup struct {
+	CallID    string
+	ToolCall  *voiceagent.ToolCall
+	SawAudio  bool
+	Armed     bool
+	Requested time.Time
+}
+
 type voiceAgentRuntime struct {
 	mu                sync.Mutex
 	auditFileMu       sync.Mutex
@@ -62,6 +73,7 @@ type voiceAgentRuntime struct {
 	subscribers       map[uint64]chan voiceAgentAuditEvent
 	nextSubscriber    uint64
 	pendingTools      map[string]*pendingVoiceAgentTool
+	pendingHangups    map[string]*pendingVoiceAgentHangup
 	providerHealth    map[string]voiceAgentProviderHealth
 	lastConnectedCall string
 }
@@ -75,6 +87,7 @@ func (c *voiceAgentController) initializeRuntime() {
 		auditPath:      path,
 		subscribers:    make(map[uint64]chan voiceAgentAuditEvent),
 		pendingTools:   make(map[string]*pendingVoiceAgentTool),
+		pendingHangups: make(map[string]*pendingVoiceAgentHangup),
 		providerHealth: make(map[string]voiceAgentProviderHealth),
 	}
 	c.loadAudit()

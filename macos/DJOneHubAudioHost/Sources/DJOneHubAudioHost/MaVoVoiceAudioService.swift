@@ -9,6 +9,7 @@ import Foundation
 final class VoiceAudioService {
     var onError: ((String) -> Void)?
     var onAgentInput: ((Data) -> Void)?
+    var onAgentOutputPlayed: (() -> Void)?
 
     private struct DeferredUACCleanup {
         let pointer: OpaquePointer
@@ -36,6 +37,9 @@ final class VoiceAudioService {
     private var agentAudioReadOffset = 0
     private var agentPlayoutStarted = false
     private var agentTurnFinished = false
+    private var agentTurnHadAudio = false
+    private var agentPlayoutCompletionScheduled = false
+    private var agentTurnGeneration: UInt64 = 0
     private var agentPrebufferTargetBytes = 0
     private var uacCleanupPending = false
     private var sessionGeneration: UInt64 = 0
@@ -82,6 +86,10 @@ final class VoiceAudioService {
     // instead of feeding tiny deltas separated by silence.
     private let initialAgentPrebufferBytes = 8_000 * 2 * 200 / 1_000
     private let recoveryAgentPrebufferBytes = 8_000 * 2 * 160 / 1_000
+    // The native UAC uplink ring can still hold about 256 ms after Swift has
+    // handed it the last frame. Wait beyond that before reporting that the
+    // remote party has actually heard the complete turn.
+    private let agentPlayoutDrainDelay = 0.35
     private let uacTransferFrames = 512
     private let uacIdleInterval = 0.005
     private let uacCallbackStallNanoseconds: UInt64 = 3_000_000_000
@@ -438,11 +446,15 @@ final class VoiceAudioService {
         agentAudioLock.withLock {
             let unreadBeforeAppend = agentAudioBytes.count - agentAudioReadOffset
             if agentTurnFinished && unreadBeforeAppend == 0 {
+                agentTurnGeneration &+= 1
                 agentTurnFinished = false
+                agentTurnHadAudio = false
+                agentPlayoutCompletionScheduled = false
                 agentPlayoutStarted = false
                 agentPrebufferTargetBytes = initialAgentPrebufferBytes
             }
             agentAudioBytes.append(pcm)
+            agentTurnHadAudio = true
             let unreadBytes = agentAudioBytes.count - agentAudioReadOffset
             if unreadBytes > maximumAgentAudioBytes {
                 let overflow = unreadBytes - maximumAgentAudioBytes
@@ -458,6 +470,9 @@ final class VoiceAudioService {
             agentAudioReadOffset = 0
             agentPlayoutStarted = false
             agentTurnFinished = false
+            agentTurnHadAudio = false
+            agentPlayoutCompletionScheduled = false
+            agentTurnGeneration &+= 1
             agentPrebufferTargetBytes = initialAgentPrebufferBytes
         }
         if let uac = stateLock.withLock({ activeUAC }) {
@@ -471,6 +486,30 @@ final class VoiceAudioService {
             if agentAudioBytes.count > agentAudioReadOffset {
                 agentPlayoutStarted = true
             }
+            scheduleAgentPlayoutCompletionLocked()
+        }
+    }
+
+    private func scheduleAgentPlayoutCompletionLocked() {
+        guard agentTurnFinished,
+              agentTurnHadAudio,
+              agentAudioBytes.count == agentAudioReadOffset,
+              !agentPlayoutCompletionScheduled else { return }
+        agentPlayoutCompletionScheduled = true
+        let generation = agentTurnGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + agentPlayoutDrainDelay) { [weak self] in
+            guard let self else { return }
+            let shouldNotify = self.agentAudioLock.withLock { () -> Bool in
+                guard self.agentTurnGeneration == generation,
+                      self.agentPlayoutCompletionScheduled,
+                      self.agentTurnFinished,
+                      self.agentTurnHadAudio,
+                      self.agentAudioBytes.count == self.agentAudioReadOffset else { return false }
+                self.agentPlayoutCompletionScheduled = false
+                self.agentTurnHadAudio = false
+                return true
+            }
+            if shouldNotify { self.onAgentOutputPlayed?() }
         }
     }
 
@@ -947,6 +986,7 @@ final class VoiceAudioService {
                 agentPlayoutStarted = false
                 agentPrebufferTargetBytes = recoveryAgentPrebufferBytes
             }
+            scheduleAgentPlayoutCompletionLocked()
             compactAgentAudioIfNeeded()
             return samples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
         }

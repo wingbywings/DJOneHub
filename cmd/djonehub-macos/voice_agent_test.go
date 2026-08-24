@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -378,35 +379,36 @@ func TestVoiceAgentProviderFailureMovesFallbackFirst(t *testing.T) {
 	}
 }
 
-func TestVoiceAgentSensitiveToolRequiresOperatorDecision(t *testing.T) {
+func TestVoiceAgentSendDTMFIsBlocked(t *testing.T) {
 	instance := newDemoApp()
 	controller := newVoiceAgentController("")
 	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", ToolsEnabled: true, RedactPII: true}
 	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
 	session := &fakeVoiceAgentSession{results: make(chan map[string]any, 1)}
-	call := &voiceagent.ToolCall{ID: "pending-1", Name: "send_dtmf", Arguments: json.RawMessage(`{"digit":"1"}`)}
+	call := &voiceagent.ToolCall{ID: "blocked-dtmf-1", Name: "send_dtmf", Arguments: json.RawMessage(`{"digit":"1"}`)}
 	instance.handleVoiceAgentTool(controller, session, "call-1", call)
-	response := httptest.NewRecorder()
-	instance.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/voice-agent/tools/pending", nil))
-	if response.Code != http.StatusOK || !bytes.Contains(response.Body.Bytes(), []byte("pending-1")) {
-		t.Fatalf("pending status=%d body=%s", response.Code, response.Body.String())
-	}
-	response = httptest.NewRecorder()
-	instance.routes().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/voice-agent/tools/pending-1", bytes.NewBufferString(`{"approve":false}`)))
-	if response.Code != http.StatusOK {
-		t.Fatalf("decision status=%d body=%s", response.Code, response.Body.String())
-	}
 	select {
 	case result := <-session.results:
 		if result["ok"] != false {
 			t.Fatalf("result = %#v", result)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("tool rejection was not returned to model")
+		t.Fatal("blocked DTMF result was not returned to model")
+	}
+	controller.runtime.mu.Lock()
+	pendingCount := len(controller.runtime.pendingTools)
+	controller.runtime.mu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending tools = %d, want 0", pendingCount)
+	}
+	for _, tool := range voiceAgentTools() {
+		if tool.Name == "send_dtmf" {
+			t.Fatal("send_dtmf is still exposed to the voice agent")
+		}
 	}
 }
 
-func TestVoiceAgentHangUpExecutesWithoutOperatorDecision(t *testing.T) {
+func TestVoiceAgentHangUpWaitsForFarewellPlayoutWithoutOperatorDecision(t *testing.T) {
 	instance := newDemoApp()
 	controller := newVoiceAgentController("")
 	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", ToolsEnabled: true, RedactPII: true}
@@ -423,17 +425,49 @@ func TestVoiceAgentHangUpExecutesWithoutOperatorDecision(t *testing.T) {
 		if result["ok"] != true {
 			t.Fatalf("result = %#v", result)
 		}
+		scheduled, _ := result["result"].(map[string]any)
+		if scheduled["scheduled"] != true {
+			t.Fatalf("result = %#v, want scheduled hang-up", result)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("hang-up result was not returned to model")
 	}
 	controller.runtime.mu.Lock()
 	pendingCount := len(controller.runtime.pendingTools)
+	pendingHangup := controller.runtime.pendingHangups["call-1"]
 	controller.runtime.mu.Unlock()
 	if pendingCount != 0 {
 		t.Fatalf("pending tools = %d, want 0", pendingCount)
 	}
+	if pendingHangup == nil {
+		t.Fatal("hang-up was not scheduled")
+	}
+	if instance.activeCall == nil {
+		t.Fatal("call ended before the farewell reply")
+	}
+
+	// The tool-calling response can end without audio. That boundary must not
+	// hang up before the model's follow-up farewell has been spoken.
+	instance.observeVoiceAgentHangupEvent(controller, "call-1", voiceagent.Event{Type: voiceagent.EventAudioDone})
+	instance.completeVoiceAgentHangup(controller, "call-1")
+	if instance.activeCall == nil {
+		t.Fatal("call ended on an audio boundary that had no farewell audio")
+	}
+
+	instance.observeVoiceAgentHangupEvent(controller, "call-1", voiceagent.Event{Type: voiceagent.EventAudio, Audio: []byte{0, 0}})
+	instance.observeVoiceAgentHangupEvent(controller, "call-1", voiceagent.Event{Type: voiceagent.EventAudioDone})
+	instance.completeVoiceAgentHangup(controller, "call-1")
 	if instance.activeCall != nil {
-		t.Fatalf("active call = %#v, want nil", instance.activeCall)
+		t.Fatalf("active call = %#v, want nil after farewell playout", instance.activeCall)
+	}
+}
+
+func TestVoiceAgentSessionInstructionsRequireSameTurnHangUp(t *testing.T) {
+	config := voiceAgentSessionConfig("call-1", voiceAgentState{ToolsEnabled: true, Instructions: "处理客户问题。"})
+	for _, required := range []string{"当前轮立即调用 hang_up_call", "不要让对方再确认一次", "语音实际播放完毕后才挂断"} {
+		if !strings.Contains(config.Instructions, required) {
+			t.Fatalf("instructions = %q, missing %q", config.Instructions, required)
+		}
 	}
 }
 

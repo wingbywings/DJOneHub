@@ -43,6 +43,16 @@ final class AgentMediaClient {
         }
     }
 
+    func sendEvent(type: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: ["type": type]),
+              let message = String(data: data, encoding: .utf8) else { return }
+        let current = lock.withLock { (task, generation) }
+        guard let task = current.0 else { return }
+        task.send(.string(message)) { [weak self] error in
+            if let error { self?.handleDisconnect(error, generation: current.1, prefix: "AI 媒体事件发送失败") }
+        }
+    }
+
     func stop() {
         let previous: URLSessionWebSocketTask? = lock.withLock {
             generation &+= 1

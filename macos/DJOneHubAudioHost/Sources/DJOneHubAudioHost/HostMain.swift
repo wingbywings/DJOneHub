@@ -214,6 +214,7 @@ private final class AudioHostController {
         self.fixedDeviceID = fixedDeviceID
         audio.onError = { [weak self] message in self?.lastError = message }
         audio.onAgentInput = { [weak self] pcm in self?.agentMedia.send(pcm) }
+        audio.onAgentOutputPlayed = { [weak self] in self?.agentMedia.sendEvent(type: "playout.done") }
         agentMedia.onAudio = { [weak self] pcm in self?.audio.enqueueAgentOutput(pcm) }
         agentMedia.onEvent = { [weak self] raw in
             guard

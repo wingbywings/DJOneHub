@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/iniwex5/vohive/internal/voiceagent"
@@ -15,8 +14,7 @@ import (
 func voiceAgentTools() []voiceagent.Tool {
 	return []voiceagent.Tool{
 		{Name: "get_call_status", Description: "读取当前电话的方向、状态和已脱敏号码。此操作不会改变电话。", Parameters: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
-		{Name: "send_dtmf", Description: "在已接通电话中发送一个 DTMF 按键。执行前必须由操作员确认。", Parameters: json.RawMessage(`{"type":"object","properties":{"digit":{"type":"string","enum":["0","1","2","3","4","5","6","7","8","9","*","#"]}},"required":["digit"],"additionalProperties":false}`)},
-		{Name: "hang_up_call", Description: "挂断当前电话。此操作会直接执行，无需操作员确认。", Parameters: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
+		{Name: "hang_up_call", Description: "安排结束当前电话。对方明确道别、要求结束或任务已完成时，应在当前轮立即调用，不要等待对方再次确认。调用后请说一句简短告别语；系统会等这句语音实际播放完毕后自动挂断，无需操作员确认。", Parameters: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
 	}
 }
 
@@ -28,7 +26,11 @@ func (a *app) handleVoiceAgentTool(controller *voiceAgentController, session voi
 		_ = session.SubmitToolResult(context.Background(), call.ID, map[string]any{"ok": false, "error": "tools are disabled by the operator"})
 		return
 	}
-	if call.Name == "get_call_status" || call.Name == "hang_up_call" {
+	if call.Name == "hang_up_call" {
+		a.scheduleVoiceAgentHangup(controller, session, callID, call)
+		return
+	}
+	if call.Name == "get_call_status" {
 		result, err := a.executeVoiceAgentTool(call.Name, call.Arguments)
 		a.submitVoiceAgentToolResult(controller, session, callID, call, result, err, "tool.completed")
 		return
@@ -59,24 +61,86 @@ func (a *app) handleVoiceAgentTool(controller *voiceAgentController, session voi
 	}()
 }
 
-func describeVoiceAgentTool(call *voiceagent.ToolCall) (string, error) {
-	switch call.Name {
-	case "send_dtmf":
-		var arguments struct {
-			Digit string `json:"digit"`
-		}
-		if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
-			return "", fmt.Errorf("invalid DTMF arguments: %w", err)
-		}
-		if len(arguments.Digit) != 1 || !strings.Contains("0123456789*#", arguments.Digit) {
-			return "", fmt.Errorf("invalid DTMF digit")
-		}
-		return "AI 请求发送 DTMF 按键 " + arguments.Digit, nil
-	case "hang_up_call":
-		return "AI 请求挂断当前电话", nil
-	default:
-		return "", fmt.Errorf("tool %q is not allowed", call.Name)
+func (a *app) scheduleVoiceAgentHangup(controller *voiceAgentController, session voiceagent.Session, callID string, call *voiceagent.ToolCall) {
+	a.callMu.RLock()
+	activeCallID := ""
+	if a.activeCall != nil && a.activeCall.State == "active" {
+		activeCallID = a.activeCall.ID
 	}
+	a.callMu.RUnlock()
+	if activeCallID == "" || activeCallID != callID {
+		a.submitVoiceAgentToolResult(controller, session, callID, call, nil, fmt.Errorf("当前没有可挂断的通话"), "tool.rejected")
+		return
+	}
+	copyCall := *call
+	copyCall.Arguments = append(json.RawMessage(nil), call.Arguments...)
+	controller.runtime.mu.Lock()
+	controller.runtime.pendingHangups[callID] = &pendingVoiceAgentHangup{
+		CallID: callID, ToolCall: &copyCall, Requested: time.Now(),
+	}
+	controller.runtime.mu.Unlock()
+	a.submitVoiceAgentToolResult(controller, session, callID, call, map[string]any{
+		"scheduled": true,
+		"message":   "请立即向对方说一句简短的告别语；告别语播放完毕后系统会自动挂断",
+	}, nil, "tool.scheduled")
+}
+
+// observeVoiceAgentHangupEvent advances a scheduled hang-up only with audio
+// produced after the tool call. This prevents the audio.done boundary of the
+// tool-calling response itself from hanging up before the farewell response.
+func (a *app) observeVoiceAgentHangupEvent(controller *voiceAgentController, callID string, event voiceagent.Event) {
+	controller.runtime.mu.Lock()
+	defer controller.runtime.mu.Unlock()
+	pending := controller.runtime.pendingHangups[callID]
+	if pending == nil {
+		return
+	}
+	switch event.Type {
+	case voiceagent.EventSpeechStarted:
+		pending.SawAudio = false
+		pending.Armed = false
+	case voiceagent.EventAudio:
+		pending.SawAudio = true
+	case voiceagent.EventAudioDone:
+		if pending.SawAudio {
+			pending.Armed = true
+		}
+	}
+}
+
+func (a *app) completeVoiceAgentHangup(controller *voiceAgentController, callID string) {
+	controller.runtime.mu.Lock()
+	pending := controller.runtime.pendingHangups[callID]
+	if pending == nil || !pending.Armed {
+		controller.runtime.mu.Unlock()
+		return
+	}
+	delete(controller.runtime.pendingHangups, callID)
+	controller.runtime.mu.Unlock()
+
+	result, err := a.executeVoiceAgentTool("hang_up_call", pending.ToolCall.Arguments)
+	event := voiceagent.Event{Type: "tool.completed", Provider: controller.snapshot().ActiveProvider, ToolCall: pending.ToolCall, At: time.Now()}
+	if err != nil {
+		event.Type = "tool.rejected"
+		event.Err = err
+	} else {
+		encoded, _ := json.Marshal(result)
+		event.Text = string(encoded)
+	}
+	controller.recordEvent(callID, event)
+}
+
+func (c *voiceAgentController) cancelPendingHangup(callID string) {
+	if c.runtime == nil || callID == "" {
+		return
+	}
+	c.runtime.mu.Lock()
+	delete(c.runtime.pendingHangups, callID)
+	c.runtime.mu.Unlock()
+}
+
+func describeVoiceAgentTool(call *voiceagent.ToolCall) (string, error) {
+	return "", fmt.Errorf("tool %q is not allowed", call.Name)
 }
 
 func (a *app) executeVoiceAgentTool(name string, arguments json.RawMessage) (any, error) {
@@ -88,35 +152,6 @@ func (a *app) executeVoiceAgentTool(name string, arguments json.RawMessage) (any
 			return map[string]any{"active": false}, nil
 		}
 		return map[string]any{"active": true, "direction": a.activeCall.Direction, "state": a.activeCall.State, "number": redactVoiceAgentText(a.activeCall.Number)}, nil
-	case "send_dtmf":
-		var body struct {
-			Digit string `json:"digit"`
-		}
-		if err := json.Unmarshal(arguments, &body); err != nil {
-			return nil, err
-		}
-		if len(body.Digit) != 1 || !strings.Contains("0123456789*#", body.Digit) {
-			return nil, fmt.Errorf("DTMF 仅支持 0-9、* 和 #")
-		}
-		if !a.callStateAllows("active") {
-			return nil, fmt.Errorf("DTMF 只能在已接通的通话中发送")
-		}
-		if a.demo {
-			return map[string]any{"sent": true, "digit": body.Digit}, nil
-		}
-		a.operationMu.Lock()
-		defer a.operationMu.Unlock()
-		response, err := a.runATCommand(fmt.Sprintf("AT+VTS=\"%s\"", body.Digit), 3*time.Second)
-		if err != nil || validateCallATResponse(response) != nil {
-			response, err = a.runATCommand(fmt.Sprintf("AT+CLDTMF=1,%s", body.Digit), 3*time.Second)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := validateCallATResponse(response); err != nil {
-			return nil, err
-		}
-		return map[string]any{"sent": true, "digit": body.Digit}, nil
 	case "hang_up_call":
 		if !a.hasActiveCall() {
 			return nil, fmt.Errorf("当前没有可挂断的通话")
