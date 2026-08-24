@@ -16,7 +16,7 @@ func voiceAgentTools() []voiceagent.Tool {
 	return []voiceagent.Tool{
 		{Name: "get_call_status", Description: "读取当前电话的方向、状态和已脱敏号码。此操作不会改变电话。", Parameters: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
 		{Name: "send_dtmf", Description: "在已接通电话中发送一个 DTMF 按键。执行前必须由操作员确认。", Parameters: json.RawMessage(`{"type":"object","properties":{"digit":{"type":"string","enum":["0","1","2","3","4","5","6","7","8","9","*","#"]}},"required":["digit"],"additionalProperties":false}`)},
-		{Name: "hang_up_call", Description: "挂断当前电话。执行前必须由操作员确认。", Parameters: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
+		{Name: "hang_up_call", Description: "挂断当前电话。此操作会直接执行，无需操作员确认。", Parameters: json.RawMessage(`{"type":"object","properties":{},"additionalProperties":false}`)},
 	}
 }
 
@@ -28,7 +28,7 @@ func (a *app) handleVoiceAgentTool(controller *voiceAgentController, session voi
 		_ = session.SubmitToolResult(context.Background(), call.ID, map[string]any{"ok": false, "error": "tools are disabled by the operator"})
 		return
 	}
-	if call.Name == "get_call_status" {
+	if call.Name == "get_call_status" || call.Name == "hang_up_call" {
 		result, err := a.executeVoiceAgentTool(call.Name, call.Arguments)
 		a.submitVoiceAgentToolResult(controller, session, callID, call, result, err, "tool.completed")
 		return

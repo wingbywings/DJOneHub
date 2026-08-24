@@ -144,7 +144,7 @@ Profile 不包含 API Key。单设备模式保存于 `~/Library/Application Supp
 - `GET /api/voice-agent/audit` 读取最近记录；`DELETE` 必须提交 `{"confirm":true}`。
 - 审计文件为 `voice-agent-audit.jsonl`，权限 `0600`，达到 5 MiB 自动轮转；内存和文件各最多保留有界数据。
 - 审计不保存 PCM。录音仍保存在 recordings 目录，审计只记录录音开始、停止和路径元数据。
-- 电话状态查询是只读工具；发送 DTMF 和挂断会进入 45 秒待确认队列，超时或拒绝都会把结构化结果返回模型。
+- 电话状态查询和挂断会直接执行；发送 DTMF 会进入 45 秒待确认队列，超时或拒绝都会把结构化结果返回模型。
 - MiniMax 工具多轮保留完整 assistant `tool_calls` 与 `tool_call_id` 历史，确认后可以继续生成和播报结果。
 
 ## 可靠性与延迟

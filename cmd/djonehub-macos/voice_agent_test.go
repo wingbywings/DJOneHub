@@ -189,7 +189,7 @@ func TestVoiceAgentSensitiveToolRequiresOperatorDecision(t *testing.T) {
 	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", ToolsEnabled: true, RedactPII: true}
 	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
 	session := &fakeVoiceAgentSession{results: make(chan map[string]any, 1)}
-	call := &voiceagent.ToolCall{ID: "pending-1", Name: "hang_up_call", Arguments: json.RawMessage(`{}`)}
+	call := &voiceagent.ToolCall{ID: "pending-1", Name: "send_dtmf", Arguments: json.RawMessage(`{"digit":"1"}`)}
 	instance.handleVoiceAgentTool(controller, session, "call-1", call)
 	response := httptest.NewRecorder()
 	instance.routes().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/voice-agent/tools/pending", nil))
@@ -208,6 +208,37 @@ func TestVoiceAgentSensitiveToolRequiresOperatorDecision(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("tool rejection was not returned to model")
+	}
+}
+
+func TestVoiceAgentHangUpExecutesWithoutOperatorDecision(t *testing.T) {
+	instance := newDemoApp()
+	controller := newVoiceAgentController("")
+	controller.state = voiceAgentState{Enabled: true, Provider: "qwen", ToolsEnabled: true, RedactPII: true}
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	now := time.Now()
+	instance.activeCall = &callRecord{ID: "call-1", State: "active", Direction: "incoming", StartedAt: now, UpdatedAt: now}
+	session := &fakeVoiceAgentSession{results: make(chan map[string]any, 1)}
+	call := &voiceagent.ToolCall{ID: "hang-up-1", Name: "hang_up_call", Arguments: json.RawMessage(`{}`)}
+
+	instance.handleVoiceAgentTool(controller, session, "call-1", call)
+
+	select {
+	case result := <-session.results:
+		if result["ok"] != true {
+			t.Fatalf("result = %#v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hang-up result was not returned to model")
+	}
+	controller.runtime.mu.Lock()
+	pendingCount := len(controller.runtime.pendingTools)
+	controller.runtime.mu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("pending tools = %d, want 0", pendingCount)
+	}
+	if instance.activeCall != nil {
+		t.Fatalf("active call = %#v, want nil", instance.activeCall)
 	}
 }
 
