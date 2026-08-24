@@ -219,9 +219,13 @@ private final class AudioHostController {
             guard
                 let data = raw.data(using: .utf8),
                 let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                event["type"] as? String == "speech.started"
+                let type = event["type"] as? String
             else { return }
-            self?.audio.clearAgentOutput()
+            if type == "speech.started" {
+                self?.audio.clearAgentOutput()
+            } else if type == "usage" {
+                self?.audio.finishAgentOutputTurn()
+            }
         }
         agentMedia.onError = { [weak self] message in self?.lastError = message }
         agentMedia.onConnectionState = { [weak self] connected in

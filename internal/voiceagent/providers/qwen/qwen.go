@@ -2,6 +2,7 @@ package qwen
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/iniwex5/vohive/internal/voiceagent"
 	"github.com/iniwex5/vohive/internal/voiceagent/realtime"
@@ -28,6 +29,10 @@ func (dialect) SessionUpdate(config voiceagent.SessionConfig) any {
 	if config.Voice == "" {
 		config.Voice = "Cherry"
 	}
+	instructions := strings.TrimSpace(config.Instructions)
+	if strings.EqualFold(strings.TrimSpace(config.Language), "zh") {
+		instructions = "每轮语音尽量控制在 20 秒内；复杂内容先给结论，再分段说明并询问是否继续。\n\n" + instructions
+	}
 	tools := make([]map[string]any, 0, len(config.Tools))
 	for _, tool := range config.Tools {
 		var parameters any = map[string]any{"type": "object", "properties": map[string]any{}}
@@ -37,8 +42,10 @@ func (dialect) SessionUpdate(config voiceagent.SessionConfig) any {
 		tools = append(tools, map[string]any{"type": "function", "name": tool.Name, "description": tool.Description, "parameters": parameters})
 	}
 	return map[string]any{"type": "session.update", "session": map[string]any{
-		"modalities": []string{"text", "audio"}, "instructions": config.Instructions, "voice": config.Voice,
-		"input_audio_format": "pcm16", "output_audio_format": "pcm16", "tools": tools,
+		"modalities": []string{"text", "audio"}, "instructions": instructions, "voice": config.Voice,
+		// Qwen names raw signed 16-bit little-endian PCM "pcm". "pcm16" is
+		// the OpenAI Realtime spelling and is not part of Qwen's protocol.
+		"input_audio_format": "pcm", "output_audio_format": "pcm", "tools": tools,
 		"input_audio_transcription": map[string]any{"language": config.Language},
 		"turn_detection":            map[string]any{"type": "server_vad", "threshold": 0.5, "silence_duration_ms": 500},
 	}}

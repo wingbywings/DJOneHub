@@ -101,6 +101,8 @@ type session struct {
 	events    chan voiceagent.Event
 	mu        sync.Mutex
 	respondMu sync.Mutex
+	startMu   sync.Mutex
+	started   bool
 	history   []Message
 	pending   map[string]*voiceagent.ToolCall
 	response  context.CancelFunc
@@ -109,6 +111,30 @@ type session struct {
 
 func (s *session) Events() <-chan voiceagent.Event                 { return s.events }
 func (s *session) SendAudio(ctx context.Context, pcm []byte) error { return s.stt.SendAudio(ctx, pcm) }
+
+// Start asks the cascade model to produce the configured opening turn. The
+// caller decides when the initial silence window has elapsed.
+func (s *session) Start(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.ctx.Done():
+		return errors.New("cascade session is closed")
+	default:
+	}
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if s.started || strings.TrimSpace(s.config.OpeningPrompt) == "" {
+		return nil
+	}
+	s.started = true
+	s.mu.Lock()
+	s.history = append(s.history, Message{Role: "user", Content: s.config.OpeningPrompt})
+	s.mu.Unlock()
+	go s.generate()
+	return nil
+}
+
 func (s *session) SubmitToolResult(ctx context.Context, callID string, output any) error {
 	select {
 	case <-ctx.Done():

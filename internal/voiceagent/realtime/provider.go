@@ -94,6 +94,8 @@ func (p *Provider) Open(ctx context.Context, sessionConfig voiceagent.SessionCon
 		inputRate: p.config.InputSampleRate, outputRate: p.config.OutputSampleRate,
 		events: make(chan voiceagent.Event, 64), done: make(chan struct{}),
 	}
+	session.inputUpsampler = voiceagent.NewStreamingPCM16Upsampler(voiceagent.TelephoneSampleRate, p.config.InputSampleRate)
+	session.outputDownsampler = voiceagent.NewStreamingPCM16Downsampler(p.config.OutputSampleRate, voiceagent.TelephoneSampleRate)
 	if dialect, ok := p.config.Dialect.(openingDialect); ok {
 		session.openingResponse = dialect.OpeningResponse(sessionConfig)
 	}
@@ -106,19 +108,22 @@ func (p *Provider) Open(ctx context.Context, sessionConfig voiceagent.SessionCon
 }
 
 type session struct {
-	provider        string
-	conn            *websocket.Conn
-	dialect         Dialect
-	inputRate       int
-	outputRate      int
-	events          chan voiceagent.Event
-	done            chan struct{}
-	writeMu         sync.Mutex
-	closeOnce       sync.Once
-	closingOnce     sync.Once
-	startMu         sync.Mutex
-	started         bool
-	openingResponse any
+	provider          string
+	conn              *websocket.Conn
+	dialect           Dialect
+	inputRate         int
+	outputRate        int
+	events            chan voiceagent.Event
+	done              chan struct{}
+	writeMu           sync.Mutex
+	closeOnce         sync.Once
+	closingOnce       sync.Once
+	startMu           sync.Mutex
+	started           bool
+	openingResponse   any
+	inputMu           sync.Mutex
+	inputUpsampler    *voiceagent.StreamingPCM16Upsampler
+	outputDownsampler *voiceagent.StreamingPCM16Downsampler
 }
 
 func (s *session) Events() <-chan voiceagent.Event { return s.events }
@@ -151,7 +156,17 @@ func (s *session) SendAudio(ctx context.Context, pcm []byte) error {
 		return errors.New("realtime session is closed")
 	default:
 	}
-	converted := voiceagent.ResamplePCM16(pcm, voiceagent.TelephoneSampleRate, s.inputRate)
+	s.inputMu.Lock()
+	var converted []byte
+	if s.inputUpsampler != nil {
+		converted = s.inputUpsampler.Process(pcm)
+	} else {
+		converted = voiceagent.ResamplePCM16(pcm, voiceagent.TelephoneSampleRate, s.inputRate)
+	}
+	s.inputMu.Unlock()
+	if len(converted) == 0 {
+		return nil
+	}
 	return s.writeJSON(s.dialect.InputAudio(base64.StdEncoding.EncodeToString(converted)))
 }
 
@@ -195,7 +210,11 @@ func (s *session) readLoop() {
 		}
 		for _, event := range events {
 			if len(event.Audio) > 0 {
-				event.Audio = voiceagent.ResamplePCM16(event.Audio, s.outputRate, voiceagent.TelephoneSampleRate)
+				if s.outputDownsampler != nil {
+					event.Audio = s.outputDownsampler.Process(event.Audio)
+				} else {
+					event.Audio = voiceagent.ResamplePCM16(event.Audio, s.outputRate, voiceagent.TelephoneSampleRate)
+				}
 				event.AudioFormat = voiceagent.TelephonePCM
 			}
 			s.emit(event)

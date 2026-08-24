@@ -152,9 +152,10 @@ Profile 不包含 API Key。单设备模式保存于 `~/Library/Application Supp
 - Swift 媒体桥在断线后按 1、2、4、8 秒指数退避重连；切换 Profile revision 会重建活动媒体会话。
 - Provider/STT 失败会进入最长 32 秒的熔断窗口；显式配置降级项后，下一次媒体重连优先选择健康候选。
 - Realtime Provider 使用服务端 VAD；收到 `speech.started` 时，音频宿主立即清空未播放的 Agent PCM。
-- Qwen/OpenAI Realtime 只在电话媒体 WebSocket 就绪后发送一次主动开场请求，避免接通后双方静音，也避免音频早于播放通道生成。
+- 电话媒体 WebSocket 就绪后启动 3 秒静默计时；收到 `speech.started` 时取消计时，否则到时发送一次主动询问。Qwen/OpenAI Realtime 和 MiniMax 级联模式使用相同策略，且不会让音频早于播放通道生成。
 - 音色按 Provider 归一化：OpenAI 内置音色使用 `marin`、`cedar` 等官方名称，Qwen 默认使用 `Cherry`；跨 Provider 降级不会沿用不兼容的音色。
-- OpenAI 的 24 kHz PCM 在进入 8 kHz 电话链路前执行抗混叠低通；Swift 宿主只移除 UAC 实际接收的帧，被环形缓冲拒绝的帧按原顺序回队列。Agent 音频队列允许缓存 60 秒，避免云端生成速度快于电话播放时钟时截断回复。
+- Qwen/OpenAI 的 24 kHz PCM 在进入 8 kHz 电话链路前执行抗混叠低通，Qwen 会话使用其协议规定的 `pcm` 格式名；Swift 宿主只移除 UAC 实际接收的帧，被环形缓冲拒绝的帧保留在队列。Agent 音频队列安全上限为 300 秒，避免云端生成速度快于电话播放时钟时截断回复。
+- 长回复使用跨 audio delta 保留 FIR 历史和抽取相位的流式降采样器，上行 8→16 kHz 插值也跨媒体消息保持连续。Swift 队列通过读指针消费，并在首包播放前保留约 80 ms 抖动缓冲；UAC 暂时满载时不再复制整段 `Data`。正常电话策略仍要求单轮约 20 秒并对复杂内容分段。
 - 中文通话使用 `language: zh`、中文转写提示、`gpt-4o-transcribe`、近场降噪和较低的电话 VAD 阈值；输入转写用于界面与审计，Realtime 模型仍直接消费原始音频。
 - MiniMax 文本响应使用 SSE；完整句子一到达就开始 TTS，不再等待整段 LLM 响应完成。开启工具时，为保证工具调用完整性，当前轮回退到非流式文本完成。
 

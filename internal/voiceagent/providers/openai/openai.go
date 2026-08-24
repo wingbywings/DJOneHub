@@ -51,7 +51,7 @@ func (dialect) SessionUpdate(config voiceagent.SessionConfig) any {
 	}
 	instructions := strings.TrimSpace(config.Instructions)
 	if language == "zh" {
-		instructions = "通话主要使用普通话中文。请优先按中文理解来电方，并始终使用自然、简洁的简体中文回答。\n\n" + instructions
+		instructions = "通话主要使用普通话中文。请优先按中文理解来电方，并始终使用自然、简洁的简体中文回答。每轮语音尽量控制在 20 秒内；复杂内容先给结论，再分段说明并询问是否继续。\n\n" + instructions
 	}
 	tools := make([]map[string]any, 0, len(config.Tools))
 	for _, tool := range config.Tools {

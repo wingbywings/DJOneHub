@@ -374,9 +374,11 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 同样的配置可以直接在管理页面“来电 → AI Voice Agent”完成。页面还提供实时转写、Provider 健康状态、工具确认和审计导出/清理。转写审计默认不持久化；启用后使用 `0600` JSONL 文件并默认遮盖电话、邮箱和长标识符。
 
-Qwen/OpenAI Realtime 会在电话媒体链路建立后主动说出开场问候，不需要来电方先讲话。请勿混用不同厂商的音色名称：OpenAI 推荐 `marin`/`cedar`，Qwen 默认 `Cherry`；管理页面会在切换 Provider 时自动修正。
+电话媒体链路建立后，AI Agent 会先等待来电方说话；若连续 3 秒未检测到语音，则主动、简短地询问对方。该策略同时适用于 Qwen/OpenAI Realtime 和 MiniMax 级联模式。请勿混用不同厂商的音色名称：OpenAI 推荐 `marin`/`cedar`，Qwen 默认 `Cherry`；管理页面会在切换 Provider 时自动修正。
 
-OpenAI Realtime 的 PCM 为 24 kHz，DJOneHub 会经过抗混叠滤波转换为模块电话链路使用的 8 kHz PCM。音频宿主必须重新编译并和 Go 后端一起重启，才能应用长回复排队与 UAC 流控修复。中文识别默认传入 `zh` 和中文电话上下文，并使用 `gpt-4o-transcribe`。
+Qwen/OpenAI Realtime 的输出 PCM 为 24 kHz，DJOneHub 会经过抗混叠滤波转换为模块电话链路使用的 8 kHz PCM；Qwen 会话的音频格式字段使用其协议规定的 `pcm`。音频宿主必须重新编译并和 Go 后端一起重启，才能应用抖动缓冲、长回复排队与 UAC 流控修复。中文识别默认传入 `zh` 和中文电话上下文，并使用 `gpt-4o-transcribe`。
+
+长回复优化同时位于 Go 后端和 Swift 音频宿主：Go 使用跨 audio delta 连续的流式 FIR，并跨上行媒体消息保持插值状态；Swift 使用约 80 ms 首包抖动缓冲和零大块重排的读指针 PCM 队列，并根据 UAC 实际接收帧数推进。升级时必须同时替换两端二进制。
 
 ## 6. 开发运行时的数据与日志
 

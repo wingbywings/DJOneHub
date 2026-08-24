@@ -5,6 +5,140 @@ import (
 	"math"
 )
 
+// StreamingPCM16Downsampler preserves FIR history and decimation phase across
+// provider audio deltas. It is optimized for integer-rate mono PCM16
+// downsampling such as the Realtime API's 24 kHz output to 8 kHz telephony.
+type StreamingPCM16Downsampler struct {
+	factor       int
+	coefficients []float64
+	history      []float64
+	position     int
+	inputCount   uint64
+	pendingByte  byte
+	hasPending   bool
+}
+
+// StreamingPCM16Upsampler linearly interpolates integer-rate mono PCM16 while
+// retaining the previous input sample across media messages. The first source
+// sample is repeated to establish the clock; later samples interpolate from
+// the previous message instead of flattening each WebSocket edge into a click.
+type StreamingPCM16Upsampler struct {
+	factor      int
+	previous    int16
+	hasPrevious bool
+	pendingByte byte
+	hasPending  bool
+}
+
+func NewStreamingPCM16Upsampler(fromRate, toRate int) *StreamingPCM16Upsampler {
+	if fromRate <= 0 || toRate <= fromRate || toRate%fromRate != 0 {
+		return nil
+	}
+	return &StreamingPCM16Upsampler{factor: toRate / fromRate}
+}
+
+func (r *StreamingPCM16Upsampler) Process(input []byte) []byte {
+	if r == nil || len(input) == 0 {
+		return nil
+	}
+	if r.hasPending {
+		input = append([]byte{r.pendingByte}, input...)
+		r.hasPending = false
+	}
+	if len(input)%2 != 0 {
+		r.pendingByte = input[len(input)-1]
+		r.hasPending = true
+		input = input[:len(input)-1]
+	}
+	output := make([]byte, 0, len(input)*r.factor)
+	for offset := 0; offset < len(input); offset += 2 {
+		current := int16(binary.LittleEndian.Uint16(input[offset:]))
+		if !r.hasPrevious {
+			r.previous = current
+			r.hasPrevious = true
+			for range r.factor {
+				var encoded [2]byte
+				binary.LittleEndian.PutUint16(encoded[:], uint16(current))
+				output = append(output, encoded[:]...)
+			}
+			continue
+		}
+		start := int64(r.previous)
+		difference := int64(current) - start
+		for phase := 1; phase <= r.factor; phase++ {
+			value := start + difference*int64(phase)/int64(r.factor)
+			var encoded [2]byte
+			binary.LittleEndian.PutUint16(encoded[:], uint16(int16(value)))
+			output = append(output, encoded[:]...)
+		}
+		r.previous = current
+	}
+	return output
+}
+
+func NewStreamingPCM16Downsampler(fromRate, toRate int) *StreamingPCM16Downsampler {
+	if fromRate <= toRate || toRate <= 0 || fromRate%toRate != 0 {
+		return nil
+	}
+	const radius = 16
+	cutoff := 0.45 * float64(toRate) / float64(fromRate)
+	coefficients := make([]float64, radius*2+1)
+	var sum float64
+	for index := range coefficients {
+		distance := float64(index - radius)
+		kernel := 2 * cutoff
+		if distance != 0 {
+			kernel = math.Sin(2*math.Pi*cutoff*distance) / (math.Pi * distance)
+		}
+		window := 0.42 + 0.5*math.Cos(math.Pi*distance/radius) + 0.08*math.Cos(2*math.Pi*distance/radius)
+		coefficients[index] = kernel * window
+		sum += coefficients[index]
+	}
+	for index := range coefficients {
+		coefficients[index] /= sum
+	}
+	return &StreamingPCM16Downsampler{
+		factor: fromRate / toRate, coefficients: coefficients, history: make([]float64, len(coefficients)),
+	}
+}
+
+func (r *StreamingPCM16Downsampler) Process(input []byte) []byte {
+	if r == nil || len(input) == 0 {
+		return nil
+	}
+	if r.hasPending {
+		input = append([]byte{r.pendingByte}, input...)
+		r.hasPending = false
+	}
+	if len(input)%2 != 0 {
+		r.pendingByte = input[len(input)-1]
+		r.hasPending = true
+		input = input[:len(input)-1]
+	}
+	output := make([]byte, 0, len(input)/r.factor)
+	for offset := 0; offset < len(input); offset += 2 {
+		r.history[r.position] = float64(int16(binary.LittleEndian.Uint16(input[offset:])))
+		r.position = (r.position + 1) % len(r.history)
+		r.inputCount++
+		if r.inputCount%uint64(r.factor) != 0 {
+			continue
+		}
+		var value float64
+		for index, coefficient := range r.coefficients {
+			historyIndex := r.position - 1 - index
+			if historyIndex < 0 {
+				historyIndex += len(r.history)
+			}
+			value += r.history[historyIndex] * coefficient
+		}
+		value = math.Max(-32768, math.Min(32767, value))
+		var encoded [2]byte
+		binary.LittleEndian.PutUint16(encoded[:], uint16(int16(math.Round(value))))
+		output = append(output, encoded[:]...)
+	}
+	return output
+}
+
 // ResamplePCM16 converts mono little-endian signed PCM. Telephone frames are
 // short (normally 20-40 ms), so linear interpolation is a good low-latency
 // baseline. Provider adapters own this conversion and the hardware bridge

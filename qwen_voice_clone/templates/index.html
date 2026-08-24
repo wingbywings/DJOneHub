@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Qwen Voice Studio</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">QWEN AUDIO · VOICE CLONING</p>
+          <h1>让你的声音，成为一个可复用的 ID。</h1>
+          <p class="lede">上传一段清晰的人声，创建可直接填入 Qwen-Audio <code>voice</code> 参数的复刻音色。</p>
+        </div>
+        <div class="status {{ 'ready' if configured else 'missing' }}">
+          <span class="status-dot"></span>
+          {{ '服务已配置' if configured else '等待配置 API Key / Workspace ID' }}
+        </div>
+      </header>
+
+      <section class="grid">
+        <form id="clone-form" class="panel form-panel">
+          <div class="panel-heading">
+            <span class="step">01</span>
+            <div><h2>创建复刻音色</h2><p>音频仅用于本次复刻，服务端临时文件会立即删除。</p></div>
+          </div>
+
+          <label id="drop-zone" class="drop-zone">
+            <input id="audio" name="audio" type="file" accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4" required>
+            <span class="drop-icon">↥</span>
+            <strong id="file-label">选择音频，或拖到这里</strong>
+            <small>WAV 16-bit / MP3 / M4A · 推荐 10–20 秒 · 最大 60 秒 / 10 MB</small>
+            <audio id="audio-preview" controls hidden></audio>
+          </label>
+
+          <div class="fields">
+            <label>
+              <span>音色前缀</span>
+              <input name="prefix" value="myvoice" maxlength="10" pattern="[A-Za-z0-9]{1,10}" required>
+              <small>1–10 位英文或数字</small>
+            </label>
+            <label>
+              <span>目标模型</span>
+              <input name="target_model" value="{{ default_target_model }}" list="models" required>
+              <datalist id="models">
+                <option value="qwen-audio-3.0-realtime-plus"></option>
+                <option value="qwen-audio-3.0-tts-flash"></option>
+                <option value="qwen-audio-3.0-tts-plus"></option>
+              </datalist>
+              <small>必须与后续调用使用的模型完全一致</small>
+            </label>
+            <label>
+              <span>音频语言</span>
+              <select name="language">
+                <option value="zh">中文</option><option value="en">English</option>
+                <option value="ja">日本語</option><option value="ko">한국어</option>
+                <option value="fr">Français</option><option value="de">Deutsch</option>
+              </select>
+              <small>仅 Qwen-Audio-TTS 使用，Realtime 会自动忽略</small>
+            </label>
+            <label class="check-row">
+              <input name="enable_preprocess" type="checkbox" value="true">
+              <span><b>启用音频预处理</b><small>有背景噪音时开启；安静录音建议关闭</small></span>
+            </label>
+          </div>
+
+          <button id="submit-button" type="submit" {{ '' if configured else 'disabled' }}>
+            <span>生成音色 ID</span><span class="button-arrow">→</span>
+          </button>
+          <div id="message" class="message" role="status" hidden></div>
+        </form>
+
+        <aside class="panel guide-panel">
+          <div class="panel-heading"><span class="step">02</span><div><h2>录音检查</h2><p>输入质量直接决定相似度。</p></div></div>
+          <ul class="checklist">
+            <li><span>10–20s</span><p>至少 5 秒连续、清晰的自然朗读</p></li>
+            <li><span>≥16kHz</span><p>安静环境，无背景音乐和其他人声</p></li>
+            <li><span>≤2s</span><p>避免长停顿、唱歌、过快或过慢语速</p></li>
+          </ul>
+          <div class="privacy-note">临时音频上传至百炼 OSS，有效期 48 小时；本工具不在本地保留音频，只持久化音色 ID 与必要元数据。</div>
+        </aside>
+      </section>
+
+      <section class="panel history-panel">
+        <div class="panel-heading"><span class="step">03</span><div><h2>已生成的音色</h2><p>成功返回的 voice-id 会自动写入本地 SQLite。</p></div></div>
+        <div id="empty-state" class="empty-state">还没有音色。完成第一次复刻后，它会出现在这里。</div>
+        <div id="voice-list" class="voice-list"></div>
+      </section>
+    </main>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

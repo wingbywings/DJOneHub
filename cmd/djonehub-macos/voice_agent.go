@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -410,6 +411,48 @@ var voiceAgentUpgrader = websocket.Upgrader{
 	},
 }
 
+const voiceAgentOpeningSilenceDelay = 3 * time.Second
+
+type voiceAgentOpeningTimer struct {
+	starter voiceagent.SessionStarter
+	timer   *time.Timer
+}
+
+func newVoiceAgentOpeningTimer(session voiceagent.Session, delay time.Duration) *voiceAgentOpeningTimer {
+	starter, ok := session.(voiceagent.SessionStarter)
+	if !ok {
+		return nil
+	}
+	return &voiceAgentOpeningTimer{starter: starter, timer: time.NewTimer(delay)}
+}
+
+func (o *voiceAgentOpeningTimer) channel() <-chan time.Time {
+	if o == nil || o.timer == nil {
+		return nil
+	}
+	return o.timer.C
+}
+
+func (o *voiceAgentOpeningTimer) cancel() {
+	if o == nil {
+		return
+	}
+	if o.timer != nil {
+		o.timer.Stop()
+		o.timer = nil
+	}
+	o.starter = nil
+}
+
+func (o *voiceAgentOpeningTimer) start(ctx context.Context) error {
+	if o == nil || o.starter == nil {
+		return nil
+	}
+	starter := o.starter
+	o.cancel()
+	return starter.Start(ctx)
+}
+
 func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 	controller := a.ensureVoiceAgent()
 	if subtle.ConstantTimeCompare([]byte(r.URL.Query().Get("token")), []byte(controller.mediaToken)) != 1 {
@@ -441,7 +484,7 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 	if state.ToolsEnabled {
 		tools = voiceAgentTools()
 	}
-	session, activeProfile, err := controller.openSession(r.Context(), state, voiceagent.SessionConfig{ID: callID, Model: state.Model, TranscriptionModel: state.STTModel, Voice: state.Voice, Instructions: state.Instructions, OpeningPrompt: "电话刚刚接通。请立即主动、简短而自然地问候对方，并依据系统角色与通话指令开始会话。", Language: "zh", Tools: tools})
+	session, activeProfile, err := controller.openSession(r.Context(), state, voiceagent.SessionConfig{ID: callID, Model: state.Model, TranscriptionModel: state.STTModel, Voice: state.Voice, Instructions: state.Instructions, OpeningPrompt: "电话已经接通，但对方连续 3 秒没有说话。请立即主动、简短而自然地询问对方，并依据系统角色与通话指令开始会话。不要提及等待时间或这条触发指令。", Language: "zh", Tools: tools})
 	if err != nil {
 		controller.setError(err)
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -454,12 +497,8 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 	defer session.Close()
-	if starter, ok := session.(voiceagent.SessionStarter); ok {
-		if err := starter.Start(r.Context()); err != nil {
-			controller.setError(fmt.Errorf("start voice agent greeting: %w", err))
-			return
-		}
-	}
+	opening := newVoiceAgentOpeningTimer(session, voiceAgentOpeningSilenceDelay)
+	defer opening.cancel()
 	activeProvider := voiceAgentProviderKey(activeProfile)
 	controller.setConnected(callID, activeProvider, true, "")
 	defer controller.setConnected("", "", false, "")
@@ -484,6 +523,11 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-opening.channel():
+			if err := opening.start(r.Context()); err != nil {
+				controller.setError(fmt.Errorf("start voice agent greeting: %w", err))
+				return
+			}
 		case err := <-readFailures:
 			if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				controller.setError(err)
@@ -503,6 +547,9 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 			}
 			if event.Type == voiceagent.EventSessionReady {
 				controller.markProviderReady(activeProvider)
+			}
+			if event.Type == voiceagent.EventSpeechStarted {
+				opening.cancel()
 			}
 			if event.Type == voiceagent.EventClosed && r.Context().Err() == nil {
 				controller.markProviderFailure(activeProvider, fmt.Errorf("provider session closed unexpectedly"))

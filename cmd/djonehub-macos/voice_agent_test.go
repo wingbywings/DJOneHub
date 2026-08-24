@@ -28,6 +28,43 @@ func (f *fakeVoiceAgentSession) SubmitToolResult(_ context.Context, _ string, ou
 }
 func (f *fakeVoiceAgentSession) Close() error { return nil }
 
+type fakeOpeningVoiceAgentSession struct {
+	fakeVoiceAgentSession
+	starts chan struct{}
+}
+
+func (f *fakeOpeningVoiceAgentSession) Start(context.Context) error {
+	f.starts <- struct{}{}
+	return nil
+}
+
+func TestVoiceAgentOpeningWaitsForSilenceAndCanBeCancelledBySpeech(t *testing.T) {
+	session := &fakeOpeningVoiceAgentSession{starts: make(chan struct{}, 2)}
+	opening := newVoiceAgentOpeningTimer(session, 20*time.Millisecond)
+	select {
+	case <-opening.channel():
+		if err := opening.start(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("opening silence timer did not fire")
+	}
+	select {
+	case <-session.starts:
+	case <-time.After(time.Second):
+		t.Fatal("opening turn was not started after silence")
+	}
+
+	cancelled := newVoiceAgentOpeningTimer(session, 20*time.Millisecond)
+	cancelled.cancel()
+	time.Sleep(40 * time.Millisecond)
+	select {
+	case <-session.starts:
+		t.Fatal("opening turn started after caller speech cancelled it")
+	default:
+	}
+}
+
 func TestVoiceAgentStatusDoesNotExposeCredentials(t *testing.T) {
 	instance := newDemoApp()
 	instance.voiceAgentSettingsPath = filepath.Join(t.TempDir(), "voice-agent.json")

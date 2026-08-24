@@ -173,3 +173,39 @@ func TestCascadeRunsSTTThroughTextAndSpeech(t *testing.T) {
 		}
 	}
 }
+
+func TestCascadeStartsOpeningTurnOnlyOnce(t *testing.T) {
+	stt := &fakeTranscriptionSession{events: make(chan Transcript, 1)}
+	provider := &Provider{ProviderName: "minimax", STT: fakeTranscriber{session: stt}, LLM: fakeTextModel{}, TTS: fakeSynthesizer{}}
+	session, err := provider.Open(context.Background(), voiceagent.SessionConfig{OpeningPrompt: "主动询问对方"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	starter := session.(voiceagent.SessionStarter)
+	if err := starter.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := starter.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(time.Second)
+	finals := 0
+	for {
+		select {
+		case event := <-session.Events():
+			if event.Type == voiceagent.EventOutputTranscriptFinal {
+				finals++
+			}
+			if event.Type == voiceagent.EventAudio {
+				time.Sleep(20 * time.Millisecond)
+				if finals != 1 {
+					t.Fatalf("opening final count = %d, want 1", finals)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("opening turn was not generated")
+		}
+	}
+}

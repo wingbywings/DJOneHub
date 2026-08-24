@@ -33,6 +33,9 @@ final class VoiceAudioService {
     private var muted = false
     private var agentMode = false
     private var agentAudioBytes = Data()
+    private var agentAudioReadOffset = 0
+    private var agentPlayoutStarted = false
+    private var agentTurnFinished = false
     private var uacCleanupPending = false
     private var sessionGeneration: UInt64 = 0
     private var uploadBytes = Data()
@@ -67,7 +70,10 @@ final class VoiceAudioService {
     // Realtime providers can deliver generated audio much faster than the
     // telephone's 8 kHz playout clock. Keep a full spoken turn instead of
     // applying the microphone queue's 400 ms latency cap.
-    private let maximumAgentAudioBytes = 8_000 * 2 * 60
+    private let maximumAgentAudioBytes = 8_000 * 2 * 300
+    // Hold the first few cloud deltas long enough to absorb normal WebSocket
+    // jitter. Once playout starts, the native UAC ring supplies another 256 ms.
+    private let minimumAgentPrebufferBytes = 8_000 * 2 * 80 / 1_000
     private let uacTransferFrames = 512
     private let uacIdleInterval = 0.005
     private let uacCallbackStallNanoseconds: UInt64 = 3_000_000_000
@@ -416,21 +422,41 @@ final class VoiceAudioService {
 
     func configureAgentMode(_ enabled: Bool) {
         stateLock.withLock { agentMode = enabled }
-        agentAudioLock.withLock { agentAudioBytes.removeAll(keepingCapacity: true) }
+        clearAgentOutput()
     }
 
     func enqueueAgentOutput(_ pcm: Data) {
         guard !pcm.isEmpty else { return }
         agentAudioLock.withLock {
             agentAudioBytes.append(pcm)
-            if agentAudioBytes.count > maximumAgentAudioBytes {
-                agentAudioBytes.removeFirst(agentAudioBytes.count - maximumAgentAudioBytes)
+            let unreadBytes = agentAudioBytes.count - agentAudioReadOffset
+            if unreadBytes > maximumAgentAudioBytes {
+                let overflow = unreadBytes - maximumAgentAudioBytes
+                agentAudioReadOffset += overflow + overflow % 2
             }
+            compactAgentAudioIfNeeded()
         }
     }
 
     func clearAgentOutput() {
-        agentAudioLock.withLock { agentAudioBytes.removeAll(keepingCapacity: true) }
+        agentAudioLock.withLock {
+            agentAudioBytes.removeAll(keepingCapacity: true)
+            agentAudioReadOffset = 0
+            agentPlayoutStarted = false
+            agentTurnFinished = false
+        }
+        if let uac = stateLock.withLock({ activeUAC }) {
+            mavo_uac_probe_flush_uplink_pcm(uac)
+        }
+    }
+
+    func finishAgentOutputTurn() {
+        agentAudioLock.withLock {
+            agentTurnFinished = true
+            if agentAudioBytes.count > agentAudioReadOffset {
+                agentPlayoutStarted = true
+            }
+        }
     }
 
     var isRunning: Bool {
@@ -649,32 +675,24 @@ final class VoiceAudioService {
             }
             muteWasEnabled = state.2
 
-            let requestedUplinkFrames: Int
-            if state.3, state.2 {
-                // The UAC output callback already zero-fills underruns.
-                requestedUplinkFrames = 0
-            } else {
-                requestedUplinkFrames = state.3
-                    ? takeAgentSamples(into: &uplinkSamples)
-                    : takeUploadSamples(into: &uplinkSamples)
-            }
             var uplinkPCM = Data()
-            if requestedUplinkFrames > 0 {
-                let acceptedFrames = uplinkSamples.withUnsafeBufferPointer { samples in
-                    mavo_uac_probe_write_uplink_pcm16(
-                        uac,
-                        samples.baseAddress,
-                        requestedUplinkFrames
-                    )
+            if state.3 {
+                if !state.2 {
+                    uplinkPCM = writeQueuedAgentAudio(to: uac, scratch: &uplinkSamples)
                 }
-                if state.3, acceptedFrames < requestedUplinkFrames {
-                    restoreAgentSamples(
-                        uplinkSamples,
-                        range: Int(acceptedFrames) ..< requestedUplinkFrames
-                    )
-                }
-                if acceptedFrames > 0 {
-                    uplinkPCM = uplinkSamples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
+            } else {
+                let requestedUplinkFrames = takeUploadSamples(into: &uplinkSamples)
+                if requestedUplinkFrames > 0 {
+                    let acceptedFrames = uplinkSamples.withUnsafeBufferPointer { samples in
+                        mavo_uac_probe_write_uplink_pcm16(
+                            uac,
+                            samples.baseAddress,
+                            requestedUplinkFrames
+                        )
+                    }
+                    if acceptedFrames > 0 {
+                        uplinkPCM = uplinkSamples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
+                    }
                 }
             }
 
@@ -859,31 +877,55 @@ final class VoiceAudioService {
         }
     }
 
-    private func takeAgentSamples(into samples: inout [Int16]) -> Int {
+    private func writeQueuedAgentAudio(
+        to uac: OpaquePointer,
+        scratch samples: inout [Int16]
+    ) -> Data {
         agentAudioLock.withLock {
             let requestedBytes = samples.count * MemoryLayout<Int16>.size
-            let availableBytes = min(agentAudioBytes.count - agentAudioBytes.count % 2, requestedBytes)
+            let unreadBytes = agentAudioBytes.count - agentAudioReadOffset
+            if !agentPlayoutStarted {
+                guard unreadBytes >= minimumAgentPrebufferBytes ||
+                        (agentTurnFinished && unreadBytes > 0) else {
+                    return Data()
+                }
+                agentPlayoutStarted = true
+            }
+            let availableBytes = min(unreadBytes - unreadBytes % 2, requestedBytes)
             if availableBytes > 0 {
-                agentAudioBytes.prefix(availableBytes).withUnsafeBytes { raw in
+                agentAudioBytes[agentAudioReadOffset ..< agentAudioReadOffset + availableBytes].withUnsafeBytes { raw in
                     let source = raw.bindMemory(to: UInt8.self)
                     for index in 0 ..< availableBytes / 2 {
                         let rawValue = UInt16(source[index * 2]) | UInt16(source[index * 2 + 1]) << 8
                         samples[index] = Int16(bitPattern: rawValue)
                     }
                 }
-                agentAudioBytes.removeFirst(availableBytes)
             }
-            return availableBytes / MemoryLayout<Int16>.size
+            let requestedFrames = availableBytes / MemoryLayout<Int16>.size
+            guard requestedFrames > 0 else { return Data() }
+            let acceptedFrames = samples.withUnsafeBufferPointer { buffer in
+                mavo_uac_probe_write_uplink_pcm16(
+                    uac,
+                    buffer.baseAddress,
+                    requestedFrames
+                )
+            }
+            guard acceptedFrames > 0 else { return Data() }
+            agentAudioReadOffset += Int(acceptedFrames) * MemoryLayout<Int16>.size
+            compactAgentAudioIfNeeded()
+            return samples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
         }
     }
 
-    private func restoreAgentSamples(_ samples: [Int16], range: Range<Int>) {
-        guard !range.isEmpty else { return }
-        let restored = samples[range].withUnsafeBytes { Data($0) }
-        agentAudioLock.withLock {
-            var ordered = restored
-            ordered.append(agentAudioBytes)
-            agentAudioBytes = ordered
+    private func compactAgentAudioIfNeeded() {
+        guard agentAudioReadOffset > 0 else { return }
+        if agentAudioReadOffset >= 65_536,
+           agentAudioReadOffset >= agentAudioBytes.count / 2 {
+            agentAudioBytes.removeSubrange(0 ..< agentAudioReadOffset)
+            agentAudioReadOffset = 0
+        } else if agentAudioReadOffset == agentAudioBytes.count {
+            agentAudioBytes.removeAll(keepingCapacity: true)
+            agentAudioReadOffset = 0
         }
     }
 
