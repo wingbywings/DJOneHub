@@ -79,6 +79,34 @@ xattr -dr com.apple.quarantine ./djonehub ./bin ./lib
 麦克风时会显示权限提示；拒绝权限后可在“系统设置 → 隐私与安全性 → 麦克风”中修改。
 网页可控制静音和 WAV 录音。完成真实模块呼入、呼出与拔插验收前，此功能仍属于实验性。
 
+## AI Voice Agent（实验性）
+
+发行包已包含 Agent 所需的本地音频宿主，`djonehub start` 会自动启动它。当前支持
+Qwen/OpenAI 原生实时语音，以及 Qwen/OpenAI STT → MiniMax LLM/TTS 级联。
+
+云端 API Key 不会写入配置文件。请在启动命令所在的终端设置所需密钥：
+
+```sh
+export DASHSCOPE_API_KEY='...' # Qwen
+export OPENAI_API_KEY='...'    # OpenAI
+export MINIMAX_API_KEY='...'   # MiniMax 级联
+djonehub start
+```
+
+启动后可查询 Provider 状态，并通过本机 API 启用 Qwen：
+
+```sh
+curl http://127.0.0.1:7575/api/voice-agent/status
+curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"provider":"qwen","voice":"Cherry","instructions":"你是电话客服，请简洁回答。","auto_answer":false,"auto_answer_delay_ms":1200}'
+```
+
+自动接听默认关闭。进入管理页面的“来电”标签即可配置 Provider、模型、STT 降级、
+工具确认、审计和脱敏，并查看实时转写。Profile 保存在
+`~/Library/Application Support/DJOneHub`，但不包含 API Key。OpenAI、MiniMax 和
+自定义模型/Endpoint 的完整示例请参阅源码仓库的 `docs/voice-agent-first-batch.md`。
+
 ## 当前限制
 
 - 支持 macOS 13 Ventura 至 macOS 26 Tahoe；当前发行包仅支持 Apple Silicon，不支持 Intel Mac。

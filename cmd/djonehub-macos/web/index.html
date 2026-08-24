@@ -132,6 +132,118 @@
           <button id="install-voice-runtime" class="secondary" type="button" hidden>安装语音运行时</button>
         </div>
       </section>
+      <section class="agent-console" aria-labelledby="voice-agent-title">
+        <div class="agent-console-heading">
+          <div>
+            <span class="section-kicker">AI VOICE AGENT</span>
+            <h3 id="voice-agent-title">智能语音接听与拨号</h3>
+            <p id="voice-agent-status" class="inline-status">正在读取 Voice Agent 状态...</p>
+          </div>
+          <span id="voice-agent-connection" class="agent-status-badge">人工模式</span>
+        </div>
+        <form id="voice-agent-form" class="agent-settings-grid">
+          <label class="checkbox-field agent-switch">
+            <input id="voice-agent-enabled" type="checkbox">
+            <span><strong>启用 AI 媒体模式</strong><small>关闭后立即回退到本地麦克风和扬声器。</small></span>
+          </label>
+          <label class="settings-field">
+            <span>主 Provider</span>
+            <select id="voice-agent-provider">
+              <option value="qwen">Qwen Realtime</option>
+              <option value="openai">OpenAI Realtime</option>
+              <option value="minimax">MiniMax 级联</option>
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>故障降级 Provider</span>
+            <select id="voice-agent-fallback-provider">
+              <option value="">不跨 Provider 降级</option>
+              <option value="qwen">Qwen Realtime</option>
+              <option value="openai">OpenAI Realtime</option>
+              <option value="minimax">MiniMax 级联</option>
+            </select>
+          </label>
+          <label class="settings-field">
+            <span>模型</span>
+            <input id="voice-agent-model" type="text" maxlength="160" autocomplete="off" placeholder="留空使用服务端默认模型">
+          </label>
+          <label class="settings-field">
+            <span>音色</span>
+            <input id="voice-agent-voice" type="text" list="voice-agent-voice-options" maxlength="120" autocomplete="off" placeholder="OpenAI 推荐 marin；Qwen 推荐 Cherry">
+            <datalist id="voice-agent-voice-options"></datalist>
+          </label>
+          <label class="settings-field minimax-setting">
+            <span>MiniMax STT Provider</span>
+            <select id="voice-agent-stt-provider">
+              <option value="qwen">Qwen STT</option>
+              <option value="openai">OpenAI STT</option>
+            </select>
+          </label>
+          <label class="settings-field minimax-setting">
+            <span>STT 故障降级</span>
+            <select id="voice-agent-fallback-stt-provider">
+              <option value="">不降级</option>
+              <option value="qwen">Qwen STT</option>
+              <option value="openai">OpenAI STT</option>
+            </select>
+          </label>
+          <label class="settings-field minimax-setting settings-field-wide">
+            <span>STT 模型</span>
+            <input id="voice-agent-stt-model" type="text" maxlength="160" autocomplete="off" placeholder="qwen3-asr-flash-realtime 或 gpt-live-transcribe">
+          </label>
+          <label class="settings-field settings-field-wide">
+            <span>角色与通话指令</span>
+            <textarea id="voice-agent-instructions" maxlength="12000" rows="5" placeholder="你是电话客服，请先确认来意，再用简洁自然的中文回答。"></textarea>
+          </label>
+          <div class="agent-policy-grid settings-field-wide">
+            <label class="checkbox-field">
+              <input id="voice-agent-tools-enabled" type="checkbox">
+              <span><strong>允许受控电话工具</strong><small>读取状态自动执行；DTMF 和挂断必须在网页确认。</small></span>
+            </label>
+            <label class="checkbox-field">
+              <input id="voice-agent-audit-enabled" type="checkbox">
+              <span><strong>持久化转写审计</strong><small>只保存文本、状态和工具事件，不保存音频数据。</small></span>
+            </label>
+            <label class="checkbox-field">
+              <input id="voice-agent-redact-pii" type="checkbox">
+              <span><strong>审计内容自动脱敏</strong><small>遮盖电话、邮箱和长标识符，建议保持开启。</small></span>
+            </label>
+            <label class="checkbox-field">
+              <input id="voice-agent-auto-answer" type="checkbox">
+              <span><strong>自动接听来电</strong><small>延迟结束后会再次核对同一电话仍在振铃。</small></span>
+            </label>
+          </div>
+          <label class="settings-field">
+            <span>自动接听延迟（毫秒）</span>
+            <input id="voice-agent-auto-answer-delay" type="number" min="250" max="30000" step="50" value="1200">
+          </label>
+          <div class="settings-actions agent-settings-actions">
+            <button id="voice-agent-manual" class="secondary" type="button">切回人工模式</button>
+            <button type="submit">保存 Agent Profile</button>
+          </div>
+        </form>
+        <div id="voice-agent-providers" class="agent-provider-grid"></div>
+        <div id="voice-agent-pending" class="agent-pending" hidden>
+          <div class="section-heading compact-heading"><h3>待确认工具操作</h3><small>45 秒后自动拒绝</small></div>
+          <div id="voice-agent-pending-list"></div>
+        </div>
+        <div class="agent-transcript-panel">
+          <div class="section-heading compact-heading">
+            <div><h3>实时转写与运行事件</h3><small id="voice-agent-stream-status">尚未连接事件流</small></div>
+            <button id="clear-live-transcript" class="secondary compact" type="button">清空面板</button>
+          </div>
+          <div id="voice-agent-transcript" class="agent-transcript empty">通话接通并启用 Agent 后，将在这里显示实时转写。</div>
+        </div>
+        <details class="fold-panel agent-audit-panel">
+          <summary><span>审计记录</span><small id="voice-agent-audit-count">0 条</small></summary>
+          <div class="agent-audit-actions">
+            <button id="refresh-voice-agent-audit" class="secondary compact" type="button">刷新</button>
+            <button id="export-voice-agent-audit" class="secondary compact" type="button">导出 JSON</button>
+            <button id="clear-voice-agent-audit" class="secondary danger compact" type="button">清空审计</button>
+          </div>
+          <div id="voice-agent-audit-list" class="agent-audit-list empty">暂无审计记录</div>
+        </details>
+      </section>
       <div class="call-monitor-heading">
         <p id="call-monitor-status" class="inline-status">尚未读取来电状态</p>
         <button id="refresh-calls" class="secondary" type="button">刷新</button>

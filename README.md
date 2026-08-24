@@ -1,6 +1,6 @@
 # DJOneHub
 
-DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理工具。它通过 USB 与模块现有接口通信，让模块无需虚拟机即可在 Mac 上完成短信收发、来电监控、eSIM Profile 管理、AT 指令调试和 USB 4G 上网。
+DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理工具。它通过 USB 与模块现有接口通信，让模块无需虚拟机即可在 Mac 上完成短信收发、语音通话、AI Agent 接听/拨打、eSIM Profile 管理、AT 指令调试和 USB 4G 上网。
 
 程序及管理页面均在本机运行，默认只监听 `127.0.0.1:7575`。只有在用户主动启用相应的 Bark 转发时，新短信或未接来电信息才会发送到该通道独立配置的 Bark API。
 
@@ -16,6 +16,8 @@ DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理�
 | 模块状态 | 已实现 | 显示运营商、信号、网络制式、SIM 状态和当前工作模式 |
 | 短信管理 | 已实现 | 接收、发送、自动轮询、验证码提取及模块旧短信清理 |
 | 来电监控 | 已实现 | 实时显示语音来电状态，并在 Web 端保留最近 100 条运行期记录 |
+| 双向语音通话 | 预览 | 使用原生 macOS 音频宿主接听或拨打电话，支持麦克风、扬声器、静音和录音 |
+| AI Voice Agent | 预览 | 支持 Qwen/OpenAI 实时语音，以及 Qwen/OpenAI STT + MiniMax LLM/TTS 级联；包含 Web Profile、实时转写、降级、审计和受控工具 |
 | Bark 通知 | 已实现 | 为短信和未接来电分别配置 API URL、别名和消息模板 |
 | eSIM Profile | 已实现 | 读取、下载、启用、改名和删除兼容 eUICC 卡片中的 Profile |
 | Profile 号码资料 | 已实现 | 将手动填写的号码保存到模块通讯录，并按 ICCID 关联 Profile |
@@ -34,6 +36,7 @@ DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理�
 - 支持数据传输的 USB-C 线缆
 - 连接多个模块时，建议使用带独立供电的 USB Hub
 - Apple Silicon Mac
+- 使用人工通话或 AI Agent 时，需要允许随发行包启动的音频宿主访问麦克风
 
 模块的 USB 设备标识通常为 `2ca3:4006`。如果连接后 macOS 完全没有发现 USB 设备，请优先确认线缆支持数据传输。
 
@@ -213,6 +216,57 @@ Bark API Key 和相关设置保存在本机 `~/Library/Application Support/DJOne
 > [!WARNING]
 > 启用、下载、改名和删除 Profile 都会改动实体卡片。写入过程中不要拔出模块。删除 Profile 通常不可撤销。
 
+### 语音通话与 AI Agent
+
+语音通话使用独立的原生 macOS 音频宿主按 USB `vendor_id`、`product_id` 和 `location_id` 精确绑定当前模块。发行包启动器会自动启动该宿主；从源码运行时需要分别启动 Go 后端和 Swift 音频宿主。首次人工通话会触发 macOS 麦克风权限请求。
+
+Voice Agent 当前提供三种组合：
+
+- `qwen`：Qwen Audio Realtime 原生双工语音。
+- `openai`：OpenAI Realtime 原生双工语音。
+- `minimax`：Qwen 或 OpenAI 流式 STT → MiniMax LLM → MiniMax TTS。
+
+API Key 必须在启动 DJOneHub 后端前通过环境变量提供，不会保存到浏览器、Swift 音频宿主或 Voice Agent Profile。最小配置示例：
+
+```sh
+# 按实际 Provider 设置一个或多个 Key
+export DASHSCOPE_API_KEY='...'
+export OPENAI_API_KEY='...'
+export MINIMAX_API_KEY='...'
+
+./dist/djonehub-macos
+```
+
+查询就绪状态并启用 Qwen：
+
+```sh
+curl http://127.0.0.1:7575/api/voice-agent/status
+
+curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "enabled": true,
+    "provider": "qwen",
+    "voice": "Cherry",
+    "instructions": "你是电话客服，请用简洁自然的中文回答。",
+    "auto_answer": false,
+    "auto_answer_delay_ms": 1200
+  }'
+```
+
+进入“来电”页面即可管理完整 Voice Agent Profile，并查看 Provider 就绪状态、实时转写、运行事件、待确认工具和脱敏审计。自动接听默认关闭；开启后会在延迟结束时再次确认同一来电仍在振铃，才会发送接听指令。完整的 OpenAI、MiniMax、STT 模型、Endpoint 覆盖和人工模式回退示例见 [`docs/voice-agent-first-batch.md`](docs/voice-agent-first-batch.md)。
+
+Qwen/OpenAI Realtime 在电话媒体通道建立后会主动发起一次开场问候，无需等待来电方先说话。音色是 Provider 专属配置：OpenAI 推荐 `marin` 或 `cedar`，Qwen 默认 `Cherry`；Web 页面切换 Provider 时会自动修正已知的不兼容音色。
+
+OpenAI PCM 固定使用 24 kHz，进入模块前由后端经过抗混叠滤波转换为电话原生 8 kHz。Swift 音频宿主按 UAC 实际接收帧数推进 Agent 播放队列，云端快速推送的长回复不会再被 400 ms 本地缓冲截断。普通话通话默认使用 `zh`、中文上下文提示、近场降噪和 `gpt-4o-transcribe` 转写。
+
+可靠性与安全默认值：
+
+- 可分别配置主 Provider、MiniMax STT 降级和跨 Provider 降级；失败后使用指数退避熔断。
+- 本地音频宿主断线后自动重连，来电方重新说话时会清空未播放的 AI 音频。
+- 电话状态查询工具可自动执行；DTMF 和挂断必须由网页操作员在 45 秒内确认。
+- 转写审计默认不持久化；启用后只保存文本、状态、录音元数据和工具事件，不保存音频，且默认脱敏。
+
 ### 上网模式
 
 切换到上网模式前，需要插入包含可用流量的 SIM。模块通常会通过 DHCP 为 Mac 分配类似 `192.168.225.x` 的局域网地址，并完成蜂窝网络接入和转发。
@@ -278,7 +332,7 @@ djonehub stop
 ~/Library/Application Support/DJOneHub
 ```
 
-终端默认只显示启动、停止和错误摘要，底层 USB 日志写入日志文件。管理页面默认仅供本机访问，同一局域网内的其他设备不能直接访问。Bark 配置保存在该目录的 `bark-settings.json` 中。
+终端默认只显示启动、停止和错误摘要，底层 USB 日志写入日志文件。管理页面默认仅供本机访问，同一局域网内的其他设备不能直接访问。Bark 配置保存在该目录的 `bark-settings.json` 中；Voice Agent Profile 保存在 `voice-agent.json`，多模块模式则位于 `devices/<device-id>/voice-agent.json`。Profile 不包含云端 API Key。
 
 ## 卸载
 
@@ -319,14 +373,30 @@ rm -rf "$HOME/Library/Application Support/DJOneHub"
 - Apple Silicon Mac
 - macOS 13 或更新版本
 - Xcode Command Line Tools
+- Swift 6（用于 `DJOneHubAudioHost`）
 - Go 1.26.3 或兼容版本
 - `pkg-config`
-- 可访问 GitHub Release 的网络，用于下载并校验官方 libusb 1.0.30 源码
+- 本机开发构建需要 libusb；发行构建需要可访问 GitHub Release，以下载并校验官方 libusb 1.0.30 源码
 
 运行测试：
 
 ```sh
 go test ./...
+swift build --package-path macos/DJOneHubAudioHost -c debug
+```
+
+日常开发构建与运行：
+
+```sh
+./scripts/build-macos.sh
+swift build --package-path macos/DJOneHubAudioHost -c debug
+
+# 终端 1：先设置所需 API Key，再启动后端
+./dist/djonehub-macos
+
+# 终端 2：启动本地音频宿主
+swift run --package-path macos/DJOneHubAudioHost \
+  DJOneHubAudioHost --base-url http://127.0.0.1:7575
 ```
 
 构建发行包：
@@ -340,6 +410,8 @@ go test ./...
 ```text
 dist/release/
 ```
+
+发行脚本会同时构建 Go 主程序和 Swift 音频宿主。更完整的依赖检查、两进程调试和常见编译错误见 [`BUILD_AND_RUN_CN.md`](BUILD_AND_RUN_CN.md)。
 
 ## 常见问题
 

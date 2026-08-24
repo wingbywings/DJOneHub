@@ -8,6 +8,7 @@ import Foundation
 /// USB waits and sample-rate conversion never run on the CoreAudio render thread.
 final class VoiceAudioService {
     var onError: ((String) -> Void)?
+    var onAgentInput: ((Data) -> Void)?
 
     private struct DeferredUACCleanup {
         let pointer: OpaquePointer
@@ -20,6 +21,7 @@ final class VoiceAudioService {
     private let playbackQueue = DispatchQueue(label: "app.mavo.mac.voice.playback", qos: .userInteractive)
     private let stateLock = NSLock()
     private let uploadLock = NSLock()
+    private let agentAudioLock = NSLock()
 
     private var voice: OpaquePointer?
     private var activeUAC: OpaquePointer?
@@ -29,6 +31,8 @@ final class VoiceAudioService {
     private var mediaEnabled = false
     private var pcmFlowReady = true
     private var muted = false
+    private var agentMode = false
+    private var agentAudioBytes = Data()
     private var uacCleanupPending = false
     private var sessionGeneration: UInt64 = 0
     private var uploadBytes = Data()
@@ -60,6 +64,10 @@ final class VoiceAudioService {
     private let usbReceiveBufferBytes = 4_096
     private let transmitChunkBytes = 1_600
     private let maximumUploadBytes = 6_400
+    // Realtime providers can deliver generated audio much faster than the
+    // telephone's 8 kHz playout clock. Keep a full spoken turn instead of
+    // applying the microphone queue's 400 ms latency cap.
+    private let maximumAgentAudioBytes = 8_000 * 2 * 60
     private let uacTransferFrames = 512
     private let uacIdleInterval = 0.005
     private let uacCallbackStallNanoseconds: UInt64 = 3_000_000_000
@@ -309,12 +317,15 @@ final class VoiceAudioService {
             }
 
             self.resetBuffersSynchronously()
-            do {
-                voiceProcessingEnabled = try self.startAudioEngine(session: session)
-                audioEngineStarted = true
-            } catch {
-                failStart("无法启动 Mac 麦克风/扬声器：\(error.localizedDescription)")
-                return
+            let useAgentMode = self.stateLock.withLock { self.agentMode }
+            if !useAgentMode {
+                do {
+                    voiceProcessingEnabled = try self.startAudioEngine(session: session)
+                    audioEngineStarted = true
+                } catch {
+                    failStart("无法启动 Mac 麦克风/扬声器：\(error.localizedDescription)")
+                    return
+                }
             }
             guard self.isCurrentSession(session) else {
                 failStart("语音启动已取消。")
@@ -401,6 +412,25 @@ final class VoiceAudioService {
     func setMuted(_ value: Bool) {
         stateLock.withLock { muted = value }
         if value { clearUploadBytes() }
+    }
+
+    func configureAgentMode(_ enabled: Bool) {
+        stateLock.withLock { agentMode = enabled }
+        agentAudioLock.withLock { agentAudioBytes.removeAll(keepingCapacity: true) }
+    }
+
+    func enqueueAgentOutput(_ pcm: Data) {
+        guard !pcm.isEmpty else { return }
+        agentAudioLock.withLock {
+            agentAudioBytes.append(pcm)
+            if agentAudioBytes.count > maximumAgentAudioBytes {
+                agentAudioBytes.removeFirst(agentAudioBytes.count - maximumAgentAudioBytes)
+            }
+        }
+    }
+
+    func clearAgentOutput() {
+        agentAudioLock.withLock { agentAudioBytes.removeAll(keepingCapacity: true) }
     }
 
     var isRunning: Bool {
@@ -587,7 +617,7 @@ final class VoiceAudioService {
 
         while isActiveSession(session) {
             let state = stateLock.withLock {
-                (sessionGeneration == session && running, mediaEnabled, muted)
+                (sessionGeneration == session && running, mediaEnabled, muted, agentMode)
             }
             guard state.0 else { break }
 
@@ -619,16 +649,32 @@ final class VoiceAudioService {
             }
             muteWasEnabled = state.2
 
-            let uplinkFrames = takeUploadSamples(into: &uplinkSamples)
+            let requestedUplinkFrames: Int
+            if state.3, state.2 {
+                // The UAC output callback already zero-fills underruns.
+                requestedUplinkFrames = 0
+            } else {
+                requestedUplinkFrames = state.3
+                    ? takeAgentSamples(into: &uplinkSamples)
+                    : takeUploadSamples(into: &uplinkSamples)
+            }
             var uplinkPCM = Data()
-            if uplinkFrames > 0 {
-                uplinkPCM = uplinkSamples.prefix(uplinkFrames).withUnsafeBytes { Data($0) }
-                _ = uplinkSamples.withUnsafeBufferPointer { samples in
+            if requestedUplinkFrames > 0 {
+                let acceptedFrames = uplinkSamples.withUnsafeBufferPointer { samples in
                     mavo_uac_probe_write_uplink_pcm16(
                         uac,
                         samples.baseAddress,
-                        uplinkFrames
+                        requestedUplinkFrames
                     )
+                }
+                if state.3, acceptedFrames < requestedUplinkFrames {
+                    restoreAgentSamples(
+                        uplinkSamples,
+                        range: Int(acceptedFrames) ..< requestedUplinkFrames
+                    )
+                }
+                if acceptedFrames > 0 {
+                    uplinkPCM = uplinkSamples.prefix(Int(acceptedFrames)).withUnsafeBytes { Data($0) }
                 }
             }
 
@@ -645,7 +691,11 @@ final class VoiceAudioService {
                 let pcm = downlinkSamples.withUnsafeBytes { bytes in
                     Data(bytes: bytes.baseAddress!, count: byteCount)
                 }
-                schedulePlayback(pcm, session: session)
+                if state.3 {
+                    onAgentInput?(pcm)
+                } else {
+                    schedulePlayback(pcm, session: session)
+                }
                 recorder.enqueue(far: pcm, near: uplinkPCM)
             }
 
@@ -806,6 +856,34 @@ final class VoiceAudioService {
             if uploadBytes.count > limit {
                 uploadBytes.removeFirst(uploadBytes.count - limit)
             }
+        }
+    }
+
+    private func takeAgentSamples(into samples: inout [Int16]) -> Int {
+        agentAudioLock.withLock {
+            let requestedBytes = samples.count * MemoryLayout<Int16>.size
+            let availableBytes = min(agentAudioBytes.count - agentAudioBytes.count % 2, requestedBytes)
+            if availableBytes > 0 {
+                agentAudioBytes.prefix(availableBytes).withUnsafeBytes { raw in
+                    let source = raw.bindMemory(to: UInt8.self)
+                    for index in 0 ..< availableBytes / 2 {
+                        let rawValue = UInt16(source[index * 2]) | UInt16(source[index * 2 + 1]) << 8
+                        samples[index] = Int16(bitPattern: rawValue)
+                    }
+                }
+                agentAudioBytes.removeFirst(availableBytes)
+            }
+            return availableBytes / MemoryLayout<Int16>.size
+        }
+    }
+
+    private func restoreAgentSamples(_ samples: [Int16], range: Range<Int>) {
+        guard !range.isEmpty else { return }
+        let restored = samples[range].withUnsafeBytes { Data($0) }
+        agentAudioLock.withLock {
+            var ordered = restored
+            ordered.append(agentAudioBytes)
+            agentAudioBytes = ordered
         }
     }
 
@@ -1002,4 +1080,3 @@ private extension NSLock {
         return try body()
     }
 }
-

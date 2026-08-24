@@ -11,6 +11,11 @@ let currentVoiceSetup = {};
 let adbPasscodeContext = "";
 let currentCallState = null;
 let currentAudioHostState = {};
+let currentVoiceAgentStatus = {};
+let voiceAgentFormDirty = false;
+let voiceAgentLoadedDevice = null;
+let voiceAgentEventSource = null;
+let liveVoiceAgentEvents = [];
 let activeDeviceID = localStorage.getItem("djonehub-active-device") || "";
 let knownDevices = [];
 
@@ -136,11 +141,15 @@ async function loadDevices({ refreshCurrent = false, refreshOnChange = true } = 
 async function refreshActiveDevice() {
   lastSMSCount = null;
   networkTrafficPrevious = null;
+  voiceAgentFormDirty = false;
+  voiceAgentLoadedDevice = null;
+  closeVoiceAgentEvents();
   const tasks = [loadStatus(), loadSMS(), loadBarkSettings("sms")];
   if ($("#calls").classList.contains("active")) tasks.push(loadCalls());
   if ($("#esim").classList.contains("active")) tasks.push(loadESIM());
   if ($("#network").classList.contains("active")) tasks.push(loadNetwork());
   await Promise.allSettled(tasks);
+  if ($("#calls").classList.contains("active")) connectVoiceAgentEvents();
 }
 
 function notice(message) {
@@ -496,6 +505,277 @@ function renderCallHistory(history) {
   }));
 }
 
+function voiceAgentEventLabel(type) {
+  if (type.startsWith("transcript.input")) return "来电方";
+  if (type.startsWith("transcript.output")) return "AI";
+  if (type.startsWith("tool.")) return "工具";
+  if (type === "error") return "错误";
+  if (type === "speech.started") return "检测说话";
+  if (type === "speech.stopped") return "停止说话";
+  if (type === "session.ready") return "会话就绪";
+  if (type === "session.closed") return "会话结束";
+  if (type === "usage") return "用量";
+  return type || "事件";
+}
+
+function voiceAgentEventText(event) {
+  if (event.error) return event.error;
+  if (event.text) return event.text;
+  if (event.tool_call) {
+    return `${event.tool_call.name || "未知工具"} ${event.tool_call.arguments || ""}`.trim();
+  }
+  if (event.type === "session.ready") return `已连接 ${event.provider || "Provider"}`;
+  if (event.type === "session.closed") return "语音会话已关闭";
+  if (event.type === "speech.started") return "检测到来电方开始说话，已打断待播放语音";
+  if (event.type === "speech.stopped") return "来电方本轮说话结束";
+  return event.provider || "";
+}
+
+function renderVoiceAgentEvents(target, events, emptyText) {
+  if (!events.length) {
+    target.className = target.id === "voice-agent-transcript" ? "agent-transcript empty" : "agent-audit-list empty";
+    target.textContent = emptyText;
+    return;
+  }
+  target.className = target.id === "voice-agent-transcript" ? "agent-transcript" : "agent-audit-list";
+  target.replaceChildren(...events.map((event) => {
+    const row = document.createElement("article");
+    const type = String(event.type || "");
+    row.className = `agent-event${type === "error" ? " error" : ""}${type.startsWith("tool.") ? " tool" : ""}`;
+    const role = document.createElement("span");
+    role.className = "agent-event-role";
+    role.textContent = voiceAgentEventLabel(type);
+    const text = document.createElement("div");
+    text.className = "agent-event-text";
+    text.textContent = voiceAgentEventText(event) || "—";
+    const at = document.createElement("time");
+    at.textContent = event.at ? new Date(event.at).toLocaleTimeString() : "";
+    row.append(role, text, at);
+    return row;
+  }));
+  target.scrollTop = target.scrollHeight;
+}
+
+function appendLiveVoiceAgentEvent(event) {
+  const type = String(event.type || "");
+  const streamKind = type.startsWith("transcript.input") ? "input" : (type.startsWith("transcript.output") ? "output" : "");
+  const final = type.endsWith(".final");
+  const delta = type.endsWith(".delta");
+  const last = liveVoiceAgentEvents.at(-1);
+  if (delta && last?.streamKind === streamKind && !last.final) {
+    last.text = `${last.text || ""}${event.text || ""}`;
+    last.at = event.at || last.at;
+  } else if (final && last?.streamKind === streamKind && !last.final) {
+    last.text = event.text || last.text;
+    last.type = type;
+    last.final = true;
+    last.at = event.at || last.at;
+  } else {
+    liveVoiceAgentEvents.push({ ...event, streamKind, final });
+  }
+  if (liveVoiceAgentEvents.length > 120) liveVoiceAgentEvents = liveVoiceAgentEvents.slice(-120);
+  renderVoiceAgentEvents($("#voice-agent-transcript"), liveVoiceAgentEvents, "等待 Voice Agent 事件...");
+  if (type.startsWith("tool.")) void loadVoiceAgentPendingTools();
+}
+
+function closeVoiceAgentEvents() {
+  if (voiceAgentEventSource) voiceAgentEventSource.close();
+  voiceAgentEventSource = null;
+  $("#voice-agent-stream-status").textContent = "事件流未连接";
+}
+
+function connectVoiceAgentEvents() {
+  closeVoiceAgentEvents();
+  if (!$("#calls").classList.contains("active")) return;
+  const source = new EventSource(routedAPIPath("/api/voice-agent/events"));
+  voiceAgentEventSource = source;
+  source.addEventListener("ready", () => {
+    $("#voice-agent-stream-status").textContent = "实时事件流已连接";
+  });
+  source.addEventListener("voice-agent", (message) => {
+    try { appendLiveVoiceAgentEvent(JSON.parse(message.data)); } catch (_) {}
+  });
+  source.onerror = () => {
+    $("#voice-agent-stream-status").textContent = "事件流中断，正在自动重连";
+  };
+}
+
+function updateVoiceAgentFieldVisibility() {
+  const provider = $("#voice-agent-provider").value;
+  const isMiniMax = provider === "minimax"
+    || $("#voice-agent-fallback-provider").value === "minimax";
+  document.querySelectorAll(".minimax-setting").forEach((field) => { field.hidden = !isMiniMax; });
+  const choices = provider === "openai"
+    ? ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
+    : (provider === "qwen" ? ["Cherry"] : []);
+  $("#voice-agent-voice-options").replaceChildren(...choices.map((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    return option;
+  }));
+  $("#voice-agent-voice").placeholder = provider === "openai"
+    ? "marin（推荐）或 cedar"
+    : (provider === "qwen" ? "Cherry" : "例如 male-qn-qingse");
+}
+
+function normalizeVoiceAgentVoiceForProvider() {
+  const provider = $("#voice-agent-provider").value;
+  const field = $("#voice-agent-voice");
+  const openAIVoices = new Set(["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]);
+  if (provider === "openai" && !openAIVoices.has(field.value.trim().toLowerCase())) field.value = "marin";
+  if (provider === "qwen" && (!field.value.trim() || openAIVoices.has(field.value.trim().toLowerCase()))) field.value = "Cherry";
+}
+
+function populateVoiceAgentForm(state) {
+  $("#voice-agent-enabled").checked = Boolean(state.enabled);
+  $("#voice-agent-provider").value = state.provider || "qwen";
+  $("#voice-agent-fallback-provider").value = state.fallback_provider || "";
+  $("#voice-agent-model").value = state.model || "";
+  $("#voice-agent-voice").value = state.voice || "";
+  $("#voice-agent-stt-provider").value = state.stt_provider || "qwen";
+  $("#voice-agent-fallback-stt-provider").value = state.fallback_stt_provider || "";
+  $("#voice-agent-stt-model").value = state.stt_model || "";
+  $("#voice-agent-instructions").value = state.instructions || "";
+  $("#voice-agent-tools-enabled").checked = Boolean(state.tools_enabled);
+  $("#voice-agent-audit-enabled").checked = Boolean(state.audit_enabled);
+  $("#voice-agent-redact-pii").checked = state.redact_pii !== false;
+  $("#voice-agent-auto-answer").checked = Boolean(state.auto_answer);
+  $("#voice-agent-auto-answer-delay").value = state.auto_answer_delay_ms || 1200;
+  updateVoiceAgentFieldVisibility();
+}
+
+function renderVoiceAgentProviders(status) {
+  const displayName = (name) => name === "qwen" ? "Qwen" : (name === "openai" ? "OpenAI" : (name === "minimax" ? "MiniMax" : name));
+  const readiness = [
+    ...(status.providers || []).map((item) => ({ ...item, label: item.name === "minimax" ? "MiniMax LLM/TTS" : `${displayName(item.name)} Realtime` })),
+    ...(status.stt_providers || []).map((item) => ({ ...item, label: `${displayName(item.name)} STT`, reason: item.configured ? "流式转写密钥已配置" : "缺少对应 API Key" })),
+  ];
+  $("#voice-agent-providers").replaceChildren(...readiness.map((item) => {
+    const card = document.createElement("div");
+    card.className = `agent-provider-card${item.configured ? " ready" : ""}`;
+    const name = document.createElement("strong");
+    name.textContent = item.label;
+    const detail = document.createElement("small");
+    detail.textContent = item.configured ? (item.mode ? `${item.mode} · 已就绪` : item.reason || "已就绪") : (item.reason || "尚未配置");
+    card.append(name, detail);
+    return card;
+  }));
+}
+
+async function loadVoiceAgentStatus({ forcePopulate = false } = {}) {
+  try {
+    const status = await api("/api/voice-agent/status");
+    currentVoiceAgentStatus = status;
+    const state = status.state || {};
+    const deviceContext = activeDeviceID || "single";
+    if (forcePopulate || !voiceAgentFormDirty || voiceAgentLoadedDevice !== deviceContext) {
+      populateVoiceAgentForm(state);
+      voiceAgentLoadedDevice = deviceContext;
+      voiceAgentFormDirty = false;
+    }
+    const badge = $("#voice-agent-connection");
+    badge.className = `agent-status-badge${state.connected ? " connected" : (state.last_error ? " error" : "")}`;
+    badge.textContent = state.connected
+      ? `已连接 · ${state.active_provider || state.provider}`
+      : (state.enabled ? "Agent 待机" : "人工模式");
+    $("#voice-agent-status").textContent = state.last_error
+      ? `最近错误：${state.last_error}`
+      : (state.enabled
+        ? `${state.provider || "未选择"} 已启用${state.reconnect_count ? ` · 本次通话重连 ${state.reconnect_count} 次` : ""}`
+        : "当前使用本地麦克风；保存启用后，活动通话会自动切换媒体。");
+    renderVoiceAgentProviders(status);
+  } catch (error) {
+    $("#voice-agent-status").textContent = `Voice Agent 状态读取失败：${error.message}`;
+  }
+}
+
+async function saveVoiceAgentProfile({ forceDisabled = false } = {}) {
+  const form = $("#voice-agent-form");
+  const submit = form.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    const result = await api("/api/voice-agent/config", { method: "PUT", body: JSON.stringify({
+      enabled: forceDisabled ? false : $("#voice-agent-enabled").checked,
+      provider: $("#voice-agent-provider").value,
+      fallback_provider: $("#voice-agent-fallback-provider").value,
+      model: $("#voice-agent-model").value.trim(),
+      voice: $("#voice-agent-voice").value.trim(),
+      stt_provider: $("#voice-agent-stt-provider").value,
+      fallback_stt_provider: $("#voice-agent-fallback-stt-provider").value,
+      stt_model: $("#voice-agent-stt-model").value.trim(),
+      instructions: $("#voice-agent-instructions").value.trim(),
+      tools_enabled: $("#voice-agent-tools-enabled").checked,
+      audit_enabled: $("#voice-agent-audit-enabled").checked,
+      redact_pii: $("#voice-agent-redact-pii").checked,
+      auto_answer: $("#voice-agent-auto-answer").checked,
+      auto_answer_delay_ms: Number($("#voice-agent-auto-answer-delay").value || 1200),
+    }) });
+    voiceAgentFormDirty = false;
+    populateVoiceAgentForm(result);
+    notice(forceDisabled ? "已切回人工麦克风模式" : "Voice Agent Profile 已保存");
+    await loadVoiceAgentStatus({ forcePopulate: true });
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+async function loadVoiceAgentPendingTools() {
+  try {
+    const result = await api("/api/voice-agent/tools/pending");
+    const tools = result.tools || [];
+    const panel = $("#voice-agent-pending");
+    panel.hidden = tools.length === 0;
+    $("#voice-agent-pending-list").replaceChildren(...tools.map((tool) => {
+      const row = document.createElement("div");
+      row.className = "agent-pending-item";
+      const description = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = tool.summary || tool.name;
+      const expiry = document.createElement("small");
+      expiry.textContent = `到期：${new Date(tool.expires_at).toLocaleTimeString()}`;
+      description.append(title, expiry);
+      const actions = document.createElement("div");
+      actions.className = "agent-pending-actions";
+      const reject = document.createElement("button");
+      reject.className = "secondary danger compact";
+      reject.type = "button";
+      reject.textContent = "拒绝";
+      const approve = document.createElement("button");
+      approve.className = "compact";
+      approve.type = "button";
+      approve.textContent = "确认执行";
+      const decide = async (approved) => {
+        reject.disabled = approve.disabled = true;
+        try {
+          await api(`/api/voice-agent/tools/${encodeURIComponent(tool.id)}`, { method: "POST", body: JSON.stringify({ approve: approved }) });
+          notice(approved ? "工具操作已确认" : "工具操作已拒绝");
+        } catch (error) { notice(error.message); }
+        await loadVoiceAgentPendingTools();
+      };
+      reject.addEventListener("click", () => decide(false));
+      approve.addEventListener("click", () => decide(true));
+      actions.append(reject, approve);
+      row.append(description, actions);
+      return row;
+    }));
+  } catch (_) {}
+}
+
+async function loadVoiceAgentAudit() {
+  try {
+    const result = await api("/api/voice-agent/audit?limit=200");
+    const events = result.events || [];
+    $("#voice-agent-audit-count").textContent = `${events.length} 条`;
+    renderVoiceAgentEvents($("#voice-agent-audit-list"), events, "暂无审计记录");
+    return events;
+  } catch (error) {
+    $("#voice-agent-audit-list").textContent = error.message;
+    return [];
+  }
+}
+
 async function loadCalls() {
   if (callPollInFlight) return;
   callPollInFlight = true;
@@ -551,6 +831,8 @@ async function loadCalls() {
     callPollInFlight = false;
   }
   void loadVoiceSetup();
+  void loadVoiceAgentStatus();
+  void loadVoiceAgentPendingTools();
 }
 
 async function loadVoiceSetup() {
@@ -1293,6 +1575,10 @@ document.querySelectorAll(".tab").forEach((tab) => {
     if (tab.dataset.view === "calls") {
       loadCalls();
       loadBarkSettings("call");
+      loadVoiceAgentAudit();
+      connectVoiceAgentEvents();
+    } else {
+      closeVoiceAgentEvents();
     }
   });
 });
@@ -1349,6 +1635,57 @@ $("#test-sms-bark").addEventListener("click", () => testBarkSettings("sms"));
 $("#call-bark-settings-form").addEventListener("submit", (event) => saveBarkSettings(event, "call"));
 $("#test-call-bark").addEventListener("click", () => testBarkSettings("call"));
 $("#refresh-calls").addEventListener("click", loadCalls);
+
+$("#voice-agent-form").addEventListener("input", (event) => {
+  voiceAgentFormDirty = true;
+  if (event.target.id === "voice-agent-provider" || event.target.id === "voice-agent-fallback-provider") {
+    if (event.target.id === "voice-agent-provider") normalizeVoiceAgentVoiceForProvider();
+    updateVoiceAgentFieldVisibility();
+  }
+});
+$("#voice-agent-form").addEventListener("change", (event) => {
+  voiceAgentFormDirty = true;
+  if (event.target.id === "voice-agent-provider" || event.target.id === "voice-agent-fallback-provider") {
+    if (event.target.id === "voice-agent-provider") normalizeVoiceAgentVoiceForProvider();
+    updateVoiceAgentFieldVisibility();
+  }
+});
+$("#voice-agent-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await saveVoiceAgentProfile();
+});
+$("#voice-agent-manual").addEventListener("click", async () => {
+  $("#voice-agent-enabled").checked = false;
+  await saveVoiceAgentProfile({ forceDisabled: true });
+});
+$("#clear-live-transcript").addEventListener("click", () => {
+  liveVoiceAgentEvents = [];
+  renderVoiceAgentEvents($("#voice-agent-transcript"), [], "等待 Voice Agent 事件...");
+});
+$("#refresh-voice-agent-audit").addEventListener("click", loadVoiceAgentAudit);
+$("#export-voice-agent-audit").addEventListener("click", async () => {
+  const events = await loadVoiceAgentAudit();
+  const blob = new Blob([JSON.stringify({ exported_at: new Date().toISOString(), events }, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `djonehub-voice-agent-audit-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+$("#clear-voice-agent-audit").addEventListener("click", async () => {
+  const confirmed = await showModal({
+    title: "清空 Voice Agent 审计",
+    message: "将删除当前设备的转写和工具审计文件。通话录音不会被删除。",
+    confirmLabel: "确认清空",
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    await api("/api/voice-agent/audit", { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+    await loadVoiceAgentAudit();
+    notice("Voice Agent 审计已清空");
+  } catch (error) { notice(error.message); }
+});
 
 $("#initialize-voice-module").addEventListener("click", async () => {
   const requiresPasscode = Boolean(currentVoiceSetup.requires_adb_passcode);

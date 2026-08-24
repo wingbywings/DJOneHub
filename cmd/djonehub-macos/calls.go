@@ -203,6 +203,7 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 	}
 	a.callMu.Unlock()
 	a.syncVoiceRouteForCall(previousState, selected.State)
+	a.scheduleVoiceAgentAutoAnswer(previousState, selected.State)
 }
 
 func (a *app) syncVoiceRouteForCall(previousState, currentState string) {
@@ -306,36 +307,42 @@ func (a *app) answerCall(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusConflict, "当前没有可接听的来电")
 		return
 	}
+	response, err := a.answerCurrentCall()
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"answered": true, "response": response})
+}
+
+func (a *app) answerCurrentCall() (string, error) {
+	if !a.callStateAllows("incoming", "waiting") {
+		return "", fmt.Errorf("当前没有可接听的来电")
+	}
 	a.callMu.Lock()
 	if time.Since(a.lastAnswerAt) < 2*time.Second {
 		a.callMu.Unlock()
-		writeJSON(w, http.StatusOK, map[string]bool{"answered": true})
-		return
+		return "", nil
 	}
 	a.lastAnswerAt = time.Now()
 	a.callMu.Unlock()
-
 	if a.demo {
 		a.setActiveCallState("active", time.Now())
-		writeJSON(w, http.StatusOK, map[string]bool{"answered": true})
-		return
+		return "", nil
 	}
 	if err := a.prepareModuleVoiceSessionBudgeted(20 * time.Second); err != nil {
-		writeError(w, http.StatusBadGateway, "接听前语音运行时准备失败："+err.Error())
-		return
+		return "", fmt.Errorf("接听前语音运行时准备失败：%w", err)
 	}
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()
 	response, err := a.runATCommand("ATA", 5*time.Second)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
+		return "", err
 	}
 	if err := validateCallATResponse(response); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
+		return "", err
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"answered": true, "response": response})
+	return response, nil
 }
 
 func (a *app) hangupCall(w http.ResponseWriter, _ *http.Request) {

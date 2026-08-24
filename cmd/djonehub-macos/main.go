@@ -133,8 +133,11 @@ type app struct {
 	authorizeVoiceRoute  func() error
 	releaseVoiceRoute    func()
 
-	audioHostMu sync.RWMutex
-	audioHost   audioHostState
+	audioHostMu            sync.RWMutex
+	audioHost              audioHostState
+	voiceAgentOnce         sync.Once
+	voiceAgent             *voiceAgentController
+	voiceAgentSettingsPath string
 
 	profileNotesMu     sync.Mutex
 	profileNotes       map[string]profileNote
@@ -790,6 +793,14 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/calls/audio/host/config", a.audioHostConfig)
 	mux.HandleFunc("POST /api/calls/audio/mute", a.audioHostMute)
 	mux.HandleFunc("POST /api/calls/audio/record", a.audioHostRecord)
+	mux.HandleFunc("GET /api/voice-agent/status", a.voiceAgentStatus)
+	mux.HandleFunc("PUT /api/voice-agent/config", a.voiceAgentConfigure)
+	mux.HandleFunc("GET /api/voice-agent/events", a.voiceAgentEvents)
+	mux.HandleFunc("GET /api/voice-agent/audit", a.voiceAgentAudit)
+	mux.HandleFunc("DELETE /api/voice-agent/audit", a.clearVoiceAgentAudit)
+	mux.HandleFunc("GET /api/voice-agent/tools/pending", a.voiceAgentPendingTools)
+	mux.HandleFunc("POST /api/voice-agent/tools/{toolID}", a.voiceAgentToolDecision)
+	mux.HandleFunc("GET /api/calls/audio/agent/media", a.voiceAgentMedia)
 	mux.HandleFunc("GET /api/settings/bark", a.getSMSBarkSettings)
 	mux.HandleFunc("PUT /api/settings/bark", a.saveSMSBarkSettings)
 	mux.HandleFunc("POST /api/settings/bark/test", a.testSMSBarkSettings)

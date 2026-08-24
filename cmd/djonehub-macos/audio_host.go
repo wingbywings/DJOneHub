@@ -3,7 +3,10 @@ package main
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
+
+	"github.com/iniwex5/vohive/internal/voiceagent"
 )
 
 type audioHostState struct {
@@ -19,16 +22,20 @@ type audioHostState struct {
 }
 
 type audioHostConfigResponse struct {
-	DeviceID   string `json:"device_id"`
-	VendorID   uint16 `json:"vendor_id"`
-	ProductID  uint16 `json:"product_id"`
-	LocationID uint32 `json:"location_id"`
-	RouteReady bool   `json:"route_ready"`
-	RouteError string `json:"route_error,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	CallActive bool   `json:"call_active"`
-	Muted      bool   `json:"muted"`
-	Recording  bool   `json:"recording"`
+	DeviceID      string `json:"device_id"`
+	VendorID      uint16 `json:"vendor_id"`
+	ProductID     uint16 `json:"product_id"`
+	LocationID    uint32 `json:"location_id"`
+	RouteReady    bool   `json:"route_ready"`
+	RouteError    string `json:"route_error,omitempty"`
+	CallID        string `json:"call_id,omitempty"`
+	CallActive    bool   `json:"call_active"`
+	Muted         bool   `json:"muted"`
+	Recording     bool   `json:"recording"`
+	MediaMode     string `json:"media_mode"`
+	AgentProvider string `json:"agent_provider,omitempty"`
+	AgentRevision uint64 `json:"agent_revision,omitempty"`
+	AgentMediaURL string `json:"agent_media_url,omitempty"`
 }
 
 func (a *app) audioHostSnapshot() audioHostState {
@@ -55,6 +62,8 @@ func (a *app) audioHostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.audioHostMu.Lock()
+	wasRecording := a.audioHost.Recording
+	previousPath := a.audioHost.RecordingPath
 	a.audioHost.Registered = body.Enabled
 	a.audioHost.Running = body.Running
 	a.audioHost.Muted = body.Muted
@@ -64,6 +73,21 @@ func (a *app) audioHostRegister(w http.ResponseWriter, r *http.Request) {
 	a.audioHost.LastSeen = time.Now()
 	state := a.audioHost
 	a.audioHostMu.Unlock()
+	if wasRecording != body.Recording || (body.Recording && previousPath != body.RecordingPath) {
+		a.callMu.RLock()
+		callID := ""
+		if a.activeCall != nil {
+			callID = a.activeCall.ID
+		}
+		a.callMu.RUnlock()
+		eventType := voiceagent.EventType("recording.stopped")
+		text := previousPath
+		if body.Recording {
+			eventType = "recording.started"
+			text = body.RecordingPath
+		}
+		a.ensureVoiceAgent().recordEvent(callID, voiceagent.Event{Type: eventType, Text: text, At: time.Now()})
+	}
 	writeJSON(w, http.StatusOK, state)
 }
 
@@ -90,10 +114,20 @@ func (a *app) audioHostConfig(w http.ResponseWriter, _ *http.Request) {
 	wantMuted := a.audioHost.WantMuted
 	wantRecording := a.audioHost.WantRecording
 	a.audioHostMu.RUnlock()
+	agent := a.ensureVoiceAgent().snapshot()
+	agentMediaURL := ""
+	if agent.Enabled {
+		agentMediaURL = "/api/calls/audio/agent/media?token=" + url.QueryEscape(a.ensureVoiceAgent().mediaToken)
+		if a.deviceID != "" {
+			agentMediaURL = "/api/devices/" + url.PathEscape(a.deviceID) + "/calls/audio/agent/media?token=" + url.QueryEscape(a.ensureVoiceAgent().mediaToken)
+		}
+	}
 	config := audioHostConfigResponse{
 		DeviceID: a.deviceID, VendorID: a.usbLocator.VendorID, ProductID: a.usbLocator.ProductID,
 		LocationID: a.usbLocator.LocationID, RouteReady: routeReady, RouteError: routeError,
 		CallID: callID, CallActive: callActive, Muted: wantMuted, Recording: wantRecording,
+		MediaMode: agent.MediaMode(), AgentProvider: agent.Provider, AgentMediaURL: agentMediaURL,
+		AgentRevision: agent.Revision,
 	}
 	if err := validateAudioHostConfig(config); err != nil {
 		writeError(w, http.StatusConflict, err.Error())

@@ -567,6 +567,7 @@ func (h *usbDeviceHub) configureDeviceSettings(runtime *app, deviceID string) {
 	}
 	directory := filepath.Join(configDir, "DJOneHub", "devices", deviceID)
 	runtime.barkSettingsPath = filepath.Join(directory, "bark-settings.json")
+	runtime.voiceAgentSettingsPath = filepath.Join(directory, "voice-agent.json")
 	runtime.moduleSetupPath = filepath.Join(directory, "voice-setup-state.json")
 	runtime.moduleSetupBackupDir = filepath.Join(directory, "module-backups")
 	if err := runtime.loadModuleSetupState(); err != nil {

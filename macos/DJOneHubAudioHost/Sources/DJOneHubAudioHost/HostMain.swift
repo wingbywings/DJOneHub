@@ -26,6 +26,10 @@ private struct AudioHostConfig: Decodable {
     let callActive: Bool
     let muted: Bool
     let recording: Bool
+    let mediaMode: String
+    let agentProvider: String?
+    let agentRevision: UInt64?
+    let agentMediaURL: String?
 
     enum CodingKeys: String, CodingKey {
         case deviceID = "device_id"
@@ -37,6 +41,10 @@ private struct AudioHostConfig: Decodable {
         case callID = "call_id"
         case callActive = "call_active"
         case muted, recording
+        case mediaMode = "media_mode"
+        case agentProvider = "agent_provider"
+        case agentRevision = "agent_revision"
+        case agentMediaURL = "agent_media_url"
     }
 }
 
@@ -64,6 +72,8 @@ private final class APIClient {
     func audioConfig(deviceID: String?) async throws -> AudioHostConfig {
         try await get(path: devicePath(deviceID, "/calls/audio/host/config"))
     }
+
+    func absoluteURL(path: String) -> URL { url(path) }
 
     func register(
         deviceID: String?, enabled: Bool, running: Bool, muted: Bool,
@@ -188,6 +198,7 @@ private final class AudioHostController {
     private let client: APIClient
     private let fixedDeviceID: String?
     private let audio = VoiceAudioService()
+    private let agentMedia = AgentMediaClient()
     private var currentDeviceID: String?
     private var currentCallID: String?
     private var isMuted = false
@@ -195,11 +206,27 @@ private final class AudioHostController {
     private var recordingPath: String?
     private var lastError: String?
     private var knownDeviceIDs: [String] = []
+    private var isAgentMode = false
+    private var currentAgentRevision: UInt64?
 
     init(client: APIClient, fixedDeviceID: String?) {
         self.client = client
         self.fixedDeviceID = fixedDeviceID
         audio.onError = { [weak self] message in self?.lastError = message }
+        audio.onAgentInput = { [weak self] pcm in self?.agentMedia.send(pcm) }
+        agentMedia.onAudio = { [weak self] pcm in self?.audio.enqueueAgentOutput(pcm) }
+        agentMedia.onEvent = { [weak self] raw in
+            guard
+                let data = raw.data(using: .utf8),
+                let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                event["type"] as? String == "speech.started"
+            else { return }
+            self?.audio.clearAgentOutput()
+        }
+        agentMedia.onError = { [weak self] message in self?.lastError = message }
+        agentMedia.onConnectionState = { [weak self] connected in
+            if connected { self?.lastError = nil }
+        }
     }
 
     func run() async {
@@ -237,6 +264,12 @@ private final class AudioHostController {
                 lastError = config.routeError
                 await report(enabled: true)
                 return
+            }
+            let wantsAgent = config.mediaMode == "agent"
+            let agentProfileChanged = wantsAgent && isAgentMode && currentAgentRevision != config.agentRevision
+            if audio.isRunning, wantsAgent != isAgentMode || agentProfileChanged {
+                stopAudio()
+                currentCallID = target.call.id
             }
             if !audio.isRunning {
                 try await startAudio(config: config)
@@ -287,10 +320,15 @@ private final class AudioHostController {
     }
 
     private func startAudio(config: AudioHostConfig) async throws {
-        let granted = await withCheckedContinuation { continuation in
-            audio.requestMicrophoneAccess { continuation.resume(returning: $0) }
+        isAgentMode = config.mediaMode == "agent"
+        currentAgentRevision = config.agentRevision
+        audio.configureAgentMode(isAgentMode)
+        if !isAgentMode {
+            let granted = await withCheckedContinuation { continuation in
+                audio.requestMicrophoneAccess { continuation.resume(returning: $0) }
+            }
+            guard granted else { throw HostError.message("需要麦克风权限才能进行双向通话") }
         }
-        guard granted else { throw HostError.message("需要麦克风权限才能进行双向通话") }
         let result = await withCheckedContinuation { continuation in
             audio.startUAC(
                 vendorID: config.vendorID,
@@ -301,6 +339,13 @@ private final class AudioHostController {
         switch result {
         case .success:
             audio.setMediaEnabled(true)
+            if isAgentMode {
+                guard let path = config.agentMediaURL, !path.isEmpty else {
+                    audio.stop()
+                    throw HostError.message("AI 模式缺少本地媒体桥地址")
+                }
+                agentMedia.start(url: client.absoluteURL(path: path))
+            }
             isMuted = config.muted
             audio.setMuted(isMuted)
         case .failure(let message):
@@ -309,11 +354,15 @@ private final class AudioHostController {
     }
 
     private func stopAudio() {
+        agentMedia.stop()
         if isRecording { audio.stopRecording { _ in } }
         audio.stop()
         isRecording = false
         recordingPath = nil
         isMuted = false
+        isAgentMode = false
+        currentAgentRevision = nil
+        audio.configureAgentMode(false)
         currentCallID = nil
     }
 
