@@ -59,6 +59,9 @@ func TestQADBChallengeAndPasscodeValidation(t *testing.T) {
 	if err != nil || challenge != "12345678" {
 		t.Fatalf("challenge = %q, err = %v", challenge, err)
 	}
+	if challenge, err := parseQADBChallenge("+QADBKEY: 123456789\r\nOK"); err == nil {
+		t.Fatalf("overlong challenge accepted as %q", challenge)
+	}
 	for _, passcode := range []string{"validKey123", "AbCdEf0123456789"} {
 		if err := validateQADBPasscode(passcode); err != nil {
 			t.Fatalf("valid passcode rejected: %v", err)
@@ -71,11 +74,75 @@ func TestQADBChallengeAndPasscodeValidation(t *testing.T) {
 	}
 }
 
+func TestGenerateQADBPasscodeMatchesPasslibReference(t *testing.T) {
+	tests := map[string]string{
+		"1":        "JkxHEjF8W4v1cb8",
+		"12":       "LE4IjfdhEbTYf/p",
+		"1234567":  "0xxRaPk.6wC7A5F",
+		"87449288": "pZ4SRpJVIqrVJv5",
+		"12345678": "0jXKXQwSwMxYoeg",
+		"00000000": "C3SV/fMl8Tu3SeK",
+		"99999999": "2ajrfuUYlCCWbY3",
+	}
+	for challenge, want := range tests {
+		got, err := generateQADBPasscode(challenge)
+		if err != nil || got != want {
+			t.Errorf("generateQADBPasscode(%q) = %q, %v; want %q", challenge, got, err, want)
+		}
+	}
+	for _, challenge := range []string{"", "123456789", "1234abcd", "12/34"} {
+		if passcode, err := generateQADBPasscode(challenge); err == nil {
+			t.Errorf("invalid challenge %q generated passcode %q", challenge, passcode)
+		}
+	}
+}
+
 func TestTargetVoiceUSBEnablesADBForLegacyUAC(t *testing.T) {
 	legacy := usbComposition{VendorID: quectelUSBVendorID, ProductID: quectelUSBProductID, Flags: []int{1, 1, 1, 1, 1, 0, 1}}
 	target := targetVoiceUSB(legacy)
 	if !target.isUACTarget() || !target.hasADB() || !target.hasUAC() {
 		t.Fatalf("target = %#v", target)
+	}
+}
+
+func TestADBUnlockDetectionCoversFactoryAndLegacyLayouts(t *testing.T) {
+	tests := []struct {
+		name string
+		usb  usbComposition
+		want bool
+	}{
+		{
+			name: "DJI factory layout",
+			usb:  usbComposition{VendorID: djiUSBVendorID, ProductID: djiUSBProductID, Flags: []int{1, 1, 1, 1, 1, 0, 0}},
+			want: true,
+		},
+		{
+			name: "DJI legacy UAC layout",
+			usb:  usbComposition{VendorID: djiUSBVendorID, ProductID: djiUSBProductID, Flags: []int{1, 1, 1, 1, 1, 0, 1}},
+			want: true,
+		},
+		{
+			name: "Quectel legacy UAC layout",
+			usb:  usbComposition{VendorID: quectelUSBVendorID, ProductID: quectelUSBProductID, Flags: []int{1, 1, 1, 1, 1, 0, 1}},
+			want: true,
+		},
+		{
+			name: "full voice target",
+			usb:  usbComposition{VendorID: quectelUSBVendorID, ProductID: quectelUSBProductID, Flags: []int{1, 1, 1, 1, 1, 1, 1}},
+			want: false,
+		},
+		{
+			name: "unsupported USB identity",
+			usb:  usbComposition{VendorID: 0x1234, ProductID: 0x5678, Flags: []int{1, 1, 1, 1, 1, 0, 0}},
+			want: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.usb.needsADBUnlockForVoice(); got != test.want {
+				t.Fatalf("needsADBUnlockForVoice() = %t; want %t", got, test.want)
+			}
+		})
 	}
 }
 

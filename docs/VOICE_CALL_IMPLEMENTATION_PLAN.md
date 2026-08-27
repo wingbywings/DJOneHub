@@ -14,7 +14,7 @@ Device ID 和物理 USB 端口。
 
 - 阶段 1：已实现并通过测试；等待真实模块验证 AT 命令兼容性。
 - 阶段 2：代码已完成并通过单元测试与竞态检查；已实现精确 USB/ADB 绑定、按
-  Device ID 持久化备份、QADBKEY challenge 检测、非持久化 passcode 提交、
+  Device ID 持久化备份、QADBKEY challenge 检测、passcode 本地自动生成与非持久化提交、
   IMS/VoLTE/UAC 写入回读、失败回滚，以及重枚举后继续同一 Runtime。等待两台真实
   模块完成初始化、断电恢复和回滚验收。
 - 阶段 3：代码已完成；外部 MaVo 运行时固定到指定上游提交和 SHA-256，下载需单独
@@ -54,8 +54,8 @@ Device ID 和物理 USB 端口。
 - 为 `usbDeviceLocator` 增加 IOKit registry location ID，同时保留 bus + port chain。
 - 将 ADB 打开接口改为接收明确 locator，禁止“打开第一个匹配设备”。
 - 按 Device ID 保存 USB 配置备份、初始化状态和运行时状态。
-- 检测旧 UAC 配置的 QADBKEY challenge，只有用户输入官方 passcode 后才解锁 ADB；
-  passcode 不写入状态文件、备份或日志。
+- 检测工厂配置或旧 UAC 配置的 QADBKEY challenge，用户确认初始化后在本地自动生成并提交 passcode；
+  challenge 可展示，passcode 不写入状态文件、备份或日志。
 - 用户确认后启用 UAC/ADB 与 IMS/VoLTE；完整语音目标必须精确回读 ADB 与 UAC 均为 1。
 - 模块重枚举后使用物理端口恢复原 Runtime；验证失败自动回滚。
 

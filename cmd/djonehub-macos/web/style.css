@@ -185,10 +185,6 @@ input:focus, textarea:focus, select:focus { border-color: #6698ed; outline: 0; b
 .voice-setup-card h3 { margin: 3px 0 0; color: var(--text-strong); font-size: 16px; }
 .voice-setup-card p { margin: 7px 0 0; }
 .voice-setup-card small { display: block; max-width: 720px; margin-top: 5px; color: var(--text-muted); overflow-wrap: anywhere; }
-.adb-passcode-field { display: grid; max-width: 480px; gap: 6px; margin-top: 12px; color: var(--text-strong); font-size: 13px; }
-.adb-passcode-field[hidden] { display: none; }
-.adb-passcode-field input { width: 100%; box-sizing: border-box; }
-.adb-passcode-field small { margin-top: 0; }
 .voice-setup-actions { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 8px; }
 .dial-form { display: grid; gap: 7px; padding-top: 16px; }
 .dial-form > label { color: var(--text-muted); font-size: 12px; font-weight: 650; }

@@ -9,7 +9,6 @@ let callPollInFlight = false;
 let voiceAgentCallsInFlight = false;
 let voiceSetupInFlight = false;
 let currentVoiceSetup = {};
-let adbPasscodeContext = "";
 let currentCallState = null;
 let currentAudioHostState = {};
 let currentVoiceAgentStatus = {};
@@ -1068,11 +1067,6 @@ async function loadVoiceSetup() {
       api("/api/voice/status"),
     ]);
     const setupText = setup.summary || setup.state || "模块配置状态未知";
-    const nextPasscodeContext = setup.requires_adb_passcode
-      ? `${activeDeviceID}:${setup.adb_challenge || "unknown"}`
-      : "";
-    if (nextPasscodeContext !== adbPasscodeContext) $("#adb-passcode").value = "";
-    adbPasscodeContext = nextPasscodeContext;
     currentVoiceSetup = setup;
     const runtimeText = voice.runtime_installed
       ? (voice.ready
@@ -1085,19 +1079,12 @@ async function loadVoiceSetup() {
     detail.textContent = [setup.detail, voice.last_error || voice.detail || voice.runtime_detail].filter(Boolean).join("；");
     initializeButton.hidden = !setup.can_initialize;
     initializeButton.disabled = ["initializing", "restarting", "verifying", "rolling_back"].includes(setup.state);
-    initializeButton.textContent = setup.requires_adb_passcode ? "解锁 ADB 并完成配置" : "初始化模块";
-    $("#adb-passcode-field").hidden = !setup.requires_adb_passcode;
-    $("#adb-challenge").textContent = setup.adb_challenge
-      ? `当前 challenge：${setup.adb_challenge}。passcode 仅提交给当前模块，不会保存。`
-      : "passcode 仅提交给当前模块，不会保存。";
+    initializeButton.textContent = setup.requires_adb_passcode ? "自动解锁 ADB 并完成配置" : "初始化模块";
     installButton.hidden = Boolean(voice.runtime_installed);
   } catch (error) {
     summary.textContent = `语音准备状态读取失败：${error.message}`;
     detail.textContent = "";
     currentVoiceSetup = {};
-    adbPasscodeContext = "";
-    $("#adb-passcode").value = "";
-    $("#adb-passcode-field").hidden = true;
     initializeButton.hidden = true;
     installButton.hidden = true;
   } finally {
@@ -1891,20 +1878,13 @@ $("#back-to-voice-agent-calls").addEventListener("click", () => {
 });
 
 $("#initialize-voice-module").addEventListener("click", async () => {
-  const requiresPasscode = Boolean(currentVoiceSetup.requires_adb_passcode);
-  const passcodeInput = $("#adb-passcode");
-  const adbPasscode = passcodeInput.value.trim();
-  if (requiresPasscode && !adbPasscode) {
-    notice("请输入 Quectel 官方提供的 QADBKEY passcode");
-    passcodeInput.focus();
-    return;
-  }
+  const requiresADBUnlock = Boolean(currentVoiceSetup.requires_adb_passcode);
   const confirmed = await showModal({
-    title: requiresPasscode ? "解锁模块 ADB" : "初始化模块语音支持",
-    message: requiresPasscode
-      ? `将为 challenge ${currentVoiceSetup.adb_challenge || "未知"} 提交官方 passcode，再启用 ADB、USB Audio、IMS 与 VoLTE。passcode 不会保存或显示在日志中。模块随后会重启。`
+    title: requiresADBUnlock ? "自动解锁模块 ADB" : "初始化模块语音支持",
+    message: requiresADBUnlock
+      ? `将根据模块 challenge ${currentVoiceSetup.adb_challenge || "未知"} 自动生成并提交 QADBKEY passcode，再启用 ADB、USB Audio、IMS 与 VoLTE。passcode 不会保存或显示在日志中。模块随后会重启。`
       : "将先按当前 Device ID 备份 USB、IMS 与 VoLTE 配置，再写入并回读验证。模块会重启；失败时自动恢复全部原始配置。",
-    confirmLabel: requiresPasscode ? "确认解锁并重启" : "确认备份并初始化",
+    confirmLabel: requiresADBUnlock ? "确认自动解锁并重启" : "确认备份并初始化",
     danger: true,
   });
   if (!confirmed) return;
@@ -1913,9 +1893,8 @@ $("#initialize-voice-module").addEventListener("click", async () => {
   try {
     await api("/api/module/setup", {
       method: "POST",
-      body: JSON.stringify({ confirm: true, ...(requiresPasscode ? { adb_passcode: adbPasscode } : {}) }),
+      body: JSON.stringify({ confirm: true }),
     });
-    passcodeInput.value = "";
     notice("初始化已开始，正在等待模块重新连接");
     await loadVoiceSetup();
   } catch (error) {

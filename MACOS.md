@@ -87,12 +87,13 @@ saves a device-specific rollback backup, verifies every write, and restores the
 original settings if validation fails. The external module voice runtime is also
 installed only after a separate confirmation and pinned SHA-256 verification.
 
-Baiwang QDC507GLEFM21 firmware may retain the legacy `1,1,1,1,1,0,1` layout
-until ADB is authorized with a device-specific QADBKEY passcode. DJOneHub reports
-that layout as requiring ADB unlock instead of treating USB Audio alone as full
-call readiness. The Calls page accepts the official passcode over the local API,
-submits it through a non-logging USB AT path, never persists it, then requires an
-exact `1,1,1,1,1,1,1` readback before rebooting the module.
+Baiwang QDC507GLEFM21 firmware may pin the ADB bit to zero in either the factory
+`1,1,1,1,1,0,0` layout or the legacy UAC `1,1,1,1,1,0,1` layout until ADB is
+authorized with a device-specific QADBKEY passcode. DJOneHub reports both layouts
+as requiring ADB unlock. After confirmation, DJOneHub derives the passcode locally
+from a freshly queried module challenge, submits it through a non-logging USB AT
+path, never persists it, then requires an exact `1,1,1,1,1,1,1` readback before
+rebooting the module.
 
 Before dialing or answering, DJOneHub prepares the module runtime and retains the
 same ADB transport across `ATD`/`ATA`. The D4/UAC media route is still activated

@@ -82,6 +82,19 @@ func (c usbComposition) isFactoryDJI() bool {
 		len(c.Flags) == 7 && equalIntSlice(c.Flags, []int{1, 1, 1, 1, 1, 0, 0})
 }
 
+func (c usbComposition) hasSupportedVoiceUSBIdentity() bool {
+	return (c.VendorID == quectelUSBVendorID && c.ProductID == quectelUSBProductID) ||
+		(c.VendorID == djiUSBVendorID && c.ProductID == djiUSBProductID)
+}
+
+// Factory DJI layouts and legacy UAC layouts can both have their ADB bit pinned
+// to zero by QADBKEY. Unlock before the first attempt to write the voice target;
+// waiting for UAC to be enabled would make a factory layout fail and roll back
+// before the unlock path can ever run.
+func (c usbComposition) needsADBUnlockForVoice() bool {
+	return len(c.Flags) == 7 && c.hasSupportedVoiceUSBIdentity() && !c.hasADB()
+}
+
 func (c usbComposition) isRecoverable() bool {
 	if c.VendorID < 0 || c.VendorID > 0xffff || c.ProductID < 0 || c.ProductID > 0xffff || len(c.Flags) != 7 {
 		return false
@@ -113,8 +126,9 @@ func usbSetupReadbackMatches(want, actual usbComposition) bool {
 	return actual.command() == want.command()
 }
 
-var qadbChallengePattern = regexp.MustCompile(`(?i)\+QADBKEY:\s*([0-9]+)`) // challenge only; never a passcode
-var qadbPasscodePattern = regexp.MustCompile(`^[A-Za-z0-9]{8,128}$`)
+var qadbChallengePattern = regexp.MustCompile(`(?im)\+QADBKEY:\s*([0-9]{1,8})\s*$`) // challenge only; never a passcode
+var qadbChallengeValuePattern = regexp.MustCompile(`^[0-9]{1,8}$`)
+var qadbPasscodePattern = regexp.MustCompile(`^[./A-Za-z0-9]{8,128}$`)
 
 func parseQADBChallenge(response string) (string, error) {
 	match := qadbChallengePattern.FindStringSubmatch(response)
@@ -126,7 +140,7 @@ func parseQADBChallenge(response string) (string, error) {
 
 func validateQADBPasscode(passcode string) error {
 	if !qadbPasscodePattern.MatchString(passcode) {
-		return errors.New("QADBKEY passcode 格式无效；只能包含 8–128 位 ASCII 字母和数字")
+		return errors.New("QADBKEY passcode 格式无效；只能包含 8–128 位 MD5-crypt 字符")
 	}
 	return nil
 }
@@ -257,12 +271,12 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 	detail := composition.command()
 	requiresADBPasscode := false
 	adbChallenge := ""
-	if composition.isLegacyUACTarget() {
+	if composition.needsADBUnlockForVoice() {
 		if qadbResponse, qadbErr := a.runATCommand("AT+QADBKEY?", 4*time.Second); qadbErr == nil {
 			if challenge, parseErr := parseQADBChallenge(qadbResponse); parseErr == nil {
 				requiresADBPasscode = true
 				adbChallenge = challenge
-				detail += "；ADB 已锁定，需要官方 QADBKEY passcode"
+				detail += "；ADB 已锁定，初始化时将自动生成 QADBKEY passcode"
 			}
 		}
 	}
@@ -278,7 +292,7 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 
 func setupInitializationSummary(requiresADBPasscode bool) string {
 	if requiresADBPasscode {
-		return "USB 音频已启用，需要官方 passcode 解锁 ADB"
+		return "USB 音频已启用，将自动解锁 ADB"
 	}
 	return "可备份当前配置并启用通话支持"
 }
@@ -364,8 +378,7 @@ func (a *app) warmModuleVoiceIfReady() {
 
 func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Confirm     bool   `json:"confirm"`
-		ADBPasscode string `json:"adb_passcode"`
+		Confirm bool `json:"confirm"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -392,10 +405,9 @@ func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, inspection.Summary)
 		return
 	}
-	passcode := strings.TrimSpace(body.ADBPasscode)
 	if inspection.RequiresADBPasscode {
-		if err := validateQADBPasscode(passcode); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+		if !qadbChallengeValuePattern.MatchString(inspection.ADBChallenge) {
+			writeError(w, http.StatusConflict, "模块未返回可用于自动解锁的 QADBKEY challenge")
 			return
 		}
 	}
@@ -404,16 +416,14 @@ func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 		TransactionID: transactionID, State: "initializing", Summary: "正在备份并启用通话支持",
 		Detail: inspection.Detail,
 	})
-	go a.runModuleSetup(transactionID, passcode)
-	body.ADBPasscode = ""
-	passcode = ""
+	go a.runModuleSetup(transactionID)
 	a.moduleSetupMu.RLock()
 	status := a.moduleSetup
 	a.moduleSetupMu.RUnlock()
 	writeJSON(w, http.StatusAccepted, status)
 }
 
-func (a *app) runModuleSetup(transactionID, adbPasscode string) {
+func (a *app) runModuleSetup(transactionID string) {
 	a.operationMu.Lock()
 	defer a.operationMu.Unlock()
 
@@ -429,12 +439,11 @@ func (a *app) runModuleSetup(transactionID, adbPasscode string) {
 	}
 	a.updateModuleSetup(transactionID, moduleSetupStatus{State: "initializing", Summary: "备份已保存，正在写入并回读配置", BackupPath: backupPath})
 
-	if adbPasscode != "" {
-		if err := a.unlockModuleADB(adbPasscode); err != nil {
+	if backup.USB.needsADBUnlockForVoice() {
+		if err := a.unlockModuleADBForVoiceIfNeeded(); err != nil {
 			a.failModuleSetup(transactionID, "ADB 解锁失败，未修改模块配置", err, backupPath)
 			return
 		}
-		adbPasscode = ""
 	}
 	targetUSB := targetVoiceUSB(backup.USB)
 	if err := a.writeAndVerifySetup(targetUSB, 1, 0); err != nil {
@@ -450,6 +459,31 @@ func (a *app) runModuleSetup(transactionID, adbPasscode string) {
 	a.markUSBATDetached("voice setup reboot")
 }
 
+func (a *app) unlockModuleADBForVoiceIfNeeded() error {
+	response, err := a.runATCommand("AT+QADBKEY?", 4*time.Second)
+	if err != nil {
+		return errors.New("读取 QADBKEY challenge 时通信失败")
+	}
+	// Some supported firmware does not implement QADBKEY and allows USBCFG to
+	// enable ADB directly. Preserve that path; exact readback still catches a
+	// firmware that silently keeps ADB disabled.
+	if setupATResponseIsError(response) {
+		return nil
+	}
+	challenge, err := parseQADBChallenge(response)
+	if err != nil {
+		return err
+	}
+	passcode, err := generateQADBPasscode(challenge)
+	challenge = ""
+	if err != nil {
+		return err
+	}
+	err = a.unlockModuleADB(passcode)
+	passcode = ""
+	return err
+}
+
 func (a *app) unlockModuleADB(passcode string) error {
 	if err := validateQADBPasscode(passcode); err != nil {
 		return err
@@ -462,7 +496,7 @@ func (a *app) unlockModuleADB(passcode string) error {
 		return errors.New("提交 QADBKEY passcode 时通信失败")
 	}
 	if setupATResponseIsError(response) {
-		return errors.New("模块拒绝 QADBKEY passcode；请确认 challenge 与官方回复匹配")
+		return errors.New("模块拒绝自动生成的 QADBKEY passcode")
 	}
 	return nil
 }
