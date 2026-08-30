@@ -216,8 +216,6 @@ input:focus, textarea:focus, select:focus { border-color: #6698ed; outline: 0; b
 .agent-status-badge.error { border-color: #cf7783; color: #b4404e; }
 .agent-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
 .agent-settings-grid .settings-field-wide, .agent-switch { grid-column: 1 / -1; }
-.agent-policy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 12px; border: 1px solid var(--border-soft); border-radius: 7px; background: var(--surface-subtle); }
-.agent-policy-grid .checkbox-field { grid-column: auto; }
 .agent-settings-actions { align-self: end; }
 .agent-provider-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
 .agent-provider-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-subtle); }
@@ -447,7 +445,7 @@ input, textarea, select { border-color: var(--border); background: var(--surface
   .settings-field-wide { grid-column: auto; }
   .settings-actions { justify-content: flex-start; flex-wrap: wrap; }
   .agent-pending-item { align-items: flex-start; flex-direction: column; }
-  .agent-settings-grid, .agent-policy-grid, .agent-provider-grid { grid-template-columns: 1fr; }
+  .agent-settings-grid, .agent-provider-grid { grid-template-columns: 1fr; }
   .agent-settings-grid .settings-field-wide, .agent-switch { grid-column: auto; }
   .agent-event { grid-template-columns: 66px minmax(0, 1fr); }
   .agent-event time { grid-column: 2; }

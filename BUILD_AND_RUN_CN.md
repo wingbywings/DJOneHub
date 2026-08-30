@@ -340,7 +340,7 @@ export MINIMAX_TEXT_ENDPOINT=https://api.minimax.io/v1/chat/completions
 export MINIMAX_TTS_ENDPOINT=wss://api.minimax.io/ws/v1/t2a_v2
 ```
 
-还可使用 `DJONEHUB_VOICE_AGENT_ENABLED`、`DJONEHUB_VOICE_AGENT_PROVIDER`、`DJONEHUB_VOICE_AGENT_FALLBACK_PROVIDER`、`DJONEHUB_VOICE_AGENT_VOICE`、`DJONEHUB_VOICE_AGENT_INSTRUCTIONS`、`DJONEHUB_VOICE_AGENT_STT_PROVIDER`、`DJONEHUB_VOICE_AGENT_FALLBACK_STT_PROVIDER`、`DJONEHUB_VOICE_AGENT_STT_MODEL`、`DJONEHUB_VOICE_AGENT_TOOLS_ENABLED`、`DJONEHUB_VOICE_AGENT_AUDIT_ENABLED`、`DJONEHUB_VOICE_AGENT_AUTO_ANSWER` 和 `DJONEHUB_VOICE_AGENT_AUTO_ANSWER_DELAY_MS` 设置首次启动默认值。若已有持久化 Profile，Profile 优先；API Key 仍只读取进程环境。
+还可使用 `DJONEHUB_VOICE_AGENT_ENABLED`、`DJONEHUB_VOICE_AGENT_PROVIDER`、`DJONEHUB_VOICE_AGENT_FALLBACK_PROVIDER`、`DJONEHUB_VOICE_AGENT_VOICE`、`DJONEHUB_VOICE_AGENT_INSTRUCTIONS`、`DJONEHUB_VOICE_AGENT_STT_PROVIDER`、`DJONEHUB_VOICE_AGENT_FALLBACK_STT_PROVIDER`、`DJONEHUB_VOICE_AGENT_STT_MODEL` 和 `DJONEHUB_VOICE_AGENT_AUTO_ANSWER_DELAY_MS` 设置首次启动默认值。若已有持久化 Profile，Profile 优先；API Key 仍只读取进程环境。
 
 先检查密钥和 Provider 就绪状态：
 
@@ -348,7 +348,7 @@ export MINIMAX_TTS_ENDPOINT=wss://api.minimax.io/ws/v1/t2a_v2
 curl http://127.0.0.1:7575/api/voice-agent/status
 ```
 
-配置接口采用完整 Profile 替换语义。执行 `PUT` 时，请一并提交需要保留的模型、音色、提示词、STT 和自动接听字段。
+配置接口采用完整 Profile 替换语义。执行 `PUT` 时，请一并提交需要保留的模型、音色、提示词、STT 和自动接听延迟字段。
 
 启用 MiniMax，并选择 Qwen STT：
 
@@ -363,16 +363,15 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
     "stt_provider": "qwen",
     "stt_model": "qwen3-asr-flash-realtime",
     "instructions": "你是电话客服，请用简洁自然的中文回答。",
-    "auto_answer": false,
     "auto_answer_delay_ms": 1200
   }'
 ```
 
 将 `stt_provider` 改为 `openai`、`stt_model` 改为 `gpt-live-transcribe`，即可切换 MiniMax 的转写阶段。启用 Qwen/OpenAI 原生双工和回退人工模式的完整请求见 [`docs/voice-agent-first-batch.md`](docs/voice-agent-first-batch.md)。
 
-`auto_answer` 默认是 `false`。启用后，延迟范围会限制在 250–30000 ms，延迟结束时还会重新确认原来电仍为 `incoming/waiting`，避免对已经人工处理的电话重复发送 `ATA`。
+受控电话工具、审计日志和自动接听固定开启，审计内容自动脱敏固定关闭，不再由 Web、Profile、环境变量或配置 API 调整。自动接听延迟范围限制在 250–30000 ms，延迟结束时仍会重新确认原来电为 `incoming/waiting`，避免对已经人工处理的电话重复发送 `ATA`。
 
-同样的配置可以直接在管理页面“来电 → AI Voice Agent”完成。页面还提供实时转写、Provider 健康状态、工具确认和审计导出/清理。转写审计默认不持久化；启用后使用 `0600` JSONL 文件并默认遮盖电话、邮箱和长标识符。
+同样的配置可以直接在管理页面“来电 → AI Voice Agent”完成。页面还提供实时转写、Provider 健康状态、工具确认和审计导出/清理。转写审计固定持久化到权限为 `0600` 的 JSONL 文件，内容不会自动脱敏。
 
 检测到来电或外呼状态后，AI Agent 会在电话接通前预先建立 Provider WebSocket；媒体链路就绪后会立即主动、简短地问候对方，不再额外等待 3 秒。未接、拒接、换来电或修改 AI Profile 时会回收预连接。该策略同时适用于 Qwen/OpenAI Realtime 和 MiniMax 级联模式。请勿混用不同厂商的音色名称：OpenAI 推荐 `marin`/`cedar`，Qwen 默认 `Cherry`；管理页面会在切换 Provider 时自动修正。
 

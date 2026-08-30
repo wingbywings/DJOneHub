@@ -93,9 +93,9 @@ start_service() {
   fi
 
   if [ "${mode}" = "--demo" ]; then
-    "${BINARY}" -listen 127.0.0.1:7575 -demo >>"${LOG_FILE}" 2>&1 &
+    "${BINARY}" -demo >>"${LOG_FILE}" 2>&1 &
   else
-    "${BINARY}" -listen 127.0.0.1:7575 >>"${LOG_FILE}" 2>&1 &
+    "${BINARY}" >>"${LOG_FILE}" 2>&1 &
   fi
   child=$!
   audio_child=""

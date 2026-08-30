@@ -119,7 +119,7 @@ Inspect provider readiness and enable Qwen native realtime audio:
 curl http://127.0.0.1:7575/api/voice-agent/status
 curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
   -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"provider":"qwen","voice":"Cherry","instructions":"Answer calls concisely.","auto_answer":false,"auto_answer_delay_ms":1200}'
+  -d '{"enabled":true,"provider":"qwen","voice":"Cherry","instructions":"Answer calls concisely.","auto_answer_delay_ms":1200}'
 ```
 
 Supported profiles are `qwen`, `openai`, and `minimax`. The MiniMax cascade needs
@@ -130,16 +130,17 @@ examples and [`BUILD_AND_RUN_CN.md`](BUILD_AND_RUN_CN.md) for the two-process
 development workflow.
 
 The Calls page now provides the complete profile editor, provider/STT fallback,
-live transcripts, redacted audit history, and operator approval for sensitive
+live transcripts, local audit history, and operator approval for sensitive
 tools. The local media WebSocket reconnects with exponential backoff; a profile
 revision change rebuilds the active media session. Qwen smart-turn detection and
 noise-tuned OpenAI/STT VAD speech-start events clear queued assistant audio for barge-in. MiniMax text generation uses
 SSE sentence streaming so TTS can begin before the full answer completes.
 
 The profile is stored as `voice-agent.json` under DJOneHub's Application Support
-directory (per device in multi-device mode), with mode `0600`. Auto-answer is off
-by default and rechecks that the same call is still ringing after the configured
-delay before issuing `ATA`.
+directory (per device in multi-device mode), with mode `0600`. Controlled phone
+tools, audit persistence, and auto-answer are always enabled; automatic audit
+redaction is disabled. Auto-answer rechecks that the same call is still ringing
+after the configured delay before issuing `ATA`.
 
 ## Run
 

@@ -109,7 +109,7 @@ func newVoiceAgentController(settingsPath string) *voiceAgentController {
 			sttProvider = "openai"
 		}
 	}
-	state := voiceAgentState{Provider: provider, FallbackProvider: os.Getenv("DJONEHUB_VOICE_AGENT_FALLBACK_PROVIDER"), Voice: os.Getenv("DJONEHUB_VOICE_AGENT_VOICE"), Instructions: os.Getenv("DJONEHUB_VOICE_AGENT_INSTRUCTIONS"), STTProvider: sttProvider, FallbackSTT: os.Getenv("DJONEHUB_VOICE_AGENT_FALLBACK_STT_PROVIDER"), STTModel: os.Getenv("DJONEHUB_VOICE_AGENT_STT_MODEL"), ToolsEnabled: envBool("DJONEHUB_VOICE_AGENT_TOOLS_ENABLED"), AuditEnabled: envBool("DJONEHUB_VOICE_AGENT_AUDIT_ENABLED"), RedactPII: true, AutoAnswer: envBool("DJONEHUB_VOICE_AGENT_AUTO_ANSWER"), AutoAnswerDelayMS: envInt("DJONEHUB_VOICE_AGENT_AUTO_ANSWER_DELAY_MS", 1200), UpdatedAt: time.Now()}
+	state := voiceAgentState{Provider: provider, FallbackProvider: os.Getenv("DJONEHUB_VOICE_AGENT_FALLBACK_PROVIDER"), Voice: os.Getenv("DJONEHUB_VOICE_AGENT_VOICE"), Instructions: os.Getenv("DJONEHUB_VOICE_AGENT_INSTRUCTIONS"), STTProvider: sttProvider, FallbackSTT: os.Getenv("DJONEHUB_VOICE_AGENT_FALLBACK_STT_PROVIDER"), STTModel: os.Getenv("DJONEHUB_VOICE_AGENT_STT_MODEL"), ToolsEnabled: fixedVoiceAgentToolsEnabled, AuditEnabled: fixedVoiceAgentAuditEnabled, RedactPII: fixedVoiceAgentRedactPII, AutoAnswer: fixedVoiceAgentAutoAnswer, AutoAnswerDelayMS: envInt("DJONEHUB_VOICE_AGENT_AUTO_ANSWER_DELAY_MS", 1200), UpdatedAt: time.Now()}
 	state.Enabled = provider != "" && envBool("DJONEHUB_VOICE_AGENT_ENABLED")
 	controller := &voiceAgentController{registry: registry, state: state, keys: keys, transcribers: map[string]cascade.Transcriber{"qwen": qwenSTT, "openai": openaiSTT}, minimaxTextConfig: minimax.TextConfig{APIKey: os.Getenv("MINIMAX_API_KEY"), Endpoint: os.Getenv("MINIMAX_TEXT_ENDPOINT"), Model: os.Getenv("MINIMAX_TEXT_MODEL")}, minimaxSpeechConfig: minimax.SpeechConfig{APIKey: os.Getenv("MINIMAX_API_KEY"), Endpoint: os.Getenv("MINIMAX_TTS_ENDPOINT"), Model: os.Getenv("MINIMAX_TTS_MODEL"), Voice: os.Getenv("MINIMAX_TTS_VOICE")}, settingsPath: settingsPath, mediaToken: newMediaToken()}
 	controller.initializeRuntime()
@@ -148,7 +148,13 @@ func envInt(name string, fallback int) int {
 	return value
 }
 
-const voiceAgentSettingsVersion = 2
+const (
+	voiceAgentSettingsVersion   = 2
+	fixedVoiceAgentToolsEnabled = true
+	fixedVoiceAgentAuditEnabled = true
+	fixedVoiceAgentRedactPII    = false
+	fixedVoiceAgentAutoAnswer   = true
+)
 
 type voiceAgentSettings struct {
 	Version           int    `json:"version"`
@@ -169,6 +175,13 @@ type voiceAgentSettings struct {
 }
 
 func normalizeVoiceAgentState(state voiceAgentState) voiceAgentState {
+	// These operational policies are deployment constants. Keep the JSON fields
+	// in status/profile responses for compatibility, but never allow an old
+	// profile or a configuration request to override them.
+	state.ToolsEnabled = fixedVoiceAgentToolsEnabled
+	state.AuditEnabled = fixedVoiceAgentAuditEnabled
+	state.RedactPII = fixedVoiceAgentRedactPII
+	state.AutoAnswer = fixedVoiceAgentAutoAnswer
 	state.Provider = strings.ToLower(strings.TrimSpace(state.Provider))
 	state.FallbackProvider = strings.ToLower(strings.TrimSpace(state.FallbackProvider))
 	state.STTProvider = strings.ToLower(strings.TrimSpace(state.STTProvider))
@@ -376,7 +389,7 @@ func (a *app) voiceAgentConfigure(w http.ResponseWriter, r *http.Request) {
 	}
 	controller := a.ensureVoiceAgent()
 	body.Provider = strings.ToLower(strings.TrimSpace(body.Provider))
-	candidate := normalizeVoiceAgentState(voiceAgentState{Enabled: body.Enabled, Provider: body.Provider, FallbackProvider: body.FallbackProvider, Model: strings.TrimSpace(body.Model), Voice: strings.TrimSpace(body.Voice), Instructions: strings.TrimSpace(body.Instructions), STTProvider: strings.ToLower(strings.TrimSpace(body.STTProvider)), FallbackSTT: body.FallbackSTT, STTModel: strings.TrimSpace(body.STTModel), ToolsEnabled: body.ToolsEnabled, AuditEnabled: body.AuditEnabled, RedactPII: body.RedactPII, AutoAnswer: body.AutoAnswer, AutoAnswerDelayMS: body.AutoAnswerDelayMS, UpdatedAt: time.Now()})
+	candidate := normalizeVoiceAgentState(voiceAgentState{Enabled: body.Enabled, Provider: body.Provider, FallbackProvider: body.FallbackProvider, Model: strings.TrimSpace(body.Model), Voice: strings.TrimSpace(body.Voice), Instructions: strings.TrimSpace(body.Instructions), STTProvider: strings.ToLower(strings.TrimSpace(body.STTProvider)), FallbackSTT: body.FallbackSTT, STTModel: strings.TrimSpace(body.STTModel), AutoAnswerDelayMS: body.AutoAnswerDelayMS, UpdatedAt: time.Now()})
 	if _, ok := controller.registry.Get(candidate.Provider); candidate.Provider != "" && !ok {
 		writeError(w, http.StatusBadRequest, "unknown voice agent provider")
 		return

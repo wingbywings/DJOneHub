@@ -36,6 +36,8 @@ import (
 //go:embed web/*
 var webAssets embed.FS
 
+const defaultListenAddress = "0.0.0.0:7575"
+
 type receivedSMS struct {
 	Sender    string    `json:"sender"`
 	Content   string    `json:"content"`
@@ -236,7 +238,7 @@ func main() {
 	var listen string
 	var demo bool
 	flag.StringVar(&port, "port", "", "AT serial port; auto-detected when omitted")
-	flag.StringVar(&listen, "listen", "127.0.0.1:7575", "HTTP listen address")
+	flag.StringVar(&listen, "listen", defaultListenAddress, "HTTP listen address")
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
 	flag.Parse()
 

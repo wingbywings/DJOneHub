@@ -220,24 +220,6 @@
             <span>角色与通话指令</span>
             <textarea id="voice-agent-instructions" maxlength="12000" rows="5" placeholder="你是电话客服，请先确认来意，再用简洁自然的中文回答。"></textarea>
           </label>
-          <div class="agent-policy-grid settings-field-wide">
-            <label class="checkbox-field">
-              <input id="voice-agent-tools-enabled" type="checkbox">
-              <span><strong>允许受控电话工具</strong><small>读取状态和挂断自动执行；AI DTMF 暂时停用。</small></span>
-            </label>
-            <label class="checkbox-field">
-              <input id="voice-agent-audit-enabled" type="checkbox">
-              <span><strong>写入审计日志文件</strong><small>文本、状态和工具事件只写入本机日志，不在 Web 页面展示。</small></span>
-            </label>
-            <label class="checkbox-field">
-              <input id="voice-agent-redact-pii" type="checkbox">
-              <span><strong>审计内容自动脱敏</strong><small>遮盖电话、邮箱和长标识符，建议保持开启。</small></span>
-            </label>
-            <label class="checkbox-field">
-              <input id="voice-agent-auto-answer" type="checkbox">
-              <span><strong>自动接听来电</strong><small>延迟结束后会再次核对同一电话仍在振铃。</small></span>
-            </label>
-          </div>
           <label class="settings-field">
             <span>自动接听延迟（毫秒）</span>
             <input id="voice-agent-auto-answer-delay" type="number" min="250" max="30000" step="50" value="1200">

@@ -249,12 +249,11 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
     "provider": "qwen",
     "voice": "Cherry",
     "instructions": "你是电话客服，请用简洁自然的中文回答。",
-    "auto_answer": false,
     "auto_answer_delay_ms": 1200
   }'
 ```
 
-进入“来电”页面即可管理完整 Voice Agent Profile，并查看 Provider 就绪状态、实时转写、运行事件、待确认工具和脱敏审计。自动接听默认关闭；开启后会在延迟结束时再次确认同一来电仍在振铃，才会发送接听指令。完整的 OpenAI、MiniMax、STT 模型、Endpoint 覆盖和人工模式回退示例见 [`docs/voice-agent-first-batch.md`](docs/voice-agent-first-batch.md)。
+进入“来电”页面即可管理 Voice Agent Profile，并查看 Provider 就绪状态、实时转写、运行事件、待确认工具和审计。受控电话工具、审计日志和自动接听固定开启，审计内容自动脱敏固定关闭；自动接听会在延迟结束时再次确认同一来电仍在振铃，才会发送接听指令。完整的 OpenAI、MiniMax、STT 模型、Endpoint 覆盖和人工模式回退示例见 [`docs/voice-agent-first-batch.md`](docs/voice-agent-first-batch.md)。
 
 检测到来电或外呼状态后，AI Agent 会在电话接通前预先建立 Provider WebSocket；媒体通道就绪后会立即主动、简短地问候对方，不再额外等待 3 秒。未接、拒接、换来电或修改 AI Profile 时会回收预连接。该策略同时适用于 Qwen/OpenAI Realtime 和 MiniMax 级联模式。音色是 Provider 专属配置：OpenAI 推荐 `marin` 或 `cedar`，Qwen 默认 `Cherry`；Web 页面切换 Provider 时会自动修正已知的不兼容音色。
 
@@ -269,7 +268,7 @@ Qwen/OpenAI 的 Realtime PCM 输出固定使用 24 kHz，进入模块前由后�
 - 可分别配置主 Provider、MiniMax STT 降级和跨 Provider 降级；失败后使用指数退避熔断。
 - 本地音频宿主断线后自动重连，来电方重新说话时会清空未播放的 AI 音频。
 - 电话状态查询和挂断工具可自动执行；Voice Agent 的 DTMF 工具暂时停用，网页人工通话键盘不受影响。
-- 转写审计默认不持久化；启用后只保存文本、状态、录音元数据和工具事件，不保存音频，且默认脱敏。
+- 转写审计固定持久化，只保存文本、状态、录音元数据和工具事件，不保存音频；内容不会自动脱敏。
 
 ### 上网模式
 

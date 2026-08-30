@@ -52,9 +52,6 @@ export DJONEHUB_VOICE_AGENT_STT_PROVIDER=qwen
 export DJONEHUB_VOICE_AGENT_STT_MODEL=qwen3-asr-flash-realtime
 export DJONEHUB_VOICE_AGENT_FALLBACK_PROVIDER=openai
 export DJONEHUB_VOICE_AGENT_FALLBACK_STT_PROVIDER=openai
-export DJONEHUB_VOICE_AGENT_TOOLS_ENABLED=false
-export DJONEHUB_VOICE_AGENT_AUDIT_ENABLED=false
-export DJONEHUB_VOICE_AGENT_AUTO_ANSWER=false
 export DJONEHUB_VOICE_AGENT_AUTO_ANSWER_DELAY_MS=1200
 ```
 
@@ -114,10 +111,6 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
     "fallback_stt_provider": "openai",
     "stt_model": "qwen3-asr-flash-realtime",
     "instructions": "你是电话客服，请用简洁自然的中文回答。",
-    "tools_enabled": true,
-    "audit_enabled": true,
-    "redact_pii": true,
-    "auto_answer": true,
     "auto_answer_delay_ms": 1200
   }'
 ```
@@ -136,12 +129,12 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 Profile 不包含 API Key。单设备模式保存于 `~/Library/Application Support/DJOneHub/voice-agent.json`；多设备模式保存于 `~/Library/Application Support/DJOneHub/devices/<device-id>/voice-agent.json`。文件权限为 `0600`，更新采用临时文件加原子重命名。
 
-自动接听默认关闭。启用后，服务会等待 `auto_answer_delay_ms`，然后再次确认原通话仍处于 `incoming/waiting` 状态才发送 `ATA`；若来电已被人工接听、拒接或挂断，不会继续执行。
+受控电话工具、审计日志和自动接听固定开启，审计内容自动脱敏固定关闭。服务会等待 `auto_answer_delay_ms`，然后再次确认原通话仍处于 `incoming/waiting` 状态才发送 `ATA`；若来电已被人工接听、拒接或挂断，不会继续执行。
 
 ## Web、工具与审计
 
 - `GET /api/voice-agent/events` 使用 SSE 推送标准化转写、VAD、错误、工具和会话状态。
-- 审计内容不在 Web 页面展示；启用后只写入本机 `voice-agent-audit.jsonl`。
+- 审计内容不在 Web 页面展示，固定写入本机 `voice-agent-audit.jsonl`，且不会自动脱敏。
 - 审计文件为 `voice-agent-audit.jsonl`，权限 `0600`，达到 5 MiB 自动轮转；内存和文件各最多保留有界数据。
 - 每通由 AI 接听的来电会自动全程录音，并把双方最终转写独立归档到 `voice-agent-calls.json`（权限 `0600`，最多 100 通）；Web 的“AI 通话记录”按通展示内容，支持播放和下载最终 WAV。
 - 审计不保存 PCM。录音仍保存在 recordings 目录，通话归档只保存录音路径元数据。

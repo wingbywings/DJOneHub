@@ -702,10 +702,6 @@ function populateVoiceAgentForm(state) {
   $("#voice-agent-fallback-stt-provider").value = state.fallback_stt_provider || "";
   $("#voice-agent-stt-model").value = state.stt_model || "";
   $("#voice-agent-instructions").value = state.instructions || "";
-  $("#voice-agent-tools-enabled").checked = Boolean(state.tools_enabled);
-  $("#voice-agent-audit-enabled").checked = Boolean(state.audit_enabled);
-  $("#voice-agent-redact-pii").checked = state.redact_pii !== false;
-  $("#voice-agent-auto-answer").checked = Boolean(state.auto_answer);
   $("#voice-agent-auto-answer-delay").value = state.auto_answer_delay_ms || 1200;
   updateVoiceAgentFieldVisibility();
 }
@@ -770,10 +766,6 @@ async function saveVoiceAgentProfile({ forceDisabled = false } = {}) {
       fallback_stt_provider: $("#voice-agent-fallback-stt-provider").value,
       stt_model: $("#voice-agent-stt-model").value.trim(),
       instructions: $("#voice-agent-instructions").value.trim(),
-      tools_enabled: $("#voice-agent-tools-enabled").checked,
-      audit_enabled: $("#voice-agent-audit-enabled").checked,
-      redact_pii: $("#voice-agent-redact-pii").checked,
-      auto_answer: $("#voice-agent-auto-answer").checked,
       auto_answer_delay_ms: Number($("#voice-agent-auto-answer-delay").value || 1200),
     }) });
     voiceAgentFormDirty = false;

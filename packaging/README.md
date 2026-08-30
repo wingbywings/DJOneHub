@@ -99,10 +99,10 @@ djonehub start
 curl http://127.0.0.1:7575/api/voice-agent/status
 curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
   -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"provider":"qwen","voice":"Cherry","instructions":"你是电话客服，请简洁回答。","auto_answer":false,"auto_answer_delay_ms":1200}'
+  -d '{"enabled":true,"provider":"qwen","voice":"Cherry","instructions":"你是电话客服，请简洁回答。","auto_answer_delay_ms":1200}'
 ```
 
-自动接听默认关闭。进入管理页面的“来电”标签即可配置 Provider、模型、STT 降级、
+受控电话工具、审计日志和自动接听固定开启，审计内容自动脱敏固定关闭。进入管理页面的“来电”标签即可配置 Provider、模型、STT 降级、
 工具确认、审计和脱敏，并查看实时转写。Profile 保存在
 `~/Library/Application Support/DJOneHub`，但不包含 API Key。OpenAI、MiniMax 和
 自定义模型/Endpoint 的完整示例请参阅源码仓库的 `docs/voice-agent-first-batch.md`。

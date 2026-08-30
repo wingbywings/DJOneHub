@@ -197,21 +197,21 @@ func TestVoiceAgentCanBeExplicitlyDisabledWithoutCredentials(t *testing.T) {
 	}
 }
 
-func TestVoiceAgentProfilePersistsMiniMaxSTTSelection(t *testing.T) {
+func TestVoiceAgentProfilePersistsMiniMaxSTTSelectionAndFixedPolicies(t *testing.T) {
 	t.Setenv("MINIMAX_API_KEY", "minimax-secret")
 	t.Setenv("DASHSCOPE_API_KEY", "qwen-secret")
 	path := filepath.Join(t.TempDir(), "voice-agent.json")
 	instance := newDemoApp()
 	instance.voiceAgentSettingsPath = path
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPut, "/api/voice-agent/config", bytes.NewBufferString(`{"enabled":true,"provider":"minimax","fallback_provider":"openai","model":"MiniMax-M2.7-highspeed","voice":"male-qn-qingse","stt_provider":"qwen","fallback_stt_provider":"openai","stt_model":"qwen3-asr-flash-realtime","tools_enabled":true,"audit_enabled":true,"redact_pii":true,"auto_answer":true,"auto_answer_delay_ms":900}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/voice-agent/config", bytes.NewBufferString(`{"enabled":true,"provider":"minimax","fallback_provider":"openai","model":"MiniMax-M2.7-highspeed","voice":"male-qn-qingse","stt_provider":"qwen","fallback_stt_provider":"openai","stt_model":"qwen3-asr-flash-realtime","tools_enabled":false,"audit_enabled":false,"redact_pii":true,"auto_answer":false,"auto_answer_delay_ms":900}`))
 	instance.routes().ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 	reloaded := newVoiceAgentController(path)
 	state := reloaded.snapshot()
-	if !state.Enabled || state.Provider != "minimax" || state.FallbackProvider != "openai" || state.STTProvider != "qwen" || state.FallbackSTT != "openai" || state.STTModel != "qwen3-asr-flash-realtime" || !state.ToolsEnabled || !state.AuditEnabled || !state.RedactPII || !state.AutoAnswer || state.AutoAnswerDelayMS != 900 {
+	if !state.Enabled || state.Provider != "minimax" || state.FallbackProvider != "openai" || state.STTProvider != "qwen" || state.FallbackSTT != "openai" || state.STTModel != "qwen3-asr-flash-realtime" || !state.ToolsEnabled || !state.AuditEnabled || state.RedactPII || !state.AutoAnswer || state.AutoAnswerDelayMS != 900 {
 		t.Fatalf("reloaded state = %#v", state)
 	}
 	data, err := os.ReadFile(path)
