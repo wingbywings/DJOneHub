@@ -9,21 +9,28 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/iniwex5/vohive/internal/callcontrol"
 )
 
 const defaultCallPollInterval = 3 * time.Second
 
 type callRecord struct {
-	ID        string     `json:"id"`
-	Index     int        `json:"index"`
-	Direction string     `json:"direction"`
-	State     string     `json:"state"`
-	Number    string     `json:"number,omitempty"`
-	StartedAt time.Time  `json:"started_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
-	EndedAt   *time.Time `json:"ended_at,omitempty"`
-	Missed    bool       `json:"missed"`
-	AIHandled bool       `json:"ai_handled,omitempty"`
+	Revision     uint64                    `json:"revision"`
+	ControlState string                    `json:"control_state,omitempty"`
+	ControlOwner string                    `json:"control_owner,omitempty"`
+	UUID         string                    `json:"call_uuid,omitempty"`
+	Route        callcontrol.RouteSnapshot `json:"route"`
+	ID           string                    `json:"id"`
+	Index        int                       `json:"index"`
+	Direction    string                    `json:"direction"`
+	State        string                    `json:"state"`
+	Number       string                    `json:"number,omitempty"`
+	StartedAt    time.Time                 `json:"started_at"`
+	UpdatedAt    time.Time                 `json:"updated_at"`
+	EndedAt      *time.Time                `json:"ended_at,omitempty"`
+	Missed       bool                      `json:"missed"`
+	AIHandled    bool                      `json:"ai_handled,omitempty"`
 }
 
 type parsedCall struct {
@@ -156,12 +163,31 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 
 	var notify *callRecord
 	var finishedAIRecord *callRecord
+	a.callRouteMu.Lock()
+	agent := a.ensureVoiceAgent().snapshot()
+	remote, _ := a.ensureRemoteCalls().snapshot()
 	a.callMu.Lock()
 	previousState := ""
+	var previous *callRecord
 	if a.activeCall != nil {
+		a.ensureCallIdentityLocked()
+		copy := *a.activeCall
+		previous = &copy
 		previousState = a.activeCall.State
 	}
-	if selected == nil {
+	replacement := selected != nil && a.activeCall != nil && ((a.activeCall.Index != selected.Index && !(a.activeCall.Index == 0 && a.activeCall.Direction == "outgoing" && selected.Direction == "outgoing")) ||
+		a.activeCall.Direction != selected.Direction ||
+		(a.activeCall.Number != "" && selected.Number != "" && a.activeCall.Number != selected.Number) ||
+		(a.activeCall.State == "active" && selected.State == "incoming"))
+	// A remote outgoing placeholder precedes ATD. An empty CLCC poll during
+	// media/voice preparation must not cancel the reserved UUID. The short
+	// post-write grace lets the modem publish its new index on a later poll.
+	if selected == nil && a.activeCall != nil && a.activeCall.Direction == "outgoing" && a.activeCall.ControlOwner == "remote" && (a.activeCall.ControlState == "dial_preparing" || (a.activeCall.ControlState == "dial_pending" && a.activeCall.Index == 0 && now.Sub(a.activeCall.UpdatedAt) < 5*time.Second)) {
+		a.callMu.Unlock()
+		a.callRouteMu.Unlock()
+		return
+	}
+	if selected == nil || replacement {
 		if a.activeCall != nil {
 			ended := now
 			a.activeCall.EndedAt = &ended
@@ -179,22 +205,35 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 			if completed.AIHandled {
 				finishedAIRecord = &completed
 			}
+			a.cancelCallWorkLocked()
 			a.activeCall = nil
 		}
-		a.callMu.Unlock()
-		if finishedAIRecord != nil {
-			a.ensureVoiceAgent().finishCallRecord(finishedAIRecord.ID, now)
+		if selected == nil {
+			a.callMu.Unlock()
+			a.callRouteMu.Unlock()
+			if finishedAIRecord != nil {
+				a.ensureVoiceAgent().finishCallRecord(finishedAIRecord.ID, now)
+			}
+			a.syncVoiceAgentPreparation()
+			if notify != nil {
+				a.forwardCallBark(*notify)
+			}
+			a.syncVoiceRouteForCall(previous, nil)
+			return
 		}
-		a.syncVoiceAgentPreparation()
-		if notify != nil {
-			a.forwardCallBark(*notify)
-		}
-		a.syncVoiceRouteForCall(previousState, "")
-		return
 	}
 
-	if a.activeCall == nil || a.activeCall.Index != selected.Index || a.activeCall.Direction != selected.Direction {
+	if a.activeCall == nil {
+		a.cancelCallWorkLocked()
+		// Remote answering applies only to incoming calls; preserve local/AI
+		// outgoing behavior until the separate remote dialing feature exists.
+		if selected.Direction != "incoming" {
+			remote.Enabled = false
+		}
 		a.activeCall = &callRecord{
+			Revision:  1,
+			UUID:      callcontrol.NewCallUUID(),
+			Route:     callcontrol.SelectRoute(agent.Enabled, agent.Revision, remote),
 			ID:        fmt.Sprintf("%d-%d", now.UnixMilli(), selected.Index),
 			Index:     selected.Index,
 			Direction: selected.Direction,
@@ -204,42 +243,82 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 			UpdatedAt: now,
 		}
 	} else {
+		if a.activeCall.State != selected.State || (selected.Number != "" && a.activeCall.Number != selected.Number) {
+			a.activeCall.Revision++
+		}
+		if a.activeCall.Index != selected.Index {
+			a.activeCall.Index = selected.Index
+			a.activeCall.Revision++
+		}
 		a.activeCall.State = selected.State
 		a.activeCall.UpdatedAt = now
 		if selected.Number != "" {
 			a.activeCall.Number = selected.Number
 		}
 	}
+	a.ensureCallIdentityLocked()
+	if selected.State == "active" && (a.activeCall.ControlState == "answering" || a.activeCall.ControlState == "answer_pending") {
+		a.activeCall.ControlState = "answered"
+	}
+	current := *a.activeCall
 	a.callMu.Unlock()
+	a.callRouteMu.Unlock()
+	if finishedAIRecord != nil {
+		a.ensureVoiceAgent().finishCallRecord(finishedAIRecord.ID, now)
+	}
+	if notify != nil {
+		a.forwardCallBark(*notify)
+	}
+	if replacement {
+		previousState = ""
+	}
 	a.syncVoiceAgentPreparation()
-	a.syncVoiceRouteForCall(previousState, selected.State)
+	a.syncVoiceRouteForCall(previous, &current)
 	a.syncVoiceAgentRecording(previousState, selected.State)
 	a.scheduleVoiceAgentAutoAnswer(previousState, selected.State)
+	a.dispatchRemoteIncoming()
 }
 
-func (a *app) syncVoiceRouteForCall(previousState, currentState string) {
-	if previousState == "active" && currentState != "active" {
+func (a *app) syncVoiceRouteForCall(previous, current *callRecord) {
+	changed := previous != nil && (current == nil || current.UUID != previous.UUID)
+	if previous != nil && (changed || (previous.State == "active" && current.State != "active")) {
 		a.resetAudioHostIntent()
 		if a.demo || a.usbLocator == nil {
-			return
+			if changed {
+				a.releaseCallAudio(previous.UUID)
+			}
+		} else {
+			go a.stopModuleVoiceRouteForCall(previous.UUID)
 		}
-		go a.stopModuleVoiceRoute()
+	}
+	if current == nil || a.demo || a.usbLocator == nil {
 		return
 	}
-	if a.demo || a.usbLocator == nil {
-		return
-	}
-	if currentState == "active" && previousState != "active" {
+	if current.State == "active" && (previous == nil || changed || previous.State != "active") {
 		go func() {
-			if err := a.ensureModuleVoiceRoute(); err != nil {
+			if err := a.ensureModuleVoiceRouteForCall(current.UUID); err != nil {
 				log.Printf("module voice route start failed: %v", err)
 			}
 		}()
 		return
 	}
-	if previousState == "" && (currentState == "incoming" || currentState == "waiting" || currentState == "dialing" || currentState == "alerting") {
+	if (previous == nil || changed) && (current.State == "incoming" || current.State == "dialing" || current.State == "alerting") {
+		a.callMu.RLock()
+		callCtx := a.callContext
+		if a.activeCall == nil || a.activeCall.UUID != current.UUID {
+			callCtx = nil
+		}
+		a.callMu.RUnlock()
+		if callCtx == nil {
+			return
+		}
 		go func() {
-			if err := a.prepareModuleVoiceSessionBudgeted(90 * time.Second); err != nil {
+			ctx, cancel := context.WithTimeout(callCtx, 90*time.Second)
+			defer cancel()
+			if !a.callMatches(current.UUID) {
+				return
+			}
+			if err := a.prepareModuleVoiceSessionForCall(ctx, current.UUID); err != nil {
 				log.Printf("module voice preflight did not finish before call activation: %v", err)
 			}
 		}()
@@ -249,11 +328,12 @@ func (a *app) syncVoiceRouteForCall(previousState, currentState string) {
 // syncVoiceAgentRecording marks incoming calls whose media is handled by the
 // Voice Agent and enables full-call recording as soon as they become active.
 func (a *app) syncVoiceAgentRecording(previousState, currentState string) {
-	if previousState == "active" || currentState != "active" || !a.ensureVoiceAgent().snapshot().Enabled {
+	agent := a.ensureVoiceAgent().snapshot()
+	if previousState == "active" || currentState != "active" || !agent.Enabled {
 		return
 	}
 	a.callMu.Lock()
-	if a.activeCall == nil || a.activeCall.State != "active" || a.activeCall.Direction != "incoming" {
+	if !callUsesAgent(a.activeCall, agent) || a.activeCall.State != "active" || a.activeCall.Direction != "incoming" {
 		a.callMu.Unlock()
 		return
 	}
@@ -314,134 +394,20 @@ func (a *app) callStatus(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-func (a *app) rejectCall(w http.ResponseWriter, _ *http.Request) {
-	if !a.callStateAllows("incoming", "waiting") {
-		writeError(w, http.StatusConflict, "当前没有可拒接的来电")
-		return
-	}
-	a.operationMu.Lock()
-	defer a.operationMu.Unlock()
-	if a.demo {
-		a.applyCallPoll(nil, time.Now())
-		writeJSON(w, http.StatusOK, map[string]bool{"rejected": true})
-		return
-	}
-	response, err := a.runATCommand("AT+CHUP", 5*time.Second)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	if err := validateCallATResponse(response); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"rejected": true, "response": response})
+func (a *app) rejectCall(w http.ResponseWriter, r *http.Request) {
+	a.legacyCallCommand(w, r, "reject")
 }
 
-func (a *app) answerCall(w http.ResponseWriter, _ *http.Request) {
-	if !a.callStateAllows("incoming", "waiting") {
-		writeError(w, http.StatusConflict, "当前没有可接听的来电")
-		return
-	}
-	response, err := a.answerCurrentCall()
-	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"answered": true, "response": response})
+func (a *app) answerCall(w http.ResponseWriter, r *http.Request) {
+	a.legacyCallCommand(w, r, "answer")
 }
 
-func (a *app) answerCurrentCall() (string, error) {
-	if !a.callStateAllows("incoming", "waiting") {
-		return "", fmt.Errorf("当前没有可接听的来电")
-	}
-	a.callMu.Lock()
-	if time.Since(a.lastAnswerAt) < 2*time.Second {
-		a.callMu.Unlock()
-		return "", nil
-	}
-	a.lastAnswerAt = time.Now()
-	a.callMu.Unlock()
-	if a.demo {
-		a.setActiveCallState("active", time.Now())
-		return "", nil
-	}
-	if err := a.prepareModuleVoiceSessionBudgeted(20 * time.Second); err != nil {
-		return "", fmt.Errorf("接听前语音运行时准备失败：%w", err)
-	}
-	a.operationMu.Lock()
-	defer a.operationMu.Unlock()
-	response, err := a.runATCommand("ATA", 5*time.Second)
-	if err != nil {
-		return "", err
-	}
-	if err := validateCallATResponse(response); err != nil {
-		return "", err
-	}
-	return response, nil
-}
-
-func (a *app) hangupCall(w http.ResponseWriter, _ *http.Request) {
-	if !a.hasActiveCall() {
-		writeError(w, http.StatusConflict, "当前没有可挂断的通话")
-		return
-	}
-	a.operationMu.Lock()
-	defer a.operationMu.Unlock()
-	if a.demo {
-		a.applyCallPoll(nil, time.Now())
-		writeJSON(w, http.StatusOK, map[string]bool{"hung_up": true})
-		return
-	}
-	response, err := a.runATCommand("ATH", 5*time.Second)
-	if err != nil || validateCallATResponse(response) != nil {
-		response, err = a.runATCommand("AT+CHUP", 5*time.Second)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-	}
-	if err := validateCallATResponse(response); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"hung_up": true, "response": response})
+func (a *app) hangupCall(w http.ResponseWriter, r *http.Request) {
+	a.legacyCallCommand(w, r, "hangup")
 }
 
 func (a *app) dtmfCall(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Digit string `json:"digit"`
-	}
-	if !decodeJSON(w, r, &body) {
-		return
-	}
-	if len(body.Digit) != 1 || !strings.ContainsRune("0123456789*#", rune(body.Digit[0])) {
-		writeError(w, http.StatusBadRequest, "DTMF 仅支持 0-9、* 和 #")
-		return
-	}
-	if !a.callStateAllows("active") {
-		writeError(w, http.StatusConflict, "DTMF 只能在已接通的通话中发送")
-		return
-	}
-	a.operationMu.Lock()
-	defer a.operationMu.Unlock()
-	if a.demo {
-		writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
-		return
-	}
-	response, err := a.runATCommand(fmt.Sprintf("AT+VTS=\"%s\"", body.Digit), 3*time.Second)
-	if err != nil || validateCallATResponse(response) != nil {
-		response, err = a.runATCommand(fmt.Sprintf("AT+CLDTMF=1,%s", body.Digit), 3*time.Second)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
-			return
-		}
-	}
-	if err := validateCallATResponse(response); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"sent": true})
+	a.legacyCallCommand(w, r, "dtmf")
 }
 
 func (a *app) dialCall(w http.ResponseWriter, r *http.Request) {
@@ -521,14 +487,20 @@ func (a *app) setActiveCallState(state string, now time.Time) {
 		return
 	}
 	previousState := a.activeCall.State
+	if previousState != state {
+		a.activeCall.Revision++
+	}
 	a.activeCall.State = state
+	if state == "active" && a.activeCall.ControlState == "answering" {
+		a.activeCall.ControlState = "answered"
+	}
 	a.activeCall.UpdatedAt = now
 	a.callMu.Unlock()
 	a.syncVoiceAgentRecording(previousState, state)
 }
 
 func validateCallATResponse(response string) error {
-	if atResponseIsError(response) {
+	if atResponseIsError("\n" + strings.TrimSpace(response) + "\n") {
 		return fmt.Errorf("模块拒绝通话命令（ERROR）")
 	}
 	return nil

@@ -88,6 +88,9 @@ int mavo_uac_probe_start_silence(MaVoUACProbe *probe);
  * uplink frames queued, the output callback writes silence, so the legacy
  * start_silence entry point remains a compatible diagnostic wrapper. */
 int mavo_uac_probe_start_pcm_bridge(MaVoUACProbe *probe);
+/* Remote mode requests a <=20 ms callback before creating IOProcs. The
+ * original per-device buffer size is restored after confirmed stop. */
+int mavo_uac_probe_start_remote_pcm_bridge(MaVoUACProbe *probe);
 int mavo_uac_probe_stop(MaVoUACProbe *probe);
 
 /* Mono 8 kHz PCM16 frame APIs. These functions never call a CoreAudio
@@ -99,6 +102,12 @@ size_t mavo_uac_probe_read_downlink_pcm16(
     int16_t *frames,
     size_t maximum_frames
 );
+int mavo_uac_probe_remote_period_supported(const MaVoUACProbe *probe);
+
+size_t mavo_uac_probe_read_remote_pcm16(MaVoUACProbe *probe, int16_t *frames, size_t maximum, uint64_t *dropped);
+
+size_t mavo_uac_probe_write_remote_pcm16(MaVoUACProbe *probe, const int16_t *frames, size_t count);
+
 size_t mavo_uac_probe_write_uplink_pcm16(
     MaVoUACProbe *probe,
     const int16_t *frames,
@@ -128,4 +137,3 @@ const char *mavo_uac_probe_last_error(const MaVoUACProbe *probe);
 #endif
 
 #endif
-

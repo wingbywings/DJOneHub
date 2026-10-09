@@ -2,12 +2,14 @@ import AVFoundation
 import CModemBridge
 import CUACProbe
 import Foundation
+import RemoteAudio
 
 /// Bridges raw PCM on USB interface 1 to the Mac microphone and speaker.
 /// The modem side can be QPCMV option 0 or MaVo's QDC507 PCM helper.
 /// USB waits and sample-rate conversion never run on the CoreAudio render thread.
 final class VoiceAudioService {
     var onError: ((String) -> Void)?
+    var onRemoteInput: ((Data, UInt64) -> Void)?
     var onAgentInput: ((Data) -> Void)?
     var onAgentOutputPlayed: (() -> Void)?
 
@@ -28,11 +30,17 @@ final class VoiceAudioService {
     private var activeUAC: OpaquePointer?
     private var engine: AVAudioEngine?
     private var player: AVAudioPlayerNode?
+    // Accessed only on playbackQueue. Some Bluetooth routes accept
+    // VoiceProcessingIO at startup but stop the engine during reconfiguration.
+    private var localVoiceProcessingAllowed = true
     private var running = false
     private var mediaEnabled = false
     private var pcmFlowReady = true
     private var muted = false
     private var agentMode = false
+    private var remoteMode = false
+    private let remoteAudioLock = NSLock()
+    private var remoteQueue = RemotePCMQueue()
     private var agentAudioBytes = Data()
     private var agentAudioReadOffset = 0
     private var agentPlayoutStarted = false
@@ -339,8 +347,8 @@ final class VoiceAudioService {
             }
 
             self.resetBuffersSynchronously()
-            let useAgentMode = self.stateLock.withLock { self.agentMode }
-            if !useAgentMode {
+            let usesLocalAudio = self.stateLock.withLock { !self.agentMode && !self.remoteMode }
+            if usesLocalAudio {
                 do {
                     voiceProcessingEnabled = try self.startAudioEngine(session: session)
                     audioEngineStarted = true
@@ -354,7 +362,9 @@ final class VoiceAudioService {
                 return
             }
 
-            let startResult = mavo_uac_probe_start_pcm_bridge(uac)
+            let startResult = self.stateLock.withLock({ self.remoteMode })
+                ? mavo_uac_probe_start_remote_pcm_bridge(uac)
+                : mavo_uac_probe_start_pcm_bridge(uac)
             guard startResult == MAVO_UAC_OK else {
                 failStart(self.lastUACError(uac, fallback: "无法启动模块 UAC PCM 通道。"))
                 return
@@ -364,6 +374,10 @@ final class VoiceAudioService {
                 return
             }
 
+            if self.stateLock.withLock({ self.remoteMode }), mavo_uac_probe_remote_period_supported(uac) == 0 {
+                failStart("远程音频需要不超过 20 ms 的 UAC 回调；当前设备缓冲周期尚未满足要求。")
+                return
+            }
             mavo_uac_probe_flush_pcm(uac)
             self.stateLock.withLock {
                 self.running = true
@@ -423,6 +437,7 @@ final class VoiceAudioService {
 
     func setMediaEnabled(_ enabled: Bool) {
         stateLock.withLock { mediaEnabled = enabled }
+        if !enabled { remoteAudioLock.withLock { remoteQueue.clear() } }
         if !enabled { clearUploadBytes() }
     }
 
@@ -434,11 +449,38 @@ final class VoiceAudioService {
     func setMuted(_ value: Bool) {
         stateLock.withLock { muted = value }
         if value { clearUploadBytes() }
+        remoteAudioLock.withLock { remoteQueue.clear() }
     }
 
     func configureAgentMode(_ enabled: Bool) {
-        stateLock.withLock { agentMode = enabled }
+        stateLock.withLock { agentMode = enabled; remoteMode = false }
+        remoteAudioLock.withLock { remoteQueue.clear() }
         clearAgentOutput()
+    }
+
+    func configureRemoteMode(_ enabled: Bool) {
+        stateLock.withLock { remoteMode = enabled; agentMode = false }
+        remoteAudioLock.withLock { remoteQueue.clear() }
+        clearAgentOutput()
+    }
+
+    func enqueueRemoteOutput(_ pcm: Data) {
+        stateLock.withLock {
+            guard remoteMode, !muted, mediaEnabled else { return }
+            remoteAudioLock.withLock { remoteQueue.append(pcm, now: DispatchTime.now().uptimeNanoseconds) }
+        }
+    }
+
+    private func writeQueuedRemoteAudio(to uac: OpaquePointer) -> Data {
+        remoteAudioLock.withLock {
+            let pcm = remoteQueue.peek(now: DispatchTime.now().uptimeNanoseconds)
+            guard !pcm.isEmpty else { return Data() }
+            let bytes = Array(pcm)
+            let samples = stride(from: 0, to: bytes.count, by: 2).map { Int16(bitPattern: UInt16(bytes[$0]) | UInt16(bytes[$0 + 1]) << 8) }
+            let accepted = samples.withUnsafeBufferPointer { mavo_uac_probe_write_remote_pcm16(uac, $0.baseAddress, $0.count) }
+            remoteQueue.consume(samples: Int(accepted))
+            return Data(pcm.prefix(Int(accepted) * 2))
+        }
     }
 
     func enqueueAgentOutput(_ pcm: Data) {
@@ -583,9 +625,11 @@ final class VoiceAudioService {
             let input = engine.inputNode
             let voiceProcessingEnabled: Bool
             do {
-                try input.setVoiceProcessingEnabled(true)
-                input.isVoiceProcessingBypassed = false
-                input.isVoiceProcessingAGCEnabled = true
+                if localVoiceProcessingAllowed {
+                    try input.setVoiceProcessingEnabled(true)
+                    input.isVoiceProcessingBypassed = false
+                    input.isVoiceProcessingAGCEnabled = true
+                }
                 voiceProcessingEnabled = input.isVoiceProcessingEnabled
             } catch {
                 // Some split Bluetooth/USB device combinations cannot enter
@@ -623,6 +667,17 @@ final class VoiceAudioService {
             self.player = nil
             self.engine = nil
             scheduledPlaybackFrames = 0
+        }
+    }
+
+    private func localAudioEngineError(session: UInt64) -> String? {
+        playbackQueue.sync {
+            guard isCurrentSession(session), let engine, !engine.isRunning else { return nil }
+            let wasVoiceProcessingAllowed = localVoiceProcessingAllowed
+            localVoiceProcessingAllowed = false
+            return wasVoiceProcessingAllowed
+                ? "Mac 音频引擎在设备重配置后停止；将关闭 VoiceProcessing 并重建音频通道。"
+                : "Mac 音频引擎已停止；将按当前输入/输出设备重建音频通道。"
         }
     }
 
@@ -695,14 +750,19 @@ final class VoiceAudioService {
         var outputProgressAt = inputProgressAt
         var mediaWasEnabled = false
         var muteWasEnabled = false
+        var nextLocalEngineCheck: UInt64 = 0
 
         while isActiveSession(session) {
             let state = stateLock.withLock {
-                (sessionGeneration == session && running, mediaEnabled, muted, agentMode)
+                (sessionGeneration == session && running, mediaEnabled, muted, agentMode, remoteMode)
             }
             guard state.0 else { break }
 
             let now = DispatchTime.now().uptimeNanoseconds
+            if !state.3 && !state.4 && now >= nextLocalEngineCheck {
+                nextLocalEngineCheck = now + 250_000_000
+                if let error = localAudioEngineError(session: session) { return error }
+            }
             guard state.1 else {
                 clearUploadBytes()
                 recordingUplinkBytes.removeAll(keepingCapacity: true)
@@ -734,7 +794,9 @@ final class VoiceAudioService {
             muteWasEnabled = state.2
 
             var uplinkPCM = Data()
-            if state.3 {
+            if state.4 {
+                if !state.2 { uplinkPCM = writeQueuedRemoteAudio(to: uac) }
+            } else if state.3 {
                 if !state.2 {
                     uplinkPCM = writeQueuedAgentAudio(to: uac, scratch: &uplinkSamples)
                 }
@@ -755,8 +817,12 @@ final class VoiceAudioService {
             }
             appendRecordingUplink(uplinkPCM, to: &recordingUplinkBytes)
 
+            var droppedCapture: UInt64 = 0
             let downlinkFrames = downlinkSamples.withUnsafeMutableBufferPointer { samples in
-                Int(mavo_uac_probe_read_downlink_pcm16(
+                if state.4 {
+                    return Int(mavo_uac_probe_read_remote_pcm16(uac, samples.baseAddress, samples.count, &droppedCapture))
+                }
+                return Int(mavo_uac_probe_read_downlink_pcm16(
                     uac,
                     samples.baseAddress,
                     samples.count
@@ -768,7 +834,9 @@ final class VoiceAudioService {
                 let pcm = downlinkSamples.withUnsafeBytes { bytes in
                     Data(bytes: bytes.baseAddress!, count: byteCount)
                 }
-                if state.3 {
+                if state.4 {
+                    onRemoteInput?(pcm, droppedCapture)
+                } else if state.3 {
                     onAgentInput?(pcm)
                 } else {
                     schedulePlayback(pcm, session: session)
@@ -777,8 +845,10 @@ final class VoiceAudioService {
                     byteCount: byteCount,
                     from: &recordingUplinkBytes
                 )
-                recorder.enqueue(far: pcm, near: recordedUplink)
+                if !state.4 { recorder.enqueue(far: pcm, near: recordedUplink) }
             }
+
+            if state.4 && downlinkFrames == 0 && droppedCapture > 0 { onRemoteInput?(Data(), droppedCapture) }
 
             if mavo_uac_probe_is_running(uac) == 0 {
                 return lastUACError(uac, fallback: "模块 UAC IOProc 已停止。")
@@ -1085,6 +1155,7 @@ final class VoiceAudioService {
 
     private func resetBuffersSynchronously() {
         clearUploadBytes()
+        remoteAudioLock.withLock { remoteQueue.clear() }
         playbackQueue.sync {
             scheduledPlaybackFrames = 0
         }

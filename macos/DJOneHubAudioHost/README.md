@@ -22,6 +22,13 @@ swift run --package-path macos/DJOneHubAudioHost \
 首次运行需要允许麦克风权限。录音文件保存在
 `~/Library/Application Support/DJOneHub/recordings`。
 
+人工模式会检查 Mac `AVAudioEngine` 的实际运行状态。蓝牙设备切换采样率或
+VoiceProcessing 初始化后，系统可能停止音频引擎，而模块 UAC 仍在运行；
+宿主现在会检测这种状态、释放旧通道并自动重建。首次遇到该情况后，当前
+宿主进程会使用普通音频引擎，避免反复触发 VoiceProcessing 故障；该回退
+不包含系统回声消除，使用耳机联调更合适。具体错误会输出到宿主终端。
+源码更新后需要重新构建并重启宿主，已运行的旧进程不会自动加载新代码。
+
 云端 API Key、模型和 Voice Agent Profile 均由 Go 后端管理，音频宿主不读取或保存
 这些密钥。它每 500 ms 拉取媒体模式；在人工/Agent 模式之间切换时会重建当前媒体
 通道。Agent WebSocket URL 包含后端生成的临时 token，只绑定本机后端，并且同一设备

@@ -23,20 +23,24 @@ type audioHostState struct {
 }
 
 type audioHostConfigResponse struct {
-	DeviceID      string `json:"device_id"`
-	VendorID      uint16 `json:"vendor_id"`
-	ProductID     uint16 `json:"product_id"`
-	LocationID    uint32 `json:"location_id"`
-	RouteReady    bool   `json:"route_ready"`
-	RouteError    string `json:"route_error,omitempty"`
-	CallID        string `json:"call_id,omitempty"`
-	CallActive    bool   `json:"call_active"`
-	Muted         bool   `json:"muted"`
-	Recording     bool   `json:"recording"`
-	MediaMode     string `json:"media_mode"`
-	AgentProvider string `json:"agent_provider,omitempty"`
-	AgentRevision uint64 `json:"agent_revision,omitempty"`
-	AgentMediaURL string `json:"agent_media_url,omitempty"`
+	DeviceID         string `json:"device_id"`
+	VendorID         uint16 `json:"vendor_id"`
+	ProductID        uint16 `json:"product_id"`
+	LocationID       uint32 `json:"location_id"`
+	RouteReady       bool   `json:"route_ready"`
+	RouteError       string `json:"route_error,omitempty"`
+	CallID           string `json:"call_id,omitempty"`
+	CallActive       bool   `json:"call_active"`
+	Muted            bool   `json:"muted"`
+	Recording        bool   `json:"recording"`
+	MediaMode        string `json:"media_mode"`
+	AgentProvider    string `json:"agent_provider,omitempty"`
+	AgentRevision    uint64 `json:"agent_revision,omitempty"`
+	AgentMediaURL    string `json:"agent_media_url,omitempty"`
+	CallUUID         string `json:"call_uuid,omitempty"`
+	MediaGeneration  uint64 `json:"media_generation,omitempty"`
+	RemoteMediaURL   string `json:"remote_media_url,omitempty"`
+	RemoteMediaToken string `json:"remote_media_token,omitempty"`
 }
 
 func (a *app) audioHostSnapshot() audioHostState {
@@ -106,18 +110,35 @@ func (a *app) audioHostRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) audioHostConfig(w http.ResponseWriter, _ *http.Request) {
+	config, err := a.buildAudioHostConfig()
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, config)
+}
+
+// Public callers receive no remote credentials. The authenticated native
+// control listener adds those only after checking the exact remote owner.
+func (a *app) buildAudioHostConfig() (audioHostConfigResponse, error) {
 	a.operationMu.RLock()
 	defer a.operationMu.RUnlock()
 	if a.usbLocator == nil || a.usbLocator.LocationID == 0 {
-		writeError(w, http.StatusConflict, "当前模块缺少可验证的 CoreAudio Location ID")
-		return
+		return audioHostConfigResponse{}, errors.New("当前模块缺少可验证的 CoreAudio Location ID")
 	}
+	agent := a.ensureVoiceAgent().snapshot()
 	a.callMu.RLock()
 	callID := ""
+	callUUID := ""
 	callActive := false
+	remoteOwned := false
 	if a.activeCall != nil {
 		callID = a.activeCall.ID
+		callUUID = a.activeCall.UUID
 		callActive = a.activeCall.State == "active"
+		remoteOwned = a.activeCall.ControlOwner == "remote"
+		// Media follows the call's route, not a later provider configuration.
+		agent.Enabled = callUsesAgent(a.activeCall, agent)
 	}
 	a.callMu.RUnlock()
 	a.moduleVoiceMu.Lock()
@@ -128,7 +149,6 @@ func (a *app) audioHostConfig(w http.ResponseWriter, _ *http.Request) {
 	wantMuted := a.audioHost.WantMuted
 	wantRecording := a.audioHost.WantRecording
 	a.audioHostMu.RUnlock()
-	agent := a.ensureVoiceAgent().snapshot()
 	agentMediaURL := ""
 	if agent.Enabled {
 		agentMediaURL = "/api/calls/audio/agent/media?token=" + url.QueryEscape(a.ensureVoiceAgent().mediaToken)
@@ -140,14 +160,20 @@ func (a *app) audioHostConfig(w http.ResponseWriter, _ *http.Request) {
 		DeviceID: a.deviceID, VendorID: a.usbLocator.VendorID, ProductID: a.usbLocator.ProductID,
 		LocationID: a.usbLocator.LocationID, RouteReady: routeReady, RouteError: routeError,
 		CallID: callID, CallActive: callActive, Muted: wantMuted, Recording: wantRecording,
+		CallUUID:  callUUID,
 		MediaMode: agent.MediaMode(), AgentProvider: agent.Provider, AgentMediaURL: agentMediaURL,
 		AgentRevision: agent.Revision,
 	}
-	if err := validateAudioHostConfig(config); err != nil {
-		writeError(w, http.StatusConflict, err.Error())
-		return
+	if remoteOwned {
+		// Until the authenticated native control channel supplies remote media
+		// credentials, the host must fail closed, never open Mac mic/speakers.
+		config.MediaMode, config.AgentMediaURL = "remote", ""
+		config.Recording = false
 	}
-	writeJSON(w, http.StatusOK, config)
+	if err := validateAudioHostConfig(config); err != nil {
+		return audioHostConfigResponse{}, err
+	}
+	return config, nil
 }
 
 func (a *app) audioHostMute(w http.ResponseWriter, r *http.Request) {

@@ -117,7 +117,7 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 把 `stt_provider` 改为 `openai`、`stt_model` 改为 `gpt-live-transcribe`，即可让 MiniMax 使用 OpenAI STT。
 
-随时回退人工麦克风：
+模块空闲时关闭 AI，后续通话使用人工接听（若配置了远程接听，则选择远程分支）：
 
 ```bash
 curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
@@ -125,7 +125,7 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
   -d '{"enabled":false,"provider":"qwen"}'
 ```
 
-切换只改变媒体源，不改动现有接听、拨号、挂断、DTMF 和 UAC 路由逻辑。已接通通话会由 Swift 宿主在下一次 500 ms 配置轮询时重建媒体通道。
+接听方式在通话出现时固定；振铃或通话期间修改 AI 开关会返回 `409 route_locked_by_call`，需在通话结束后修改。保持 AI 开关不变时，仍允许修改 AI Provider/音色等 Profile；已接通的 AI 通话由 Swift 宿主在下一次 500 ms 配置轮询时重建媒体通道。
 
 Profile 不包含 API Key。单设备模式保存于 `~/Library/Application Support/DJOneHub/voice-agent.json`；多设备模式保存于 `~/Library/Application Support/DJOneHub/devices/<device-id>/voice-agent.json`。文件权限为 `0600`，更新采用临时文件加原子重命名。
 

@@ -27,6 +27,7 @@ import (
 
 	"github.com/damonto/euicc-go/driver"
 	"github.com/iniwex5/vohive/internal/backend"
+	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/config"
 	"github.com/iniwex5/vohive/internal/esim"
 	"github.com/iniwex5/vohive/internal/modem"
@@ -107,6 +108,9 @@ type app struct {
 	smsLastPoll      time.Time
 	smsLastPollError string
 
+	// callRouteMu serializes route configuration with call creation. Acquire it
+	// before callMu; release before performing call lifecycle side effects.
+	callRouteMu       sync.Mutex
 	callMu            sync.RWMutex
 	activeCall        *callRecord
 	callHistory       []callRecord
@@ -116,6 +120,24 @@ type app struct {
 	callConfigured    bool
 	lastAnswerAt      time.Time
 	lastDialAt        time.Time
+	callCommands      callcontrol.Commands
+	callContext       context.Context
+	callCancel        context.CancelFunc
+	answerCancel      context.CancelFunc
+	answerGeneration  uint64
+	controlGeneration uint64
+	callAudioOnce     sync.Once
+	callAudio         *callcontrol.AudioArbiter
+	callAudioLease    callcontrol.AudioLease
+	prepareCallVoice  func(context.Context) error
+	callAT            func(string, time.Duration) (string, error)
+	remoteCallOwner   *remoteCallOwner // guarded by callMu; never supplied by JSON
+	remoteSessionMu   sync.Mutex
+	remoteSession     *remoteSessionHandle
+	remoteAttemptUUID string                            // guarded by callMu
+	remoteDispatch    func(context.Context, callRecord) // set before polling
+
+	remoteConnectionState func() string // set before polling
 
 	moduleSetupMu        sync.RWMutex
 	moduleSetup          moduleSetupStatus
@@ -126,6 +148,7 @@ type app struct {
 	moduleVoiceMu        sync.Mutex
 	moduleVoiceOpMu      sync.Mutex
 	moduleVoiceSession   *moduleVoiceSession
+	moduleVoiceCallUUID  string // guarded by moduleVoiceOpMu
 	moduleVoicePreparing bool
 	moduleVoicePrepared  bool
 	moduleVoiceReady     bool
@@ -141,6 +164,9 @@ type app struct {
 	voiceAgentOnce         sync.Once
 	voiceAgent             *voiceAgentController
 	voiceAgentSettingsPath string
+	remoteCallOnce         sync.Once
+	remoteCalls            *remoteCallController
+	remoteCallSettingsPath string
 
 	profileNotesMu     sync.Mutex
 	profileNotes       map[string]profileNote
@@ -234,13 +260,26 @@ type networkCheckResult struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "remote" {
+		if err := runRemoteCommand(context.Background(), os.Args[2:], os.Stdout, systemRemoteProfiles); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		return
+	}
 	var port string
 	var listen string
 	var demo bool
 	flag.StringVar(&port, "port", "", "AT serial port; auto-detected when omitted")
 	flag.StringVar(&listen, "listen", defaultListenAddress, "HTTP listen address")
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
+	flag.StringVar(&nativeControlFile, "native-control-file", "", "private native audio bootstrap file (absolute path; opt-in)")
+	flag.StringVar(&remoteOnlineProfile, "remote-online-profile", "", "EXPERIMENTAL online-only remote answering with a Keychain Hub profile (USB multi-module mode)")
 	flag.Parse()
+	if remoteOnlineProfile != "" && (demo || port != "") {
+		log.Print("remote online mode requires automatic USB multi-module discovery")
+		return
+	}
 
 	if demo {
 		instance := newDemoApp()
@@ -370,6 +409,16 @@ func (a *app) installESIMManager(manager *esim.Manager, switchAllowed bool) bool
 }
 
 func serve(instance *app, listen string) {
+	if remoteOnlineProfile != "" {
+		log.Print("remote online mode requires USB multi-module mode; serial fallback is unsupported")
+		return
+	}
+	closeNative, err := startNativeControl(nativeControlFile, func(id string) (*app, bool) { return instance, id == instance.deviceID })
+	if err != nil {
+		log.Printf("native audio control: %v", err)
+		return
+	}
+	defer closeNative()
 	server := &http.Server{
 		Addr:              listen,
 		Handler:           instance.routes(),
@@ -759,7 +808,8 @@ func (a *app) markUSBATDetached(reason string) {
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
-	go a.resetModuleVoiceSession()
+	// End the call synchronously; its scoped teardown cannot close a later call.
+	a.applyCallPoll(nil, time.Now())
 	a.callMu.Lock()
 	a.callConfigured = false
 	a.callMu.Unlock()
@@ -783,6 +833,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/calls/status", a.callStatus)
 	mux.HandleFunc("POST /api/calls/reject", a.rejectCall)
 	mux.HandleFunc("POST /api/calls/answer", a.answerCall)
+	mux.HandleFunc("POST /api/calls/{callUUID}/commands", a.callCommandAPI)
 	mux.HandleFunc("POST /api/calls/hangup", a.hangupCall)
 	mux.HandleFunc("POST /api/calls/dtmf", a.dtmfCall)
 	mux.HandleFunc("POST /api/calls/dial", a.dialCall)
@@ -797,6 +848,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/calls/audio/mute", a.audioHostMute)
 	mux.HandleFunc("POST /api/calls/audio/record", a.audioHostRecord)
 	mux.HandleFunc("GET /api/voice-agent/status", a.voiceAgentStatus)
+	mux.HandleFunc("GET /api/remote-calls/config", a.remoteCallConfig)
+	mux.HandleFunc("PUT /api/remote-calls/config", a.remoteCallConfigure)
+	mux.HandleFunc("GET /api/remote-calls/status", a.remoteCallStatus)
 	mux.HandleFunc("PUT /api/voice-agent/config", a.voiceAgentConfigure)
 	mux.HandleFunc("GET /api/voice-agent/events", a.voiceAgentEvents)
 	mux.HandleFunc("GET /api/voice-agent/audit", a.voiceAgentAudit)

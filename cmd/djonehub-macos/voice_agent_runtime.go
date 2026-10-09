@@ -58,6 +58,7 @@ type pendingVoiceAgentTool struct {
 // the local audio host plays its final spoken reply. A hang-up is armed only
 // after audio generated after the tool call reaches an audio.done boundary.
 type pendingVoiceAgentHangup struct {
+	CallUUID  string
 	CallID    string
 	ToolCall  *voiceagent.ToolCall
 	SawAudio  bool

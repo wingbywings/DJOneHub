@@ -8,6 +8,8 @@ let package = Package(
         .executable(name: "DJOneHubAudioHost", targets: ["DJOneHubAudioHost"]),
     ],
     targets: [
+        .target(name: "RemoteAudio"),
+        .testTarget(name: "RemoteAudioTests", dependencies: ["RemoteAudio"]),
         .target(
             name: "CModemBridge",
             path: "Sources/CModemBridge",
@@ -29,7 +31,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "DJOneHubAudioHost",
-            dependencies: ["CModemBridge", "CUACProbe"],
+            dependencies: ["CModemBridge", "CUACProbe", "RemoteAudio"],
             path: "Sources/DJOneHubAudioHost",
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [.linkedFramework("AVFoundation")]

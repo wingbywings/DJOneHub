@@ -3,12 +3,24 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
 )
 
 type moduleVoiceSession struct{}
+
+func (a *app) prepareModuleVoiceSessionForCall(ctx context.Context, uuid string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return errors.New("模块语音路由仅在 macOS 版本可用")
+}
+
+func (a *app) ensureModuleVoiceRouteForCall(_ string) error { return a.ensureModuleVoiceRoute() }
+
+func (a *app) stopModuleVoiceRouteForCall(uuid string) { a.releaseCallAudio(uuid) }
 
 func (a *app) prepareModuleVoiceSessionBudgeted(_ time.Duration) error {
 	return errors.New("模块语音路由仅在 macOS 版本可用")

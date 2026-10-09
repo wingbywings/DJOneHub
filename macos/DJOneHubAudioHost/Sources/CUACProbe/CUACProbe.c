@@ -42,6 +42,7 @@ typedef struct {
     double sample_rate;
     uint32_t channels;
     uint32_t buffer_frames;
+    uint32_t original_buffer_frames;
     uint32_t bytes_per_frame;
     AudioStreamBasicDescription virtual_format;
     UACSampleKind sample_kind;
@@ -50,6 +51,7 @@ typedef struct {
     uint32_t usb_location_id;
     uint64_t usb_ancestor_entry_id;
     int sample_rate_changed;
+    int buffer_frames_changed;
     int running;
 } UACEndpoint;
 
@@ -1303,6 +1305,33 @@ static int restore_endpoint_sample_rate(
     return MAVO_UAC_UNSUPPORTED;
 }
 
+static int restore_endpoint_buffer_frames(UACEndpoint *endpoint, const char *label,
+                                         char *errors, size_t errors_capacity) {
+    if (!endpoint->buffer_frames_changed) return MAVO_UAC_OK;
+    AudioObjectPropertyAddress address = property_address(kAudioDevicePropertyBufferFrameSize,
+                                                          kAudioObjectPropertyScopeGlobal);
+    UInt32 original = endpoint->original_buffer_frames, observed = 0;
+    if (uint32_property(endpoint->device_id, address.mSelector, address.mScope, &observed) && observed == original) {
+        endpoint->buffer_frames_changed = 0;
+        endpoint->buffer_frames = observed;
+        return MAVO_UAC_OK;
+    }
+    OSStatus status = AudioObjectSetPropertyData(endpoint->device_id, &address, 0, NULL, sizeof(original), &original);
+    if (status == noErr) {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            if (uint32_property(endpoint->device_id, address.mSelector, address.mScope, &observed) && observed == original) {
+                endpoint->buffer_frames_changed = 0;
+                endpoint->buffer_frames = observed;
+                return MAVO_UAC_OK;
+            }
+            usleep(10000);
+        }
+    }
+    append_text(errors, errors_capacity, "%srestore %s UAC buffer to %u frames failed (status %d)",
+                errors[0] == '\0' ? "" : "; ", label, original, (int)status);
+    return status == noErr ? MAVO_UAC_UNSUPPORTED : (int)status;
+}
+
 static int stop_endpoint(
     UACEndpoint *endpoint,
     const char *label,
@@ -1352,14 +1381,17 @@ static int stop_endpoint(
         }
         endpoint->io_proc_id = NULL;
     }
-    return restore_endpoint_sample_rate(endpoint, label, errors, errors_capacity);
+    int rate_result = restore_endpoint_sample_rate(endpoint, label, errors, errors_capacity);
+    if (rate_result != MAVO_UAC_OK) return rate_result;
+    return restore_endpoint_buffer_frames(endpoint, label, errors, errors_capacity);
 }
 
 static int probe_has_unresolved_io(const MaVoUACProbe *probe) {
     return probe != NULL &&
         (probe->input.running || probe->output.running ||
          probe->input.io_proc_id != NULL || probe->output.io_proc_id != NULL ||
-         probe->input.sample_rate_changed || probe->output.sample_rate_changed);
+         probe->input.sample_rate_changed || probe->output.sample_rate_changed ||
+         probe->input.buffer_frames_changed || probe->output.buffer_frames_changed);
 }
 
 int mavo_uac_probe_stop(MaVoUACProbe *probe) {
@@ -1388,6 +1420,7 @@ int mavo_uac_probe_stop(MaVoUACProbe *probe) {
         probe->output.running = 0;
         probe->output.io_proc_id = NULL;
         probe->output.sample_rate = probe->input.sample_rate;
+        probe->output.buffer_frames = probe->input.buffer_frames;
     }
 
     probe->sample_rate = probe->input.sample_rate;
@@ -1464,6 +1497,7 @@ static void configure_endpoint(
         kAudioObjectPropertyScopeGlobal,
         &endpoint->buffer_frames
     );
+    endpoint->original_buffer_frames = endpoint->buffer_frames;
     if (virtual_format(candidate->device_id, scope, &endpoint->virtual_format)) {
         endpoint->bytes_per_frame = endpoint->virtual_format.mBytesPerFrame;
         endpoint->sample_kind = sample_kind_for_format(&endpoint->virtual_format);
@@ -1961,7 +1995,47 @@ static int wait_for_endpoint_bridge_format(
     return 0;
 }
 
-int mavo_uac_probe_start_pcm_bridge(MaVoUACProbe *probe) {
+static int set_endpoint_remote_period(UACEndpoint *endpoint, const char *label,
+                                      char *error, size_t capacity) {
+    UInt32 current = 0;
+    if (!endpoint->original_buffer_frames || !uint32_property(endpoint->device_id,
+        kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal, &current) || !current) {
+        snprintf(error, capacity, "%s UAC buffer size is unavailable", label);
+        return MAVO_UAC_UNSUPPORTED;
+    }
+    endpoint->buffer_frames_changed = current != endpoint->original_buffer_frames;
+    if (current <= 160) { endpoint->buffer_frames = current; return MAVO_UAC_OK; }
+    AudioObjectPropertyAddress address = property_address(kAudioDevicePropertyBufferFrameSize,
+                                                          kAudioObjectPropertyScopeGlobal);
+    Boolean writable = false;
+    AudioValueRange range = {0}; UInt32 size = sizeof(range);
+    AudioObjectPropertyAddress range_address = property_address(kAudioDevicePropertyBufferFrameSizeRange,
+                                                                kAudioObjectPropertyScopeGlobal);
+    if (AudioObjectIsPropertySettable(endpoint->device_id, &address, &writable) != noErr || !writable ||
+        AudioObjectGetPropertyData(endpoint->device_id, &range_address, 0, NULL, &size, &range) != noErr ||
+        range.mMinimum < 1 || range.mMinimum > 160 || range.mMaximum < range.mMinimum) {
+        snprintf(error, capacity, "%s UAC cannot request a callback period <=20 ms (current %u frames)", label, current);
+        return MAVO_UAC_UNSUPPORTED;
+    }
+    UInt32 requested = (UInt32)fmax(ceil(range.mMinimum), fmin(128, floor(range.mMaximum)));
+    // Record rollback intent before a possibly ambiguous setter result.
+    endpoint->buffer_frames_changed = 1;
+    OSStatus status = AudioObjectSetPropertyData(endpoint->device_id, &address, 0, NULL, sizeof(requested), &requested);
+    if (status == noErr) {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            if (uint32_property(endpoint->device_id, address.mSelector, address.mScope, &current) && current > 0 && current <= 160) {
+                endpoint->buffer_frames = current;
+                return MAVO_UAC_OK;
+            }
+            usleep(10000);
+        }
+    }
+    snprintf(error, capacity, "%s UAC short callback request failed (requested %u, observed %u frames, status %d)",
+             label, requested, current, (int)status);
+    return status == noErr ? MAVO_UAC_UNSUPPORTED : (int)status;
+}
+
+static int start_pcm_bridge(MaVoUACProbe *probe, int remote) {
     if (probe == NULL || probe->input.device_id == kAudioObjectUnknown ||
         probe->output.device_id == kAudioObjectUnknown) {
         return MAVO_UAC_NOT_OPEN;
@@ -2002,6 +2076,14 @@ int mavo_uac_probe_start_pcm_bridge(MaVoUACProbe *probe) {
         probe->output.sample_rate = probe->input.sample_rate;
     }
     probe->sample_rate = probe->input.sample_rate;
+    if (remote) {
+        int result = set_endpoint_remote_period(&probe->input, "input", start_error, sizeof(start_error));
+        if (result != MAVO_UAC_OK) return fail_start_and_cleanup(probe, result, start_error);
+        if (!shared_device) {
+            result = set_endpoint_remote_period(&probe->output, "output", start_error, sizeof(start_error));
+            if (result != MAVO_UAC_OK) return fail_start_and_cleanup(probe, result, start_error);
+        }
+    }
     int input_format_ready = wait_for_endpoint_bridge_format(
         &probe->input,
         kAudioObjectPropertyScopeInput
@@ -2124,8 +2206,21 @@ int mavo_uac_probe_start_pcm_bridge(MaVoUACProbe *probe) {
     return MAVO_UAC_OK;
 }
 
+int mavo_uac_probe_start_pcm_bridge(MaVoUACProbe *probe) {
+    return start_pcm_bridge(probe, 0);
+}
+
+int mavo_uac_probe_start_remote_pcm_bridge(MaVoUACProbe *probe) {
+    return start_pcm_bridge(probe, 1);
+}
+
 int mavo_uac_probe_start_silence(MaVoUACProbe *probe) {
     return mavo_uac_probe_start_pcm_bridge(probe);
+}
+
+int mavo_uac_probe_remote_period_supported(const MaVoUACProbe *probe) {
+    return probe != NULL && probe->input.buffer_frames > 0 && probe->input.buffer_frames <= 160 &&
+        probe->output.buffer_frames > 0 && probe->output.buffer_frames <= 160;
 }
 
 size_t mavo_uac_probe_read_downlink_pcm16(
@@ -2139,6 +2234,28 @@ size_t mavo_uac_probe_read_downlink_pcm16(
     return pcm_ring_read(&probe->downlink_ring, frames, maximum_frames);
 }
 
+/* Called only by the downlink ring consumer. Discard capture older than 60 ms
+ * and report skipped samples so the remote media clock does not compress time. */
+size_t mavo_uac_probe_read_remote_pcm16(MaVoUACProbe *probe, int16_t *frames, size_t maximum, uint64_t *dropped) {
+    if (dropped != NULL) *dropped = 0;
+    if (probe == NULL || dropped == NULL) return 0;
+    UACPCMRing *ring = &probe->downlink_ring;
+    uint64_t lost = atomic_exchange_explicit(&ring->dropped_frames, 0, memory_order_relaxed);
+    uint64_t read = atomic_load_explicit(&ring->read_index, memory_order_relaxed);
+    uint64_t write = atomic_load_explicit(&ring->write_index, memory_order_acquire);
+    uint64_t available = write - read;
+    if (lost > 0) {
+        atomic_store_explicit(&ring->read_index, write, memory_order_release);
+        *dropped = available + lost;
+        return 0;
+    }
+    if (available > 480) {
+        *dropped = available - 480;
+        atomic_store_explicit(&ring->read_index, write - 480, memory_order_release);
+    }
+    return pcm_ring_read(ring, frames, maximum);
+}
+
 size_t mavo_uac_probe_write_uplink_pcm16(
     MaVoUACProbe *probe,
     const int16_t *frames,
@@ -2148,6 +2265,18 @@ size_t mavo_uac_probe_write_uplink_pcm16(
         return 0;
     }
     return pcm_ring_write(&probe->uplink_ring, frames, frame_count);
+}
+
+/* Single producer API: cap queued output to 20 ms for conversational audio.
+ * Never move the consumer's read index from this producer thread. */
+size_t mavo_uac_probe_write_remote_pcm16(MaVoUACProbe *probe, const int16_t *frames, size_t count) {
+    if (probe == NULL) return 0;
+    uint64_t write = atomic_load_explicit(&probe->uplink_ring.write_index, memory_order_relaxed);
+    uint64_t read = atomic_load_explicit(&probe->uplink_ring.read_index, memory_order_acquire);
+    uint64_t used = write - read;
+    if (used >= 160) return 0;
+    size_t available = (size_t)(160 - used);
+    return pcm_ring_write(&probe->uplink_ring, frames, count < available ? count : available);
 }
 
 void mavo_uac_probe_flush_downlink_pcm(MaVoUACProbe *probe) {
@@ -2394,4 +2523,3 @@ uint32_t mavo_uac_probe_input_signal_threshold_pcm16(const MaVoUACProbe *probe) 
 const char *mavo_uac_probe_last_error(const MaVoUACProbe *probe) {
     return probe == NULL ? "UAC probe is not allocated" : probe->last_error;
 }
-

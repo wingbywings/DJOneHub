@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/pkg/smscodec"
 )
 
@@ -41,6 +42,7 @@ type managedUSBDevice struct {
 }
 
 type usbDeviceHub struct {
+	remoteHub             *remoteHubService // guarded by mu
 	mu                    sync.RWMutex
 	reconcileMu           sync.Mutex
 	devices               map[string]*managedUSBDevice
@@ -50,6 +52,8 @@ type usbDeviceHub struct {
 	legacySettingsClaimed bool
 	networkOwner          string
 	voiceOwner            string
+	voiceOwnerRuntime     *app
+	callAudio             callcontrol.AudioArbiter
 	fallback              *app
 	ctx                   context.Context
 	cancel                context.CancelFunc
@@ -334,6 +338,16 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 		smsReassembler:   smscodec.NewReassembler(),
 		callPollInterval: 3 * time.Second,
 	}
+	runtime.remoteDispatch = func(ctx context.Context, call callRecord) { h.dispatchRemote(runtime, ctx, call) }
+	runtime.remoteConnectionState = func() string {
+		h.mu.RLock()
+		manager := h.remoteHub
+		h.mu.RUnlock()
+		if manager == nil {
+			return "disabled"
+		}
+		return manager.Snapshot().State
+	}
 	h.configureDeviceSettings(runtime, id)
 	deviceCtx, cancel := context.WithCancel(h.ctx)
 	runtime.onUSBDetached = func(reason string) {
@@ -438,19 +452,22 @@ func (h *usbDeviceHub) configureNetworkModeGuard(runtime *app, id string) {
 }
 
 func (h *usbDeviceHub) configureVoiceRouteGuard(runtime *app, id string) {
+	runtime.callAudio = &h.callAudio
 	runtime.authorizeVoiceRoute = func() error {
 		h.mu.Lock()
 		defer h.mu.Unlock()
-		if h.voiceOwner != "" && h.voiceOwner != id {
+		if h.voiceOwnerRuntime != nil && h.voiceOwnerRuntime != runtime {
 			return errors.New("另一台模块正在使用语音音频；请先结束该通话")
 		}
 		h.voiceOwner = id
+		h.voiceOwnerRuntime = runtime
 		return nil
 	}
 	runtime.releaseVoiceRoute = func() {
 		h.mu.Lock()
-		if h.voiceOwner == id {
+		if h.voiceOwnerRuntime == runtime {
 			h.voiceOwner = ""
+			h.voiceOwnerRuntime = nil
 		}
 		h.mu.Unlock()
 	}
@@ -474,6 +491,7 @@ func (h *usbDeviceHub) detachPhysical(physicalID, reason string) {
 		}
 		if h.voiceOwner == id {
 			h.voiceOwner = ""
+			h.voiceOwnerRuntime = nil
 		}
 	}
 	h.mu.Unlock()
@@ -488,6 +506,7 @@ func (h *usbDeviceHub) detachPhysical(physicalID, reason string) {
 		managed.Runtime.usbAT = nil
 	}
 	if managed.Runtime != nil {
+		managed.Runtime.applyCallPoll(nil, time.Now())
 		managed.Runtime.resetModuleVoiceSession()
 	}
 	log.Printf("DJI module %s (%s) is offline: %s", id, physicalID, reason)
@@ -568,6 +587,7 @@ func (h *usbDeviceHub) configureDeviceSettings(runtime *app, deviceID string) {
 	directory := filepath.Join(configDir, "DJOneHub", "devices", deviceID)
 	runtime.barkSettingsPath = filepath.Join(directory, "bark-settings.json")
 	runtime.voiceAgentSettingsPath = filepath.Join(directory, "voice-agent.json")
+	runtime.remoteCallSettingsPath = filepath.Join(directory, "remote-calls.json")
 	runtime.moduleSetupPath = filepath.Join(directory, "voice-setup-state.json")
 	runtime.moduleSetupBackupDir = filepath.Join(directory, "module-backups")
 	if err := runtime.loadModuleSetupState(); err != nil {
@@ -752,12 +772,33 @@ func (h *usbDeviceHub) dispatchDeviceAPI(w http.ResponseWriter, r *http.Request)
 }
 
 func serveUSBDeviceHub(hub *usbDeviceHub, listen string) {
+	// Native requests must name a concrete module. Do not silently retarget a
+	// disappearing device to whichever module becomes the new default.
+	closeNative, err := startNativeControl(nativeControlFile, hub.runtime)
+	if err != nil {
+		log.Printf("native audio control: %v", err)
+		hub.close()
+		return
+	}
+	defer closeNative()
 	server := &http.Server{
 		Addr: listen, Handler: hub.routes(webAssets), ReadHeaderTimeout: 5 * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	defer hub.close()
+	manager, err := startRemoteHub(ctx, remoteOnlineProfile, nativeControlFile, hub.remoteDial)
+	if err != nil {
+		log.Printf("remote online startup failed: %v", err)
+		return
+	}
+	if manager != nil {
+		hub.mu.Lock()
+		hub.remoteHub = manager
+		hub.mu.Unlock()
+		defer manager.Close() // finish cellular cleanup before detaching hardware
+		log.Print("remote online-only mode enabled; APNs wakeup is not configured; ICE configuration comes from the relay")
+	}
 	hub.start()
 	log.Printf("DJOneHub multi-module mode")
 	log.Printf("Open http://%s", listen)

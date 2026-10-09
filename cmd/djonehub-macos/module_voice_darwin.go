@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -49,6 +50,49 @@ func (a *app) prepareModuleVoiceSession() error {
 	return a.prepareModuleVoiceSessionLocked()
 }
 
+// The waiter can cancel immediately. A non-interruptible USB step may finish
+// later, but the worker checks cancellation before publishing a usable session
+// and closes it under the same mutex before any subsequent preparation starts.
+func (a *app) prepareModuleVoiceSessionForCall(ctx context.Context, uuid string) error {
+	done := make(chan error, 1)
+	go func() {
+		if err := lockWithContext(ctx, &a.moduleVoiceOpMu); err != nil {
+			done <- err
+			return
+		}
+		defer a.moduleVoiceOpMu.Unlock()
+		if !a.callMatches(uuid) {
+			done <- errors.New("原通话已结束")
+			return
+		}
+		if a.moduleVoiceCallUUID != "" && a.moduleVoiceCallUUID != uuid {
+			done <- errors.New("旧通话音频仍在清理")
+			return
+		}
+		a.moduleVoiceCallUUID = uuid
+		err := a.prepareModuleVoiceSessionLocked()
+		if ctx.Err() != nil || !a.callMatches(uuid) {
+			// An active route may reuse the prepared session while another
+			// answer waiter is cancelled. Its lifetime belongs to the call.
+			if !a.callMatches(uuid, "active") {
+				a.closeModuleVoiceSessionLocked()
+				a.moduleVoiceCallUUID = ""
+			}
+			err = ctx.Err()
+			if err == nil {
+				err = errors.New("原通话已结束")
+			}
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (a *app) prepareModuleVoiceSessionBudgeted(budget time.Duration) error {
 	done := make(chan error, 1)
 	go func() { done <- a.prepareModuleVoiceSession() }()
@@ -91,6 +135,11 @@ func (a *app) prepareModuleVoiceSessionLocked() error {
 func (a *app) resetModuleVoiceSession() {
 	a.moduleVoiceOpMu.Lock()
 	a.closeModuleVoiceSessionLocked()
+	uuid := a.moduleVoiceCallUUID
+	a.moduleVoiceCallUUID = ""
+	if !a.callMatches(uuid) {
+		a.releaseCallAudio(uuid)
+	}
 	a.moduleVoiceOpMu.Unlock()
 	if a.releaseVoiceRoute != nil {
 		a.releaseVoiceRoute()
@@ -126,8 +175,26 @@ func (a *app) setVoiceStatus(ready bool, err error, detail string) {
 }
 
 func (a *app) ensureModuleVoiceRoute() error {
+	call, ok := a.currentCallIdentity()
+	if !ok {
+		return errors.New("当前没有活动通话")
+	}
+	return a.ensureModuleVoiceRouteForCall(call.UUID)
+}
+
+func (a *app) ensureModuleVoiceRouteForCall(uuid string) error {
 	a.moduleVoiceOpMu.Lock()
 	defer a.moduleVoiceOpMu.Unlock()
+	if !a.callMatches(uuid, "active") {
+		return errors.New("原通话已结束，取消音频路由启动")
+	}
+	if _, err := a.reserveCallAudio(uuid); err != nil {
+		return err
+	}
+	if a.moduleVoiceCallUUID != "" && a.moduleVoiceCallUUID != uuid {
+		return errors.New("旧通话音频仍在清理")
+	}
+	a.moduleVoiceCallUUID = uuid
 	a.moduleVoiceMu.Lock()
 	if a.moduleVoiceReady {
 		a.moduleVoiceMu.Unlock()
@@ -152,6 +219,10 @@ func (a *app) ensureModuleVoiceRoute() error {
 		a.setVoiceStatus(false, err, "")
 		return err
 	}
+	if !a.callMatches(uuid, "active") {
+		return errors.New("原通话已结束，取消音频路由启动")
+	}
+	a.moduleVoiceCallUUID = uuid
 	err := a.startModuleVoiceRouteLocked()
 	if err != nil {
 		if a.releaseVoiceRoute != nil {
@@ -159,6 +230,16 @@ func (a *app) ensureModuleVoiceRoute() error {
 		}
 		a.setVoiceStatus(false, err, "")
 		return err
+	}
+	if !a.callMatches(uuid, "active") {
+		_ = a.stopModuleVoiceRouteLocked()
+		a.closeModuleVoiceSessionLocked()
+		a.moduleVoiceCallUUID = ""
+		a.releaseCallAudio(uuid)
+		if a.releaseVoiceRoute != nil {
+			a.releaseVoiceRoute()
+		}
+		return errors.New("通话已结束，回收迟到的音频路由")
 	}
 	a.setVoiceStatus(true, nil, "模块 D4/UAC 路由正在运行")
 	return nil
@@ -176,8 +257,25 @@ func (a *app) ensureModuleVoiceRouteBudgeted(budget time.Duration) error {
 }
 
 func (a *app) stopModuleVoiceRoute() {
+	a.stopModuleVoiceRouteForCall("")
+}
+
+func (a *app) stopModuleVoiceRouteForCall(uuid string) {
 	a.moduleVoiceOpMu.Lock()
 	defer a.moduleVoiceOpMu.Unlock()
+	if uuid != "" && a.moduleVoiceCallUUID != uuid {
+		a.releaseCallAudio(uuid)
+		return
+	}
+	if uuid == "" {
+		uuid = a.moduleVoiceCallUUID
+	}
+	defer func() {
+		if !a.callMatches(uuid) {
+			a.releaseCallAudio(uuid)
+		}
+	}()
+	a.moduleVoiceCallUUID = ""
 	defer a.closeModuleVoiceSessionLocked()
 	a.moduleVoiceMu.Lock()
 	wasReady := a.moduleVoiceReady

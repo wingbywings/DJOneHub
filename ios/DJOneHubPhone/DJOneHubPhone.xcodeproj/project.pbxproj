@@ -1,0 +1,522 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		18858716DE2D02D5918AEBAA /* PhoneRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 150FB4D0737B5CA057C34C3C /* PhoneRuntime.swift */; };
+		32766E9F353B49A04735FB22 /* PhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */; };
+		42E67618ACE4A84676F0199D /* PhoneMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */; };
+		832755465506D5E3BEF76CB1 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 7936BDEAAC3A0CDE110DE896 /* WebRTC */; };
+		89FBAFC337F14D81F6D68230 /* Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65FC78B3625FC45CEB39F5DE /* Services.swift */; };
+		A7A19E1E3515AA75F8600B4A /* WebRTC-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3A607F5461A58A445092533F /* WebRTC-LICENSE.txt */; };
+		B4B018FFB3739CBF98A731BA /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 78CD26B5898C04868DC0E051 /* WebRTC */; };
+		BD846D8715BDE3416D9FF53F /* PhoneMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */; };
+		C204A2A74B32C71C2C3EFC30 /* DJOneHubPhoneCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5EE66CA1217CD52901D0DAE2 /* DJOneHubPhoneCore */; };
+		E6485DD3419F77FEA7DCBFB9 /* DJOneHubPhoneCore in Frameworks */ = {isa = PBXBuildFile; productRef = 8D7BB9ED4D3C26764209DD7D /* DJOneHubPhoneCore */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		AF4A7CCBE7FA06703A6410C1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 03D19D810AF176F66E7C71A8 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 667C68F017A38E16D0631C41;
+			remoteInfo = DJOneHubPhone;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		150FB4D0737B5CA057C34C3C /* PhoneRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneRuntime.swift; sourceTree = "<group>"; };
+		34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneApp.swift; sourceTree = "<group>"; };
+		37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMediaTests.swift; sourceTree = "<group>"; };
+		3A607F5461A58A445092533F /* WebRTC-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "WebRTC-LICENSE.txt"; sourceTree = "<group>"; };
+		3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMedia.swift; sourceTree = "<group>"; };
+		65FC78B3625FC45CEB39F5DE /* Services.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services.swift; sourceTree = "<group>"; };
+		95FEF65866ED052FD351E7C4 /* DJOneHubPhoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DJOneHubPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		9B5A7B562C2DE8B64C83ACDE /* DJOneHubPhoneCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DJOneHubPhoneCore; path = ../../shared/DJOneHubPhoneCore; sourceTree = SOURCE_ROOT; };
+		AEE37E045423FBAFE9E531E5 /* DJOneHubPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DJOneHubPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		4D6643C88F8C2DBE956C7C28 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E6485DD3419F77FEA7DCBFB9 /* DJOneHubPhoneCore in Frameworks */,
+				B4B018FFB3739CBF98A731BA /* WebRTC in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A6523BA03479F28FB0C4D09A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C204A2A74B32C71C2C3EFC30 /* DJOneHubPhoneCore in Frameworks */,
+				832755465506D5E3BEF76CB1 /* WebRTC in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		38BF3A26E942D751339F56BA /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				3A607F5461A58A445092533F /* WebRTC-LICENSE.txt */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		43ECB513083A6C89784E7B15 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		463E161346C844D9EE088303 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				AEE37E045423FBAFE9E531E5 /* DJOneHubPhone.app */,
+				95FEF65866ED052FD351E7C4 /* DJOneHubPhoneTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		6356BB30040053EB5542DD91 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */,
+				3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */,
+				150FB4D0737B5CA057C34C3C /* PhoneRuntime.swift */,
+				65FC78B3625FC45CEB39F5DE /* Services.swift */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		9E776C9622DA90A307AE05EE /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				9B5A7B562C2DE8B64C83ACDE /* DJOneHubPhoneCore */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+		EC288FB69018C8A5D1B80E9D = {
+			isa = PBXGroup;
+			children = (
+				9E776C9622DA90A307AE05EE /* Packages */,
+				38BF3A26E942D751339F56BA /* Resources */,
+				6356BB30040053EB5542DD91 /* Sources */,
+				43ECB513083A6C89784E7B15 /* Tests */,
+				463E161346C844D9EE088303 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		13AC61C21D0894940BCE7DA7 /* DJOneHubPhoneTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 71C2E3A1ADD2AFD8FF28C28C /* Build configuration list for PBXNativeTarget "DJOneHubPhoneTests" */;
+			buildPhases = (
+				6C53258A3C97949E87571DE4 /* Sources */,
+				A6523BA03479F28FB0C4D09A /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2EBD7147C82420AEF0A282DB /* PBXTargetDependency */,
+			);
+			name = DJOneHubPhoneTests;
+			packageProductDependencies = (
+				5EE66CA1217CD52901D0DAE2 /* DJOneHubPhoneCore */,
+				7936BDEAAC3A0CDE110DE896 /* WebRTC */,
+			);
+			productName = DJOneHubPhoneTests;
+			productReference = 95FEF65866ED052FD351E7C4 /* DJOneHubPhoneTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		667C68F017A38E16D0631C41 /* DJOneHubPhone */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D32AF55493508EC04CBC0C62 /* Build configuration list for PBXNativeTarget "DJOneHubPhone" */;
+			buildPhases = (
+				6CAC644899CEDE3AE6046AD3 /* Sources */,
+				145850B31B47DE5EABAD8AE6 /* Resources */,
+				4D6643C88F8C2DBE956C7C28 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DJOneHubPhone;
+			packageProductDependencies = (
+				8D7BB9ED4D3C26764209DD7D /* DJOneHubPhoneCore */,
+				78CD26B5898C04868DC0E051 /* WebRTC */,
+			);
+			productName = DJOneHubPhone;
+			productReference = AEE37E045423FBAFE9E531E5 /* DJOneHubPhone.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		03D19D810AF176F66E7C71A8 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					13AC61C21D0894940BCE7DA7 = {
+						ProvisioningStyle = Automatic;
+					};
+					667C68F017A38E16D0631C41 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = FBAEF3537EAC1CC7068850E5 /* Build configuration list for PBXProject "DJOneHubPhone" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = EC288FB69018C8A5D1B80E9D;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5C5ADF927129CBF734132159 /* XCRemoteSwiftPackageReference "WebRTC" */,
+				82B43807C6C91536E39043A5 /* XCLocalSwiftPackageReference "../../shared/DJOneHubPhoneCore" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 463E161346C844D9EE088303 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				667C68F017A38E16D0631C41 /* DJOneHubPhone */,
+				13AC61C21D0894940BCE7DA7 /* DJOneHubPhoneTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		145850B31B47DE5EABAD8AE6 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A7A19E1E3515AA75F8600B4A /* WebRTC-LICENSE.txt in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		6C53258A3C97949E87571DE4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BD846D8715BDE3416D9FF53F /* PhoneMediaTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		6CAC644899CEDE3AE6046AD3 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				32766E9F353B49A04735FB22 /* PhoneApp.swift in Sources */,
+				42E67618ACE4A84676F0199D /* PhoneMedia.swift in Sources */,
+				18858716DE2D02D5918AEBAA /* PhoneRuntime.swift in Sources */,
+				89FBAFC337F14D81F6D68230 /* Services.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2EBD7147C82420AEF0A282DB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 667C68F017A38E16D0631C41 /* DJOneHubPhone */;
+			targetProxy = AF4A7CCBE7FA06703A6410C1 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		01E132560AEEAF688B37F16F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		9694CD4B97B429E0D4B306D0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 8AHAFH9VTZ;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DJOneHub;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "与同一网络中的 DJOneHub 建立通话音频连接。";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "接听 DJOneHub 转接的电话时需要使用麦克风。";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.oops.djonehub;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		B54779545C602BE5F2644BE0 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.djonehub.DJOneHubPhoneTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DJOneHubPhone.app/DJOneHubPhone";
+			};
+			name = Debug;
+		};
+		B9A1D3E01F978699F41804F1 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = org.djonehub.DJOneHubPhoneTests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/DJOneHubPhone.app/DJOneHubPhone";
+			};
+			name = Release;
+		};
+		CBD5272B2110243CA308CE28 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 8AHAFH9VTZ;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = DJOneHub;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "与同一网络中的 DJOneHub 建立通话音频连接。";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "接听 DJOneHub 转接的电话时需要使用麦克风。";
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.oops.djonehub;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		FE69E44FF7936DA26C44964D /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		71C2E3A1ADD2AFD8FF28C28C /* Build configuration list for PBXNativeTarget "DJOneHubPhoneTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B54779545C602BE5F2644BE0 /* Debug */,
+				B9A1D3E01F978699F41804F1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D32AF55493508EC04CBC0C62 /* Build configuration list for PBXNativeTarget "DJOneHubPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9694CD4B97B429E0D4B306D0 /* Debug */,
+				CBD5272B2110243CA308CE28 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FBAEF3537EAC1CC7068850E5 /* Build configuration list for PBXProject "DJOneHubPhone" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FE69E44FF7936DA26C44964D /* Debug */,
+				01E132560AEEAF688B37F16F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		82B43807C6C91536E39043A5 /* XCLocalSwiftPackageReference "../../shared/DJOneHubPhoneCore" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../../shared/DJOneHubPhoneCore;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		5C5ADF927129CBF734132159 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC.git";
+			requirement = {
+				kind = exactVersion;
+				version = 154.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5EE66CA1217CD52901D0DAE2 /* DJOneHubPhoneCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DJOneHubPhoneCore;
+		};
+		78CD26B5898C04868DC0E051 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5C5ADF927129CBF734132159 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+		7936BDEAAC3A0CDE110DE896 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5C5ADF927129CBF734132159 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+		8D7BB9ED4D3C26764209DD7D /* DJOneHubPhoneCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = DJOneHubPhoneCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 03D19D810AF176F66E7C71A8 /* Project object */;
+}

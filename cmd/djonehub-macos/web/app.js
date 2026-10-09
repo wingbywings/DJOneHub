@@ -10,6 +10,7 @@ let voiceAgentCallsInFlight = false;
 let voiceSetupInFlight = false;
 let currentVoiceSetup = {};
 let currentCallState = null;
+let currentCallIdentity = null;
 let currentAudioHostState = {};
 let currentVoiceAgentStatus = {};
 let voiceAgentFormDirty = false;
@@ -142,6 +143,8 @@ async function loadDevices({ refreshCurrent = false, refreshOnChange = true } = 
 }
 
 async function refreshActiveDevice() {
+  currentCallIdentity = null;
+  currentCallState = null;
   lastSMSCount = null;
   networkTrafficPrevious = null;
   voiceAgentFormDirty = false;
@@ -981,8 +984,11 @@ async function loadVoiceAgentCalls() {
 async function loadCalls() {
   if (callPollInFlight) return;
   callPollInFlight = true;
+  const requestedDevice = activeDeviceID;
   try {
     const status = await api("/api/calls/status");
+    if (requestedDevice !== activeDeviceID) return;
+    currentCallIdentity = status.active ? { ...status.active, deviceID: requestedDevice } : null;
     const active = status.active;
     const callJustEnded = currentCallState !== null && !active;
     const audioHost = status.audio_host || {};
@@ -1920,6 +1926,10 @@ async function runCallAction(button, path, successMessage, body) {
   const originalLabel = button.textContent;
   button.disabled = true;
   try {
+    if (["/api/calls/answer", "/api/calls/reject", "/api/calls/hangup", "/api/calls/dtmf"].includes(path)) {
+      if (!currentCallIdentity?.call_uuid || currentCallIdentity.deviceID !== activeDeviceID) throw new Error("通话信息已失效，请刷新后重试");
+      body = { ...body, call_uuid: currentCallIdentity.call_uuid, expected_revision: currentCallIdentity.revision, request_id: crypto.randomUUID?.() || Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, "0")).join("") };
+    }
     await api(path, {
       method: "POST",
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),

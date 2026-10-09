@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/voiceagent"
 )
 
@@ -62,13 +63,8 @@ func (a *app) handleVoiceAgentTool(controller *voiceAgentController, session voi
 }
 
 func (a *app) scheduleVoiceAgentHangup(controller *voiceAgentController, session voiceagent.Session, callID string, call *voiceagent.ToolCall) {
-	a.callMu.RLock()
-	activeCallID := ""
-	if a.activeCall != nil && a.activeCall.State == "active" {
-		activeCallID = a.activeCall.ID
-	}
-	a.callMu.RUnlock()
-	if activeCallID == "" || activeCallID != callID {
+	active, ok := a.currentCallIdentity()
+	if !ok || active.State != "active" || active.ID != callID {
 		a.submitVoiceAgentToolResult(controller, session, callID, call, nil, fmt.Errorf("当前没有可挂断的通话"), "tool.rejected")
 		return
 	}
@@ -76,7 +72,7 @@ func (a *app) scheduleVoiceAgentHangup(controller *voiceAgentController, session
 	copyCall.Arguments = append(json.RawMessage(nil), call.Arguments...)
 	controller.runtime.mu.Lock()
 	controller.runtime.pendingHangups[callID] = &pendingVoiceAgentHangup{
-		CallID: callID, ToolCall: &copyCall, Requested: time.Now(),
+		CallID: callID, CallUUID: active.UUID, ToolCall: &copyCall, Requested: time.Now(),
 	}
 	controller.runtime.mu.Unlock()
 	a.submitVoiceAgentToolResult(controller, session, callID, call, map[string]any{
@@ -118,7 +114,7 @@ func (a *app) completeVoiceAgentHangup(controller *voiceAgentController, callID 
 	delete(controller.runtime.pendingHangups, callID)
 	controller.runtime.mu.Unlock()
 
-	result, err := a.executeVoiceAgentTool("hang_up_call", pending.ToolCall.Arguments)
+	result, err := a.executeCallCommand(context.Background(), callcontrol.Command{RequestID: callcontrol.NewCallUUID(), CallUUID: pending.CallUUID, Type: "hangup", Actor: "agent"})
 	event := voiceagent.Event{Type: "tool.completed", Provider: controller.snapshot().ActiveProvider, ToolCall: pending.ToolCall, At: time.Now()}
 	if err != nil {
 		event.Type = "tool.rejected"
@@ -153,26 +149,11 @@ func (a *app) executeVoiceAgentTool(name string, arguments json.RawMessage) (any
 		}
 		return map[string]any{"active": true, "direction": a.activeCall.Direction, "state": a.activeCall.State, "number": redactVoiceAgentText(a.activeCall.Number)}, nil
 	case "hang_up_call":
-		if !a.hasActiveCall() {
+		call, ok := a.currentCallIdentity()
+		if !ok {
 			return nil, fmt.Errorf("当前没有可挂断的通话")
 		}
-		if a.demo {
-			a.applyCallPoll(nil, time.Now())
-			return map[string]any{"hung_up": true}, nil
-		}
-		a.operationMu.Lock()
-		defer a.operationMu.Unlock()
-		response, err := a.runATCommand("ATH", 5*time.Second)
-		if err != nil || validateCallATResponse(response) != nil {
-			response, err = a.runATCommand("AT+CHUP", 5*time.Second)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := validateCallATResponse(response); err != nil {
-			return nil, err
-		}
-		return map[string]any{"hung_up": true}, nil
+		return a.executeCallCommand(context.Background(), callcontrol.Command{RequestID: callcontrol.NewCallUUID(), CallUUID: call.UUID, Type: "hangup", Actor: "agent"})
 	default:
 		return nil, fmt.Errorf("tool %q is not allowed", name)
 	}

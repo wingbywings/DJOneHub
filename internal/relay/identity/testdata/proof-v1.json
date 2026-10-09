@@ -1,0 +1,16 @@
+{
+  "challenge": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+  "challenge_id": "challenge_fixture",
+  "grant_id": "grant_fixture",
+  "grant_message": "{\"domain\":\"DJOneHub/identity/grant/v1\",\"kind\":\"pairing\",\"id\":\"grant_fixture\",\"secret\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"public_key\":\"A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=\"}",
+  "grant_secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "grant_signature": "og/MDPKI13pBeVbiNZpLSgQbk9zAVbRQgBHOlIVY1OieEy7F9nbKQ3v+xCgCXAZib+WYlZqNvy6BenEpyyWQAg==",
+  "identity_id": "ios_fixture",
+  "public_key": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "refresh_message": "{\"domain\":\"DJOneHub/identity/refresh/v1\",\"identity_id\":\"ios_fixture\",\"refresh_token\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\",\"challenge_id\":\"challenge_fixture\",\"challenge\":\"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\"}",
+  "refresh_signature": "m1bKlzdB51351R5jDXQQ03EiqcxZSVG/5YLXrmI9IBBQieV2Y92jGP9KA+CiMR+uY/g2N8K8NyImNyUIF/KuBg==",
+  "refresh_token": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "swift_grant_signature": "P/ZyAyNwook1+eabvv5UHODVO0KiwxQidoi5unfLsT5Q97GB0fCNwEZhPgmgaF1oODU3RzlprLY7ahT5el9CDQ==",
+  "swift_refresh_signature": "70plfTIbhUfExxTAcaUwmG+5BFg58LyV3GDBeMW2wF3c8ZhZO02OYxiZuKufsYkbbwF8oSujnf/jKwsDvJD4Aw=="
+}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/voiceagent"
 	"github.com/iniwex5/vohive/internal/voiceagent/cascade"
 	"github.com/iniwex5/vohive/internal/voiceagent/providers/minimax"
@@ -390,6 +391,12 @@ func (a *app) voiceAgentConfigure(w http.ResponseWriter, r *http.Request) {
 	controller := a.ensureVoiceAgent()
 	body.Provider = strings.ToLower(strings.TrimSpace(body.Provider))
 	candidate := normalizeVoiceAgentState(voiceAgentState{Enabled: body.Enabled, Provider: body.Provider, FallbackProvider: body.FallbackProvider, Model: strings.TrimSpace(body.Model), Voice: strings.TrimSpace(body.Voice), Instructions: strings.TrimSpace(body.Instructions), STTProvider: strings.ToLower(strings.TrimSpace(body.STTProvider)), FallbackSTT: body.FallbackSTT, STTModel: strings.TrimSpace(body.STTModel), AutoAnswerDelayMS: body.AutoAnswerDelayMS, UpdatedAt: time.Now()})
+	a.callRouteMu.Lock()
+	defer a.callRouteMu.Unlock()
+	if candidate.Enabled != controller.snapshot().Enabled && a.hasActiveCall() {
+		writeCallRouteLocked(w)
+		return
+	}
 	if _, ok := controller.registry.Get(candidate.Provider); candidate.Provider != "" && !ok {
 		writeError(w, http.StatusBadRequest, "unknown voice agent provider")
 		return
@@ -568,7 +575,7 @@ func (a *app) prepareVoiceAgentForCurrentCall(state voiceAgentState, force bool)
 	}
 	a.callMu.RLock()
 	callID := ""
-	if a.activeCall != nil {
+	if callUsesAgent(a.activeCall, state) {
 		callID = a.activeCall.ID
 	}
 	a.callMu.RUnlock()
@@ -610,7 +617,7 @@ func (a *app) voiceAgentMedia(w http.ResponseWriter, r *http.Request) {
 	a.callMu.RLock()
 	active := a.activeCall
 	callID := ""
-	if active != nil && active.State == "active" {
+	if callUsesAgent(active, state) && active.State == "active" {
 		callID = active.ID
 	}
 	a.callMu.RUnlock()
@@ -810,31 +817,29 @@ func (a *app) scheduleVoiceAgentAutoAnswer(previousState, currentState string) {
 	if !state.Enabled || !state.AutoAnswer {
 		return
 	}
-	a.callMu.RLock()
-	callID := ""
-	if a.activeCall != nil {
-		callID = a.activeCall.ID
-	}
-	a.callMu.RUnlock()
-	if callID == "" {
+	a.callMu.Lock()
+	if !callUsesAgent(a.activeCall, state) || a.activeCall.State != "incoming" {
+		a.callMu.Unlock()
 		return
 	}
+	a.ensureCallIdentityLocked()
+	uuid, callCtx := a.activeCall.UUID, a.callContext
+	a.callMu.Unlock()
 	delay := time.Duration(state.AutoAnswerDelayMS) * time.Millisecond
 	go func() {
 		timer := time.NewTimer(delay)
 		defer timer.Stop()
-		<-timer.C
+		select {
+		case <-callCtx.Done():
+			return
+		case <-timer.C:
+		}
 		latest := controller.snapshot()
-		if !latest.Enabled || !latest.AutoAnswer {
+		if !latest.Enabled || !latest.AutoAnswer || !a.callMatches(uuid, "incoming") {
 			return
 		}
-		a.callMu.RLock()
-		stillRinging := a.activeCall != nil && a.activeCall.ID == callID && (a.activeCall.State == "incoming" || a.activeCall.State == "waiting")
-		a.callMu.RUnlock()
-		if !stillRinging {
-			return
-		}
-		if _, err := a.answerCurrentCall(); err != nil {
+		_, err := a.executeCallCommand(callCtx, callcontrol.Command{RequestID: callcontrol.NewCallUUID(), CallUUID: uuid, Type: "answer", Actor: "agent"})
+		if err != nil && callCtx.Err() == nil {
 			controller.setError(fmt.Errorf("voice agent auto-answer: %w", err))
 		}
 	}()
