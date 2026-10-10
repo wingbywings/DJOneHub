@@ -111,3 +111,48 @@ func TestSenderDoesNotJoinAcrossMissingAudio(t *testing.T) {
 		t.Fatalf("packet=%+v err=%v", packet, err)
 	}
 }
+
+func TestSenderSignalDiagnostics(t *testing.T) {
+	sender, _ := NewSender(1, &countingEncoder{})
+	now := time.Now()
+	frame := Frame{Direction: FromModem, Generation: 1}
+	if err := sender.Push(frame, now); err != nil {
+		t.Fatal(err)
+	}
+	frame.Sequence++
+	frame.SampleIndex += FrameSamples
+	frame.PCM[0] = -32768 // abs must not overflow int16
+	if err := sender.Push(frame, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := sender.Push(frame, now); err == nil {
+		t.Fatal("replay accepted")
+	}
+	if _, err := sender.Next(now); err != nil {
+		t.Fatal(err)
+	}
+	sender.Discard()
+	s := sender.Stats()
+	if s.CapturedFrames != 2 || s.SignalFrames != 1 || s.PeakPCM16 != 32768 || s.EncodedPackets != 1 || s.QueuedFrames != 0 {
+		t.Fatalf("diagnostics must count accepted frames and survive teardown: %+v", s)
+	}
+}
+
+func TestSenderMaintainsRateWithTickerJitter(t *testing.T) {
+	sender, _ := NewSender(1, &countingEncoder{})
+	start := time.Unix(1, 0)
+	for i := 0; i < 500; i++ {
+		// Timer timestamps can move a few microseconds around their phase.
+		now := start.Add(time.Duration(i)*10*time.Millisecond + time.Duration(500-i)*time.Microsecond)
+		frame := Frame{Direction: FromModem, Generation: 1, Sequence: uint64(i), SampleIndex: uint64(i * FrameSamples)}
+		if err := sender.Push(frame, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sender.Next(now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stats := sender.Stats(); stats.EncodedPackets < 248 || stats.DroppedFrames > 2 {
+		t.Fatalf("sub-millisecond ticker jitter reduced the 50 packet/s rate: %+v", stats)
+	}
+}

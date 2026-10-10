@@ -2,8 +2,18 @@ import AVFAudio
 import SwiftUI
 import UniformTypeIdentifiers
 
+final class PhoneApplicationDelegate: NSObject, UIApplicationDelegate {
+  func application(
+    _ application: UIApplication,
+    didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
+  ) -> Bool {
+    PhoneRuntime.shared.startPushIfEnabled()
+    return true
+  }
+}
 @main struct DJOneHubPhoneApp: App {
-  @StateObject private var runtime = PhoneRuntime()
+  @UIApplicationDelegateAdaptor(PhoneApplicationDelegate.self) private var delegate
+  @StateObject private var runtime = PhoneRuntime.shared
   @Environment(\.scenePhase) private var phase
   @State private var importing = false
   @State private var forgetting = false
@@ -86,6 +96,18 @@ import UniformTypeIdentifiers
               if runtime.online { runtime.disconnect() } else { Task { await runtime.connect() } }
             }.disabled(!runtime.paired || runtime.working || runtime.callUUID != nil)
           }
+          Section("后台来电") {
+            Text(runtime.pushStatus).font(.caption)
+            Button(runtime.pushEnabled ? "关闭后台来电" : "启用后台来电") {
+              Task {
+                if runtime.pushEnabled {
+                  await runtime.disablePush()
+                } else {
+                  await runtime.enablePush()
+                }
+              }
+            }.disabled(!runtime.paired || runtime.working || runtime.callUUID != nil)
+          }
           if !runtime.callDiagnostics.isEmpty {
             Section("本次联调诊断") {
               Text(runtime.callDiagnostics.joined(separator: "\n"))
@@ -100,8 +122,8 @@ import UniformTypeIdentifiers
             }
           }
           Section {
-            Text("在线联调版：请保持 App 在前台等待来电。可以通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。")
-            Text("后台来电推送尚未接入。跨网络通话需要在 Relay 配置 TURN 中继。")
+            Text("可以通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。")
+            Text("后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
           }
         }
         .navigationTitle("DJOneHub")

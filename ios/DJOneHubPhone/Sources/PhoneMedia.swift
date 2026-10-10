@@ -10,6 +10,11 @@ func iceCandidateKind(_ sdp: String) -> String {
   return ["host", "srflx", "prflx", "relay"].contains(kind) ? kind : "unknown"
 }
 
+struct AudioReceiveSnapshot {
+  var packets: UInt64 = 0, bytes: UInt64 = 0, samples: UInt64 = 0, concealed: UInt64 = 0
+  var energy: Double = 0
+}
+
 @MainActor final class PhoneMedia: NSObject, RTCPeerConnectionDelegate {
   let binding: Binding
   var onCandidate: (([String: Scalar]) -> Void)?
@@ -25,6 +30,7 @@ func iceCandidateKind(_ sdp: String) -> String {
   private var peer: RTCPeerConnection!
   private var track: RTCAudioTrack!
   private var pending: [RTCIceCandidate] = []
+  private var diagnosticsTask: Task<Void, Never>?
   private var remoteSet = false, closed = false, muted = false, audioEnabled = false,
     systemAudioActive = false
   init(binding: Binding, ice: ICECredentials = .direct) throws {
@@ -163,10 +169,48 @@ func iceCandidateKind(_ sdp: String) -> String {
     track?.isEnabled = audioEnabled && !muted
     RTCAudioSession.sharedInstance().isAudioEnabled = audioEnabled
   }
+  // Whitelist numeric audio counters; do not log the full WebRTC report,
+  // which also contains network addresses and identifiers.
+  func receiveSnapshot() async -> AudioReceiveSnapshot {
+    guard !closed else { return AudioReceiveSnapshot() }
+    return await withCheckedContinuation { continuation in
+      peer.statistics { report in
+        var result = AudioReceiveSnapshot()
+        for stat in report.statistics.values where stat.type == "inbound-rtp" {
+          let values = stat.values
+          guard (values["kind"] as? String ?? values["mediaType"] as? String) == "audio" else { continue }
+          result.packets += (values["packetsReceived"] as? NSNumber)?.uint64Value ?? 0
+          result.bytes += (values["bytesReceived"] as? NSNumber)?.uint64Value ?? 0
+          result.samples += (values["totalSamplesReceived"] as? NSNumber)?.uint64Value ?? 0
+          result.concealed += (values["concealedSamples"] as? NSNumber)?.uint64Value ?? 0
+          result.energy += (values["totalAudioEnergy"] as? NSNumber)?.doubleValue ?? 0
+        }
+        continuation.resume(returning: result)
+      }
+    }
+  }
+  private func startDiagnostics() {
+    guard diagnosticsTask == nil else { return }
+    diagnosticsTask = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+        guard let self, !self.closed else { return }
+        let snapshot = await self.receiveSnapshot()
+        guard !self.closed, !Task.isCancelled else { return }
+        let receivers = self.peer.receivers.compactMap { $0.track as? RTCAudioTrack }
+        let audio = AVAudioSession.sharedInstance()
+        let route = audio.currentRoute.outputs.first?.portType.rawValue ?? "none"
+        self.onDiagnostic?("audio_rx packets=\(snapshot.packets) bytes=\(snapshot.bytes) samples=\(snapshot.samples) concealed=\(snapshot.concealed) energy=\(String(format: "%.6f", snapshot.energy))")
+        self.onDiagnostic?("audio_play enabled=\(self.audioEnabled) tracks=\(receivers.count) enabled_tracks=\(receivers.filter { $0.isEnabled }.count) route=\(route) volume=\(String(format: "%.2f", audio.outputVolume))")
+      }
+    }
+  }
   func close() {
     guard !closed else { return }
     setAudio(false)
     closed = true
+    diagnosticsTask?.cancel()
+    diagnosticsTask = nil
     peer?.close()
     pending.removeAll()
     onCandidate = nil
@@ -237,7 +281,10 @@ func iceCandidateKind(_ sdp: String) -> String {
     Task { @MainActor [weak self] in
       guard let self, !self.closed else { return }
       self.onDiagnostic?("peer_state_\(newState.rawValue)")
-      if newState == .connected { self.onConnected?() }
+      if newState == .connected {
+        self.startDiagnostics()
+        self.onConnected?()
+      }
       if newState == .failed || newState == .disconnected || newState == .closed {
         self.onFailure?()
       }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/iniwex5/vohive/internal/relay/identity"
 	"github.com/iniwex5/vohive/internal/turncred"
+	"github.com/iniwex5/vohive/internal/voippush"
 	"golang.org/x/time/rate"
 )
 
@@ -64,7 +65,12 @@ func (s *Server) Close()                         { s.signals.close() }
 func Handler(store *identity.Store) http.Handler { return NewServer(store) }
 
 type Option func(*serverOptions)
-type serverOptions struct{ turn *turncred.Issuer }
+type serverOptions struct {
+	turn *turncred.Issuer
+	push voippush.Sender
+}
+
+func WithPush(sender voippush.Sender) Option { return func(o *serverOptions) { o.push = sender } }
 
 func WithTURN(issuer *turncred.Issuer) Option { return func(o *serverOptions) { o.turn = issuer } }
 func NewServer(store *identity.Store, options ...Option) *Server {
@@ -74,10 +80,26 @@ func NewServer(store *identity.Store, options ...Option) *Server {
 	}
 	mux := http.NewServeMux()
 	signals := newSignalBroker(store)
+	signals.push = config.push
 	mux.HandleFunc("GET /v1/signaling", signals.serve)
 	limits := &limiter{entries: make(map[string]ipLimit), global: rate.NewLimiter(50, 100)}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, http.StatusOK, map[string]any{"status": "ok", "version": 1, "capabilities": map[string]bool{"identity": true, "signaling": true, "outgoing_calls": true, "voip_push": false, "turn": config.turn != nil}})
+		respond(w, http.StatusOK, map[string]any{"status": "ok", "version": 1, "capabilities": map[string]bool{"identity": true, "signaling": true, "outgoing_calls": true, "voip_push": config.push != nil, "turn": config.turn != nil}})
+	})
+	mux.HandleFunc("POST /v1/push", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Environment string `json:"environment"`
+			Token       string `json:"token"`
+		}
+		if !decode(w, r, &body) {
+			return
+		}
+		if config.push == nil || body.Environment != config.push.Environment() {
+			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "push_unavailable"})
+			return
+		}
+		err := store.SetPushEndpoint(r.Context(), identity.Bearer(r.Header.Get("Authorization")), body.Environment, body.Token)
+		result(w, http.StatusOK, map[string]bool{"registered": body.Token != ""}, err)
 	})
 	mux.HandleFunc("POST /v1/ice", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {

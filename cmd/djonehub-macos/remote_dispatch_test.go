@@ -108,7 +108,7 @@ func TestRemoteStatusSeparatesOnlineTransportFromProductionAvailability(t *testi
 			State      string
 		} `json:"online_transport"`
 	}
-	if json.Unmarshal(r.Body.Bytes(), &status) != nil || status.Available || status.Reason != "online_only_not_production" || !status.Online.Configured || status.Online.State != "online" {
+	if json.Unmarshal(r.Body.Bytes(), &status) != nil || status.Available || status.Reason != "remote_validation_pending" || !status.Online.Configured || status.Online.State != "online" {
 		t.Fatal(r.Body.String())
 	}
 }

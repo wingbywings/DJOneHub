@@ -5,6 +5,7 @@ package remotemedia
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -12,11 +13,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/pion/webrtc/v4"
 )
 
 // Opt-in fixture consumed by the native iOS simulator test. Only loopback
-// HTTP is used; no identity/TURN credentials or actual audio are involved.
+// HTTP is used; only synthetic tone PCM, no microphone or telephone audio.
 func TestIOSNativeInteropFixture(t *testing.T) {
 	if os.Getenv("DJONEHUB_IOS_INTEROP") != "1" {
 		t.Skip("requires companion iOS simulator test")
@@ -31,6 +33,37 @@ func TestIOSNativeInteropFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer p.Close()
+	host := connectPeerHost(t, p)
+	// Drain any phone uplink so the native-host queue cannot block the fixture.
+	_ = host.SetReadDeadline(time.Time{})
+	go func() {
+		for {
+			if _, _, err := host.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	// Feed the host before negotiation too; capture remains gated until /audio.
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for sequence := uint64(0); ; sequence++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			frame := Frame{Direction: FromModem, Generation: 1, Sequence: sequence, SampleIndex: sequence * FrameSamples}
+			for i := range frame.PCM {
+				frame.PCM[i] = int16(8000 * math.Sin(2*math.Pi*440*float64(frame.SampleIndex+uint64(i))/8000))
+			}
+			data, _ := frame.MarshalBinary()
+			_ = host.SetWriteDeadline(time.Now().Add(time.Second))
+			if host.WriteMessage(websocket.BinaryMessage, data) != nil {
+				return
+			}
+		}
+	}()
 	offer, err := p.CreateOffer(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -78,6 +111,19 @@ func TestIOSNativeInteropFixture(t *testing.T) {
 		json.NewEncoder(w).Encode(candidates)
 		candidates = nil
 	})
+	mux.HandleFunc("POST /audio", func(w http.ResponseWriter, r *http.Request) {
+		if !p.TransportConnected() {
+			http.Error(w, "transport not connected", 409)
+			return
+		}
+		state := Readiness{CallUUID: "native-interop", Generation: 1, Revision: 1, CellularActive: true, ModuleReady: true, IOSAudioActive: true}
+		if p.UpdateReadiness(state) != nil || p.Activate() != nil {
+			http.Error(w, "activation failed", 409)
+			return
+		}
+
+		w.WriteHeader(204)
+	})
 	mux.HandleFunc("POST /complete", func(w http.ResponseWriter, r *http.Request) {
 		if !p.TransportConnected() {
 			http.Error(w, "transport not connected", 409)
@@ -99,6 +145,15 @@ func TestIOSNativeInteropFixture(t *testing.T) {
 	t.Log("iOS interoperability fixture ready on loopback port 39096")
 	select {
 	case <-done:
+		send, _ := p.Stats()
+		if send.EncodedPackets < 5 || send.SignalFrames < 10 {
+			t.Fatalf("synthetic audio was not sent: %+v", send)
+		}
+		shutdown, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdown); err != nil {
+			t.Fatal(err)
+		}
 	case <-ctx.Done():
 		t.Fatal("native iOS companion did not complete")
 	}

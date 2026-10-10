@@ -19,6 +19,7 @@ import (
 	"github.com/iniwex5/vohive/internal/relay"
 	"github.com/iniwex5/vohive/internal/relay/identity"
 	"github.com/iniwex5/vohive/internal/turncred"
+	"github.com/iniwex5/vohive/internal/voippush"
 )
 
 func main() {
@@ -29,7 +30,23 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: djonehub-relay serve|provision|lookup|revoke [flags]")
+		return errors.New("usage: djonehub-relay serve|provision|lookup|revoke|check-apns [flags]")
+	}
+	if args[0] == "check-apns" {
+		f := flag.NewFlagSet("check-apns", flag.ContinueOnError)
+		path := f.String("apns-config", "", "absolute private APNs JSON configuration")
+		if err := f.Parse(args[1:]); err != nil {
+			return err
+		}
+		if f.NArg() != 0 || *path == "" {
+			return errors.New("check-apns requires only --apns-config")
+		}
+		provider, err := voippush.ReadConfig(*path)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("APNs configuration valid; environment=%s; Apple authorization not tested\n", provider.Environment())
+		return nil
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	directory := flags.String("state-dir", "", "absolute private directory for SQLite state")
@@ -41,6 +58,7 @@ func run(args []string) error {
 	modules := flags.String("modules", "", "comma-separated module IDs for offline Hub enrollment")
 	output := flags.String("out", "", "new 0600 enrollment output file; never stdout")
 	id := flags.String("id", "", "identity ID to revoke locally")
+	pushFile := flags.String("apns-config", "", "private JSON APNs provider configuration file")
 	turnFile := flags.String("turn-config", "", "private JSON coturn REST configuration file")
 	fingerprint := flags.String("key-fingerprint", "", "SHA-256 public key fingerprint for offline recovery lookup")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -52,8 +70,8 @@ func run(args []string) error {
 	if args[0] != "serve" && args[0] != "provision" && args[0] != "revoke" && args[0] != "lookup" {
 		return errors.New("unknown relay command")
 	}
-	if *turnFile != "" && args[0] != "serve" {
-		return errors.New("--turn-config applies only to serve")
+	if (*turnFile != "" || *pushFile != "") && args[0] != "serve" {
+		return errors.New("--turn-config and --apns-config apply only to serve")
 	}
 	if args[0] == "serve" {
 		if err := validateTransport(*listen, *cert, *key, *insecure); err != nil {
@@ -110,7 +128,15 @@ func run(args []string) error {
 			return err
 		}
 	}
-	handler := relay.NewServer(store, relay.WithTURN(issuer))
+	options := []relay.Option{relay.WithTURN(issuer)}
+	if *pushFile != "" {
+		sender, err := voippush.ReadConfig(*pushFile)
+		if err != nil {
+			return err
+		}
+		options = append(options, relay.WithPush(sender))
+	}
+	handler := relay.NewServer(store, options...)
 	defer handler.Close()
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -123,7 +149,7 @@ func run(args []string) error {
 			result <- server.ListenAndServe()
 		}
 	}()
-	log.Printf("DJOneHub relay identity and online signaling listening on %s; VoIP push is not enabled", *listen)
+	log.Printf("DJOneHub relay listening on %s; VoIP push configured=%t", *listen, *pushFile != "")
 	select {
 	case err := <-result:
 		if errors.Is(err, http.ErrServerClosed) {

@@ -524,3 +524,80 @@ final class PhoneTests: XCTestCase {
   }
 
 }
+
+extension PhoneTests {
+  func testPushHintsRequireAuthenticatedMatchingInvite() throws {
+    let invite = invite()
+    let object = try JSONSerialization.jsonObject(with: invite.encoded())
+    let data = try JSONSerialization.data(withJSONObject: ["aps": [:], "invite": object])
+    let hint = try PushInvite.decode(data)
+    try hint.validate(principal: principal())
+    XCTAssertTrue(hint.matches(invite))
+    var changed = invite
+    changed.generation = 2
+    XCTAssertFalse(hint.matches(changed))
+    changed = invite
+    changed.payload["deadline"] = .string("2099-01-01T00:00:00Z")
+    XCTAssertFalse(hint.matches(changed))
+    XCTAssertThrowsError(
+      try hint.validate(principal: principal(), now: Date().addingTimeInterval(120)))
+    changed = invite
+    changed.installation_id = "other"
+    let wrong = try JSONSerialization.data(withJSONObject: [
+      "aps": [:], "invite": JSONSerialization.jsonObject(with: changed.encoded()),
+    ])
+    XCTAssertThrowsError(try PushInvite.decode(wrong).validate(principal: principal()))
+    XCTAssertThrowsError(try PushInvite.decode(Data(repeating: 32, count: 5121)))
+  }
+  @MainActor func testPushHintAloneNeverAuthorizesAnswerOrMedia() throws {
+    var effects: [CallEffect] = []
+    let call = PhoneCall(principal: principal()) { effects.append($0) }
+    let message = invite()
+    let binding = message.binding!
+    // CallKit can report and the user can answer before WSS resumes. These
+    // callbacks must not create a call or emit a hardware/media command.
+    call.reported(binding, success: true)
+    call.requestAnswer(binding)
+    XCTAssertNil(call.binding)
+    XCTAssertTrue(effects.isEmpty)
+    call.receive(message)
+    call.reported(binding, success: true)
+    call.requestAnswer(binding)
+    XCTAssertFalse(
+      effects.contains {
+        if case .send = $0 { return true }
+        return false
+      })
+    XCTAssertFalse(
+      effects.contains {
+        if case .audio(_, true) = $0 { return true }
+        return false
+      })
+  }
+  @MainActor func testPushRegistrationUsesInstallationAuthAndSupportsInvalidation() async throws {
+    let vault = MemoryVault()
+    let http = MockHTTP()
+    let stored = StoredIdentity(
+      version: 1, relay: "https://relay.example", seed: Data(repeating: 1, count: 32),
+      phase: "ready", tokens: tokens(Date().addingTimeInterval(900)))
+    vault.data = try Wire.encoder().encode(stored)
+    let identity = PhoneIdentity(vault: vault, http: http)
+    http.response = { path, body in
+      XCTAssertEqual(path, "/v1/push")
+      let payload = try JSONSerialization.jsonObject(with: body) as! [String: String]
+      XCTAssertEqual(payload["environment"], "sandbox")
+      return try JSONSerialization.data(withJSONObject: ["registered": payload["token"] != ""])
+    }
+    try await identity.registerPush(
+      environment: "sandbox", token: String(repeating: "a", count: 64))
+    try await identity.registerPush(environment: "sandbox", token: "")
+    XCTAssertEqual(
+      http.accessTokens.compactMap { $0 },
+      [stored.tokens!.access_token, stored.tokens!.access_token])
+    do {
+      try await identity.registerPush(environment: "custom", token: "invalid")
+      XCTFail("invalid token accepted")
+    } catch {}
+    XCTAssertEqual(http.calls.count, 2)
+  }
+}

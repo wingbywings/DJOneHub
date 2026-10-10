@@ -167,6 +167,10 @@ func RunSignaledCall(parent context.Context, client *callsignal.Client, config S
 				continue
 			} // a late response from an ended call
 			switch m.Type {
+			case "waking":
+				if !delivered {
+					ackTimer.Reset(time.Until(config.RingDeadline))
+				}
 			case "delivered":
 				delivered = true
 				ackTimer.Stop()
@@ -233,7 +237,7 @@ func RunSignaledCall(parent context.Context, client *callsignal.Client, config S
 // be valid protocol IDs but must never become log text or status diagnostics.
 func relayFailureCode(code string) string {
 	switch code {
-	case "unauthorized", "connection_ended", "stale_epoch", "invalid_deadline", "call_unavailable", "connection_capacity", "target_unavailable", "candidate_limit":
+	case "unauthorized", "connection_ended", "stale_epoch", "invalid_deadline", "call_unavailable", "connection_capacity", "target_unavailable", "candidate_limit", "push_unavailable", "invite_expired", "push_capacity":
 		return code
 	default:
 		return "unknown_error"

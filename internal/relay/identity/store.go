@@ -193,7 +193,7 @@ func (s *Store) initialize() error {
 	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > 2 {
 		return errors.New("unsupported relay identity schema")
 	}
 	if version == 0 {
@@ -208,6 +208,11 @@ CREATE INDEX challenge_owner ON challenges(identity_id, expires);
 CREATE INDEX access_expiry ON access_tokens(expires);
 PRAGMA user_version=1;`)
 		if err != nil {
+			return err
+		}
+	}
+	if version < 2 {
+		if _, err = tx.Exec(`CREATE TABLE push_endpoints(identity_id TEXT PRIMARY KEY REFERENCES identities(id), environment TEXT NOT NULL, token TEXT NOT NULL, registration TEXT NOT NULL, updated INTEGER NOT NULL, UNIQUE(environment,token)); PRAGMA user_version=2;`); err != nil {
 			return err
 		}
 	}

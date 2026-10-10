@@ -1,0 +1,7 @@
+{
+  "team_id": "REPLACE_ME",
+  "key_id": "REPLACE_ME",
+  "bundle_id": "org.djonehub.phone",
+  "environment": "sandbox",
+  "private_key_pem": ""
+}

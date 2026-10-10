@@ -24,18 +24,31 @@ targets:
       path: Info.plist
       properties:
         UIBackgroundModes: [audio, voip]
+        DJOneHubAPNSEnvironment: $(DJONEHUB_APNS_ENVIRONMENT)
+    entitlements:
+      path: DJOneHubPhone.entitlements
+      properties:
+        aps-environment: $(DJONEHUB_APNS_ENTITLEMENT)
     dependencies:
       - package: DJOneHubPhoneCore
       - package: WebRTC
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: org.djonehub.phone
+        DEVELOPMENT_TEAM: 8AHAFH9VTZ
+        PRODUCT_BUNDLE_IDENTIFIER: com.oops.djonehub
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_CFBundleDisplayName: DJOneHub
         INFOPLIST_KEY_NSMicrophoneUsageDescription: 接听 DJOneHub 转接的电话时需要使用麦克风。
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: 与同一网络中的 DJOneHub 建立通话音频连接。
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+      configs:
+        Debug:
+          DJONEHUB_APNS_ENVIRONMENT: sandbox
+          DJONEHUB_APNS_ENTITLEMENT: development
+        Release:
+          DJONEHUB_APNS_ENVIRONMENT: production
+          DJONEHUB_APNS_ENTITLEMENT: production
     scheme:
       gatherCoverageData: true
       testTargets: [DJOneHubPhoneTests]

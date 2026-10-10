@@ -8,7 +8,7 @@
 
 本文按这台 **CentOS Linux 8** Relay 服务器编写：TCP 80/443 上已有网站，并已有 `https://oops.work` 的域名证书。Relay 与 coturn 加在这台机器上，现有网站继续占用 80/443。Mac 与 iPhone 的 Relay 地址是 `https://oops.work:8443`。若 `dnf` 出现 AppStream 403 或仓库 ID 重复，先按 [CentOS 8 软件源与依赖适配](REMOTE_RELAY_CENTOS8.md) 修好本次安装用的源，再回到第 3 节；那个文档只处理软件源，不替代本文的证书和端口步骤。
 
-本文是按当前代码核对的部署与验收步骤，不是已经完成的公网/真机验收报告。当前支持 **App 前台在线等待来电**；APNs/PushKit 尚未实现，不能把锁屏、后台或被杀掉后的来电作为本轮成功条件。已验证 Go/Pion 的双向 Opus 与 TURN/UDP、TURN/TCP，以及 iOS 原生 WebRTC 模拟器协商；真实 iPhone ↔ Pion ↔ UAC ↔ 电话模块整条链路需要按本文实测。
+本文是按当前代码核对的部署与验收步骤，不是已经完成的公网/真机验收报告。当前支持 **App 前台在线等待来电**；APNs/PushKit 后续实现与独立配置见[第十三批说明](remote-calls-thirteenth-batch.md)，本文的前台流程不能代替锁屏与后台验收。已验证 Go/Pion 的双向 Opus 与 TURN/UDP、TURN/TCP，以及 iOS 原生 WebRTC 模拟器协商；真实 iPhone ↔ Pion ↔ UAC ↔ 电话模块整条链路需要按本文实测。
 
 ## 1. 设备与部署拓扑
 
@@ -401,7 +401,7 @@ open /Users/yuyi/Documents/Code/DJOneHub/ios/DJOneHubPhone/DJOneHubPhone.xcodepr
 
 1. 在 Xcode Settings 的 Accounts 中登录自己的开发账号，连接并信任 iPhone；根据设备提示启用 Developer Mode。
 2. 选择 **DJOneHubPhone** target → Signing & Capabilities，选择自己的 Team，保留 Automatically manage signing，把默认 `org.djonehub.phone` 改成自己可签名的唯一 Bundle ID。
-3. 确认 Background Modes 中已有 Audio 和 Voice over IP（源码 `UIBackgroundModes` 为 `audio`、`voip`）。CallKit 来电报告需要 VoIP 模式；当前仍需 App 前台在线接收邀请，尚未配置 Push Notifications 或 APNs 密钥。
+3. 确认 Background Modes 中已有 Audio 和 Voice over IP（源码 `UIBackgroundModes` 为 `audio`、`voip`）。CallKit 来电报告需要 VoIP 模式；项目现在同时声明 Push Notifications entitlement；启用后台来电前，需按第十三批说明配置实际 Team、App ID、APNs 环境和 Relay 密钥。
 4. 选择 **DJOneHubPhone** scheme，运行目标选择真实 iPhone，等待本地 Swift 包和固定版本 WebRTC XCFramework 解析完成，点击 Run 安装。
 5. 启动 App。后续连接时允许麦克风权限；如系统请求本地网络权限，联调时允许。
 
@@ -542,7 +542,7 @@ sudo systemctl restart djonehub-relay
 | 接听后很快挂断 | Swift 宿主是否运行、bootstrap 路径/用户是否一致、精确 UAC 绑定及 host running/error；不要调大超时掩盖宿主未启动 |
 | 单向声音 | 分别核对 iPhone 静音/麦克风、UAC 输入输出及媒体模式；用两个房间的主叫/接听者复述测试定位方向 |
 | Mac 本地接听显示音频已连接但双方无声 | 检查宿主终端和实际默认输入/输出。2026-10-09 修复了蓝牙 VoiceProcessing 重配置后 AVAudioEngine 自动停止、UAC 仍运行的情况；更新源码、重新构建并在原终端重启 Swift 宿主，故障后会重建普通音频引擎 |
-| 放到后台后不再来电 | 当前在线版的已知限制，空闲进入后台会断开；APNs/PushKit 尚未接入 |
+| 放到后台后不再来电 | 空闲进入后台会断开 WSS；需启用后台来电，核对 App 注册状态、签名 entitlement 与 Relay APNs 环境 |
 | 第二通不响 | Hub 要等上一通清理并重连；手机若因错误断开则手动连接；必须重新拨打新的电话 |
 
 手机已知安装 ID 的恢复：先在 Mac 执行 `./dist/djonehub-macos remote revoke --profile home --installation ios_实际ID`，再在 App 断开并选择“清理本机配对凭据”，重新生成配对文件、导入，并更新模块 target_installation_id。

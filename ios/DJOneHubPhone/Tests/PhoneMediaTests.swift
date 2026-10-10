@@ -92,12 +92,14 @@ final class PhoneMediaTests: XCTestCase {
         connected.fulfill()
       }
     }
+    var candidateTasks: [Task<Void, Never>] = []
     phone.onCandidate = { payload in
-      Task { @MainActor in
-        do { try await post("candidate", Wire.encoder().encode(payload)) } catch {
-          XCTFail("Candidate HTTP transport failed")
-        }
-      }
+      candidateTasks.append(
+        Task { @MainActor in
+          do { try await post("candidate", Wire.encoder().encode(payload)) } catch {
+            XCTFail("Candidate HTTP transport failed")
+          }
+        })
     }
     let polling = Task { @MainActor in
       while !Task.isCancelled {
@@ -114,6 +116,20 @@ final class PhoneMediaTests: XCTestCase {
     try await post(
       "answer", JSONSerialization.data(withJSONObject: ["type": "answer", "sdp": answer]))
     await fulfillment(of: [connected], timeout: 15)
+    XCTAssertFalse(RTCAudioSession.sharedInstance().isAudioEnabled)
+    try await post("audio", Data())
+    var received = AudioReceiveSnapshot()
+    for _ in 0..<50 {
+      received = await phone.receiveSnapshot()
+      if received.packets >= 5 { break }
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTAssertGreaterThanOrEqual(received.packets, 5, "Native SDK must receive real Pion Opus RTP, not merely connect ICE")
+    XCTAssertGreaterThan(received.bytes, 0)
+    phone.onCandidate = nil
+    for task in candidateTasks { await task.value }
+    polling.cancel()
+    await polling.value
     try await post("complete", Data())
     XCTAssertFalse(RTCAudioSession.sharedInstance().isAudioEnabled)
   }

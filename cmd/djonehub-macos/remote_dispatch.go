@@ -24,7 +24,7 @@ type remoteHubService struct {
 	ice func(context.Context, string) (turncred.Credentials, error)
 }
 
-// An explicit development entry point until PushKit/APNs and device validation are ready.
+// An explicit integration entry point until background-call device validation is complete.
 // No HTTP request may select a profile or load Keychain credentials.
 func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming func(context.Context, remotehub.Connection, callsignal.Message)) (*remoteHubService, error) {
 	if profile == "" {

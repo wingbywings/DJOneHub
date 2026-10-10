@@ -214,3 +214,22 @@ func TestReceiverCombinesShortLegalOpusDurations(t *testing.T) {
 		}
 	}
 }
+
+func TestReceiverMaintainsRateWithTickerJitter(t *testing.T) {
+	r, _ := receiverForTest()
+	start := time.Unix(1, 0)
+	for i := 0; i < 500; i++ {
+		now := start.Add(time.Duration(i)*10*time.Millisecond + time.Duration(500-i)*time.Microsecond)
+		if i%2 == 0 {
+			if err := r.Push(rtpInput(uint16(i/2), uint32(i*480), 1), now); err != nil {
+				t.Fatalf("normal 20 ms input rejected at tick %d: %v; %+v", i, err, r.Stats())
+			}
+		}
+		if _, err := r.Read(now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stats := r.Stats(); stats.DecodedPackets < 245 || stats.RejectedPackets != 0 || stats.Rebuffers != 0 {
+		t.Fatalf("sub-millisecond jitter slowed playout: %+v", stats)
+	}
+}

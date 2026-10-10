@@ -11,12 +11,14 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/iniwex5/vohive/internal/callsignal"
 	"github.com/iniwex5/vohive/internal/relay/identity"
+	"github.com/iniwex5/vohive/internal/voippush"
 	"golang.org/x/time/rate"
 )
 
 // All routes are bound to these exact connection objects. A reconnect starts a
 // new epoch and never resumes or replays an earlier hardware command.
 type signalConnection struct {
+	ready             bool // guarded by broker.mu; welcome must be enqueued first
 	principal         identity.Principal
 	token, epoch      string
 	authMu            sync.Mutex // guards token and authorization watcher replacement
@@ -34,8 +36,12 @@ type signalRoute struct {
 	iceCount   int
 	outgoing   bool
 	invited    bool
+	stopWake   context.CancelFunc
 }
 type signalBroker struct {
+	push        voippush.Sender
+	workers     sync.WaitGroup
+	pushSlots   chan struct{}
 	store       *identity.Store
 	mu          sync.Mutex
 	closed      bool
@@ -44,15 +50,21 @@ type signalBroker struct {
 }
 
 func newSignalBroker(store *identity.Store) *signalBroker {
-	return &signalBroker{store: store, connections: make(map[string]*signalConnection), routes: make(map[string]*signalRoute)}
+	return &signalBroker{store: store, pushSlots: make(chan struct{}, 32), connections: make(map[string]*signalConnection), routes: make(map[string]*signalRoute)}
 }
 func (b *signalBroker) close() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.closed = true
 	for _, c := range b.connections {
 		c.cancel()
 	}
+	for _, route := range b.routes {
+		if route.stopWake != nil {
+			route.stopWake()
+		}
+	}
+	b.mu.Unlock()
+	b.workers.Wait()
 }
 func (c *signalConnection) send(m callsignal.Message) bool {
 	if c.ctx.Err() != nil {
@@ -119,6 +131,7 @@ func (b *signalBroker) serve(w http.ResponseWriter, r *http.Request) {
 		return c.ws.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
 	})
 	c.send(callsignal.Message{Version: 1, Type: "welcome", HubEpoch: c.epoch, Payload: callsignal.Body(callsignal.Welcome{ID: p.ID, Kind: p.Kind, HubID: p.HubID, AccessExpiresAt: p.AccessExpiresAt})})
+	b.attachPending(c)
 	writerDone := make(chan struct{})
 	authDone := make(chan struct{})
 	go func() { defer close(authDone); c.watchAuthorization() }()
@@ -264,7 +277,10 @@ func (b *signalBroker) route(c *signalConnection, m callsignal.Message) string {
 			return "connection_capacity"
 		}
 		phone := b.connections[m.InstallationID]
-		if phone == nil || phone.principal.Kind != "installation" || phone.principal.HubID != c.principal.ID || phone.principal.Tenant != c.principal.Tenant {
+		if phone == nil || !phone.ready {
+			return b.wake(c, m, invite)
+		}
+		if phone.principal.Kind != "installation" || phone.principal.HubID != c.principal.ID || phone.principal.Tenant != c.principal.Tenant {
 			return "target_unavailable"
 		}
 		if _, err := phone.authenticate(b.store, m.ModuleID); err != nil {
@@ -293,6 +309,9 @@ func (b *signalBroker) route(c *signalConnection, m callsignal.Message) string {
 		target = route.hub
 	} else {
 		return "unauthorized"
+	}
+	if target == nil {
+		return "call_pending"
 	}
 	if _, err := target.authenticate(b.store, m.ModuleID); err != nil {
 		target.cancel()
@@ -379,6 +398,9 @@ func (b *signalBroker) detach(c *signalConnection) {
 	}
 	if route := b.routes[c.principal.HubID]; route != nil && (route.hub == c || route.phone == c) {
 		delete(b.routes, c.principal.HubID)
+		if route.stopWake != nil {
+			route.stopWake()
+		}
 		target := route.hub
 		if c == route.hub {
 			target = route.phone
@@ -386,6 +408,8 @@ func (b *signalBroker) detach(c *signalConnection) {
 		m := route.invite
 		m.Type = "peer_closed"
 		m.Payload = callsignal.Body(callsignal.Failure{Code: "peer_disconnected"})
-		target.send(m)
+		if target != nil {
+			target.send(m)
+		}
 	}
 }

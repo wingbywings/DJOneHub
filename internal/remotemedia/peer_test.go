@@ -217,6 +217,10 @@ func testPeerAudioTransport(t *testing.T, servers []webrtc.ICEServer, trickle bo
 		if send.EncodedPackets < 3 || receive.DecodedPackets < 3 {
 			t.Fatalf("send=%+v receive=%+v", send, receive)
 		}
+		state := p.SignalingState()
+		if !state.AudioActive || state.Downlink.SignalFrames == 0 || state.Downlink.PeakPCM16 < 1000 || state.Uplink.DecodedPackets < 3 {
+			t.Fatalf("status did not expose both audio directions: %+v", state)
+		}
 	}
 	// A later CallKit deactivation revokes media even while native capture and
 	// the other peer keep sending. Old activation snapshots cannot restore it.
@@ -250,6 +254,11 @@ func testPeerAudioTransport(t *testing.T, servers []webrtc.ICEServer, trickle bo
 	case <-a.Done():
 	case <-ctx.Done():
 		t.Fatal("host disconnect did not cancel media")
+	}
+	a.Close()
+	state := a.SignalingState()
+	if state.AudioActive || state.Downlink.EncodedPackets != after.EncodedPackets || state.Downlink.SignalFrames == 0 {
+		t.Fatalf("ended call lost its audio evidence: %+v", state)
 	}
 }
 

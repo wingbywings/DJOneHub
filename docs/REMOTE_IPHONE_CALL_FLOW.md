@@ -1,5 +1,9 @@
 # iPhone 拨打、接听与挂断：更新和验收
 
+2026-10-10 更新：用户已确认 APNs/后台来电完成；随后出现的 iPhone 单向无声已通过
+修复服务端音频时钟累积漂移恢复，真机复测确认“已恢复”。修复版 Hub 已在本机运行，
+AudioHost 已重新注册，详见[音频诊断与验收记录](REMOTE_AUDIO_DIAGNOSTICS.md)。下文保留此前批次的部署过程。
+
 当前分支：`codex/remote-iphone-callkit`。2026-10-09 用户已确认更新 UAC 回调周期后的 CallKit 接听及双向音频测试通过。本次补齐 App 通话控制和主动呼出；呼出尚需更新公网 Relay 后进行真机验收。
 
 新版 App 已覆盖安装并启动到 Wings Black，保留 `com.oops.djonehub` 的原配对身份。用户随后确认 App 红色挂断按钮正常、双方结束且恢复“在线，等待来电”。Hub 同一通 `e283c29e-bafe-472f-aebb-bced97026827` 记录为 `ended / remote_hangup`、`cleanup_failed=false`；模块 active 为空，AudioHost running=false。当前 Mac 仍运行 20:13 启动的旧 Go 进程，需按下述步骤重启以加载新呼出和结束状态实现。
@@ -15,7 +19,7 @@
 
 如果手机通话已结束，但模块的 CLCC/ATH 清理未确认，App 会提示“模块挂断未确认，请检查模块通话状态”；Hub 保留该模块的音频占用，直到实际通话结束，避免把新电话误认为原通话或误报挂断成功。
 
-后台 APNs/PushKit 尚未实现，空闲等待时仍需 App 在前台。只有“通话中”才开始计时；系统提前激活呼出音频不会提前打开 RTP 音频门控。
+后台 APNs/PushKit 已接入，启用前需要完成[推送配置与后台验收](remote-calls-thirteenth-batch.md)；未配置时，空闲等待仍需 App 在前台。只有“通话中”才开始计时；系统提前激活呼出音频不会提前打开 RTP 音频门控。
 
 ## 更新已有部署，保留配对
 

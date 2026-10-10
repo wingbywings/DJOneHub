@@ -2,10 +2,23 @@ import AVFAudio
 import CallKit
 import DJOneHubPhoneCore
 import OSLog
+import PushKit
 import SwiftUI
 
-@MainActor final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProviderDelegate
+@MainActor
+final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProviderDelegate,
+  @preconcurrency PKPushRegistryDelegate
 {
+  static let shared = PhoneRuntime()
+  @Published private(set) var pushEnabled = UserDefaults.standard.bool(forKey: "voipPushEnabled")
+  @Published private(set) var pushStatus = "后台来电未启用"
+  private var pushRegistry: PKPushRegistry?
+  private var pushToken: String?
+  private var pushTask: Task<Void, Never>?
+  private var wake: PushInvite?
+  private var wakeReported: Bool?
+  private var wakeRejected = false
+  private var wakeTimeout: Task<Void, Never>?
   @Published var status = "未连接"
   @Published var paired = false
   @Published var online = false
@@ -62,6 +75,171 @@ import SwiftUI
     provider.setDelegate(self, queue: .main)
     reloadStatus()
   }
+  func startPushIfEnabled() {
+    guard pushEnabled, pushRegistry == nil else { return }
+    let registry = PKPushRegistry(queue: .main)
+    registry.delegate = self
+    pushRegistry = registry
+    registry.desiredPushTypes = [.voIP]
+    pushStatus = "正在注册后台来电"
+  }
+  func enablePush() async {
+    guard paired, !working, callUUID == nil else { return }
+    guard await AVAudioApplication.requestRecordPermission() else {
+      pushStatus = "请先授予麦克风权限"
+      return
+    }
+    pushEnabled = true
+    UserDefaults.standard.set(true, forKey: "voipPushEnabled")
+    startPushIfEnabled()
+    syncPushRegistration()
+  }
+  func disablePush() async {
+    guard !working, callUUID == nil else { return }
+    working = true
+    pushTask?.cancel()
+    if let task = pushTask { await task.value }
+    pushTask = nil
+    defer { working = false }
+    do {
+      try await identity.registerPush(environment: pushEnvironment, token: "")
+      pushEnabled = false
+      UserDefaults.standard.set(false, forKey: "voipPushEnabled")
+      pushRegistry?.desiredPushTypes = []
+      pushRegistry = nil
+      pushToken = nil
+      pushStatus = "后台来电已关闭"
+    } catch { pushStatus = "无法关闭服务端推送，请重试或在 Hub 撤销安装身份" }
+  }
+  private var pushEnvironment: String {
+    Bundle.main.object(forInfoDictionaryKey: "DJOneHubAPNSEnvironment") as? String ?? ""
+  }
+  private func syncPushRegistration() {
+    guard pushEnabled, paired, !working, let token = pushToken, pushTask == nil else { return }
+    pushTask = Task { [weak self] in
+      guard let self else { return }
+      defer {
+        self.pushTask = nil
+        if self.pushToken != token { self.syncPushRegistration() }
+      }
+      for attempt in 0..<3 {
+        guard !Task.isCancelled, self.pushToken == token, self.pushEnabled else { return }
+        do {
+          try await self.identity.registerPush(environment: self.pushEnvironment, token: token)
+          guard !Task.isCancelled, self.pushToken == token else { return }
+          self.pushStatus = token.isEmpty ? "推送凭据已失效，请重新启用" : "后台来电已注册（需要网络与系统推送服务）"
+          return
+        } catch {
+          self.pushStatus = "后台来电注册失败，请检查签名和 Relay APNs 配置"
+          if attempt < 2 { try? await Task.sleep(for: .seconds(attempt + 1)) }
+        }
+      }
+    }
+  }
+  func pushRegistry(
+    _ registry: PKPushRegistry, didUpdate pushCredentials: PKPushCredentials,
+    for type: PKPushType
+  ) {
+    guard type == .voIP else { return }
+    pushToken = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
+    syncPushRegistration()
+  }
+  func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
+    guard type == .voIP else { return }
+    pushToken = ""
+    syncPushRegistration()
+  }
+  private func clearWake() {
+    wakeTimeout?.cancel()
+    wakeTimeout = nil
+    wake = nil
+    wakeReported = nil
+    wakeRejected = false
+  }
+  private func completeWakeHandoff() {
+    guard let wake, coordinator?.binding == wake.binding, let reported = wakeReported else {
+      return
+    }
+    let binding = wake.binding
+    let rejected = wakeRejected
+    clearWake()
+    if rejected {
+      coordinator?.requestEnd(binding)
+      return
+    }
+    coordinator?.reported(binding, success: reported)
+    if reported, answerAction != nil { coordinator?.requestAnswer(binding) }
+  }
+  func pushRegistry(
+    _ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload,
+    for type: PKPushType, completion: @escaping () -> Void
+  ) {
+    guard type == .voIP else {
+      completion()
+      return
+    }
+    let hint = (try? JSONSerialization.data(withJSONObject: payload.dictionaryPayload))
+      .flatMap { try? PushInvite.decode($0) }
+    let uuid = hint.flatMap { UUID(uuidString: $0.binding.callUUID) } ?? UUID()
+    let duplicate =
+      hint.map { coordinator?.binding == $0.binding || wake?.binding == $0.binding } ?? false
+    let canStart = !duplicate && wake == nil && coordinator?.binding == nil && !working
+    if canStart, let hint {
+      wake = hint
+      wakeReported = nil
+      callUUID = uuid
+      callDisplay = "DJOneHub"
+      callModule = hint.binding.moduleID
+      callPhase = "incoming"
+    }
+    let update = CXCallUpdate()
+    update.remoteHandle = CXHandle(type: .generic, value: "DJOneHub")
+    update.localizedCallerName = "DJOneHub"
+    update.hasVideo = false
+    update.supportsHolding = false
+    update.supportsGrouping = false
+    update.supportsUngrouping = false
+    update.supportsDTMF = false
+    // Report synchronously in the PushKit callback, before Keychain, HTTP, WSS,
+    // or stale-call checks. Even malformed/expired hints must be reported then ended.
+    provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
+      completion()
+      Task { @MainActor in
+        guard let self else { return }
+        if duplicate { return }
+        guard canStart, let hint, self.wake?.binding == hint.binding else {
+          if error == nil { self.provider.reportCall(with: uuid, endedAt: Date(), reason: .failed) }
+          return
+        }
+        self.wakeReported = error == nil
+        if error != nil && !self.wakeRejected {
+          self.disconnect("系统未允许后台来电")
+          return
+        }
+        do {
+          guard self.pushEnabled, let principal = try self.identity.status()?.tokens?.principal
+          else {
+            throw PhoneError.denied
+          }
+          try hint.validate(principal: principal)
+        } catch {
+          self.disconnect("后台来电已失效")
+          return
+        }
+        self.wakeTimeout = Task { [weak self] in
+          let seconds = max(0, min(12, hint.deadline.timeIntervalSinceNow))
+          try? await Task.sleep(for: .seconds(seconds))
+          guard !Task.isCancelled, self?.wake?.binding == hint.binding else { return }
+          self?.disconnect("后台来电恢复超时")
+        }
+        if self.coordinator?.binding == hint.binding {
+          self.completeWakeHandoff()
+        } else if self.socket == nil {
+          await self.connect(fromPush: true)
+        }
+      }
+    }
+  }
   func reloadStatus() {
     do {
       let record = try identity.status()
@@ -76,6 +254,13 @@ import SwiftUI
   func forgetLocalIdentity() {
     guard !working, socket == nil else { return }
     do {
+      pushTask?.cancel()
+      pushTask = nil
+      pushRegistry?.desiredPushTypes = []
+      pushRegistry = nil
+      pushEnabled = false
+      pushToken = nil
+      UserDefaults.standard.set(false, forKey: "voipPushEnabled")
       try vault.remove()
       reloadStatus()
       status = "本机凭据已清理，可重新导入配对文件"
@@ -87,6 +272,7 @@ import SwiftUI
     defer {
       working = false
       reloadStatus()
+      syncPushRegistration()
     }
     let allowed = url.startAccessingSecurityScopedResource()
     defer { if allowed { url.stopAccessingSecurityScopedResource() } }
@@ -98,17 +284,29 @@ import SwiftUI
       status = "配对完成"
     } catch { status = "配对失败；请检查配对文件与本机凭据状态" }
   }
-  func connect() async {
+  func connect(fromPush: Bool = false) async {
     guard !working, socket == nil else { return }
     working = true
-    defer { working = false }
-    guard await AVAudioApplication.requestRecordPermission() else {
+    let attempt = connectionID
+    let wakeBinding = wake?.binding
+    defer {
+      working = false
+      syncPushRegistration()
+    }
+    let permitted =
+      fromPush
+      ? AVAudioApplication.shared.recordPermission == .granted
+      : await AVAudioApplication.requestRecordPermission()
+    guard permitted else {
+      if fromPush { disconnect("后台接听需要先在前台授予麦克风权限") }
       status = "需要麦克风权限才能接听"
       return
     }
     do {
       let credentials = try await identity.credentials()
+      guard connectionID == attempt, !fromPush || wake?.binding == wakeBinding else { return }
       guard let tokens = credentials.tokens else { throw PhoneError.invalidData }
+      if let wake { try wake.validate(principal: tokens.principal) }
       let c = try SignalSocket(identity: credentials)
       connectionID = UUID()
       let id = connectionID
@@ -158,6 +356,10 @@ import SwiftUI
                     message.type)
                 self.recordDiagnostic(known ? "received_" + message.type : "received_unknown")
               }
+              if message.type == "invite", let wake = self.wake, !wake.matches(message) {
+                self.disconnect("推送来电已失效")
+                return
+              }
               self.coordinator?.receive(message)
             }
           }
@@ -168,7 +370,9 @@ import SwiftUI
           }
         }
       }
-    } catch { status = "连接失败；请检查 Relay 和配对状态" }
+    } catch {
+      if fromPush { disconnect("后台来电连接失败") } else { status = "连接失败；请检查 Relay 和配对状态" }
+    }
   }
   private func checkHealth(_ id: UUID) {
     let now = Date()
@@ -210,9 +414,18 @@ import SwiftUI
       }
     }
   }
-  func backgrounded() { if coordinator?.binding == nil { disconnect("已停止前台等待；再次打开后请连接") } }
+  func backgrounded() {
+    if coordinator?.binding == nil && wake == nil {
+      disconnect(pushEnabled ? "后台等待来电推送" : "已停止前台等待；再次打开后请连接")
+    }
+  }
   func disconnect(_ message: String = "已断开") {
     if coordinator?.binding != nil { recordDiagnostic("signaling_disconnected") }
+    if let wake, coordinator?.binding != wake.binding {
+      provider.reportCall(
+        with: UUID(uuidString: wake.binding.callUUID)!, endedAt: Date(), reason: .failed)
+    }
+    clearWake()
     connectionID = UUID()
     online = false
     dialingSupported = false
@@ -337,6 +550,11 @@ import SwiftUI
       update.supportsGrouping = false
       update.supportsUngrouping = false
       update.supportsDTMF = false
+      if wake?.binding == b {
+        completeWakeHandoff()
+        status = coordinator?.ending == true ? "正在挂断" : "来电"
+        return
+      }
       provider.reportNewIncomingCall(with: UUID(uuidString: b.callUUID)!, update: update) {
         [weak self] error in
         Task { @MainActor in
@@ -497,6 +715,14 @@ import SwiftUI
       provider.reportCall(
         with: UUID(uuidString: b.callUUID)!, endedAt: Date(), reason: endReason)
       status = online ? "在线，等待来电" : "已断开"
+      // After a background call ends, do not leave an idle WSS socket that iOS
+      // may suspend while the Relay still mistakes it for an available phone.
+      Task { [weak self] in
+        guard let self, UIApplication.shared.applicationState == .background,
+          self.coordinator?.binding == nil, self.wake == nil
+        else { return }
+        self.backgrounded()
+      }
     case .disconnect(let reason):
       recordDiagnostic(reason.rawValue)
       disconnect("通话已结束或连接不可用")
@@ -546,6 +772,12 @@ import SwiftUI
   }
   func providerDidReset(_ provider: CXProvider) { disconnect("系统已重置通话") }
   func provider(_ provider: CXProvider, perform action: CXAnswerCallAction) {
+    if let wake, wake.binding.callUUID == action.callUUID.uuidString.lowercased(),
+      coordinator?.binding == nil, answerAction == nil
+    {
+      answerAction = action
+      return
+    }
     guard let b = coordinator?.binding, b.callUUID == action.callUUID.uuidString.lowercased(),
       answerAction == nil
     else {
@@ -562,6 +794,19 @@ import SwiftUI
     coordinator?.requestAnswer(b)
   }
   func provider(_ provider: CXProvider, perform action: CXEndCallAction) {
+    if let wake, wake.binding.callUUID == action.callUUID.uuidString.lowercased(),
+      coordinator?.binding == nil
+    {
+      wakeRejected = true
+      answerAction?.fail()
+      answerAction = nil
+      callPhase = "ending"
+      status = "正在拒接后台来电"
+      // Keep restoring the authenticated route, then send one reject. Push
+      // data alone cannot authorize ATH, just as it cannot authorize ATA.
+      action.fulfill()
+      return
+    }
     guard let b = coordinator?.binding, b.callUUID == action.callUUID.uuidString.lowercased() else {
       action.fail()
       return
@@ -581,6 +826,12 @@ import SwiftUI
     action.fulfill()
   }
   func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+    if let action = action as? CXCallAction,
+      wake?.binding.callUUID == action.callUUID.uuidString.lowercased()
+    {
+      disconnect("后台接听操作超时")
+      return
+    }
     action.fail()
     guard let callAction = action as? CXCallAction,
       coordinator?.binding?.callUUID == callAction.callUUID.uuidString.lowercased()

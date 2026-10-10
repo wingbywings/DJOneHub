@@ -1,6 +1,6 @@
 # iPhone 远程接听落地方案
 
-日期：2026-09-30。状态：设计基线，正在分批实施；当前交付范围见 [第一批后端基础](remote-calls-first-batch.md)、[第二批通话控制](remote-calls-second-batch.md)、[第三批媒体基础](remote-calls-third-batch.md)、[第四批 WebRTC 与接收音频](remote-calls-fourth-batch.md)、[第五批会话协调与通话收尾](remote-calls-fifth-batch.md)、[第六批受认证的本机宿主控制](remote-calls-sixth-batch.md)、[第七批配对与安装身份](remote-calls-seventh-batch.md)、[第八批鉴权 WSS 与 Hub 会话适配](remote-calls-eighth-batch.md)、[第九批活动连接续期与凭据刷新](remote-calls-ninth-batch.md)、[第十批 Keychain 与原生命令](remote-calls-tenth-batch.md)、[第十一批常驻连接与来电调度](remote-calls-eleventh-batch.md) 和 [第十二批 iOS 在线 App 与 TURN](remote-calls-twelfth-batch.md)。本文描述完整目标，未在实现进度中列为完成的接口、目录和参数仍为设计，不代表已经实现或通过真机验收。
+日期：2026-09-30。状态：设计基线，正在分批实施；当前交付范围见 [第一批后端基础](remote-calls-first-batch.md)、[第二批通话控制](remote-calls-second-batch.md)、[第三批媒体基础](remote-calls-third-batch.md)、[第四批 WebRTC 与接收音频](remote-calls-fourth-batch.md)、[第五批会话协调与通话收尾](remote-calls-fifth-batch.md)、[第六批受认证的本机宿主控制](remote-calls-sixth-batch.md)、[第七批配对与安装身份](remote-calls-seventh-batch.md)、[第八批鉴权 WSS 与 Hub 会话适配](remote-calls-eighth-batch.md)、[第九批活动连接续期与凭据刷新](remote-calls-ninth-batch.md)、[第十批 Keychain 与原生命令](remote-calls-tenth-batch.md)、[第十一批常驻连接与来电调度](remote-calls-eleventh-batch.md) 、[第十二批 iOS 在线 App 与 TURN](remote-calls-twelfth-batch.md) 和 [第十三批后台推送与离线邀请](remote-calls-thirteenth-batch.md)。本文描述完整目标，未在实现进度中列为完成的接口、目录和参数仍为设计，不代表已经实现或通过真机验收。
 
 ## 1. 确定的产品约束
 

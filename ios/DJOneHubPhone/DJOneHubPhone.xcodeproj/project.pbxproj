@@ -309,8 +309,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = DJOneHubPhone.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = 8AHAFH9VTZ;
+				DJONEHUB_APNS_ENTITLEMENT = development;
+				DJONEHUB_APNS_ENVIRONMENT = sandbox;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = DJOneHub;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "与同一网络中的 DJOneHub 建立通话音频连接。";
@@ -363,8 +366,11 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = DJOneHubPhone.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = 8AHAFH9VTZ;
+				DJONEHUB_APNS_ENTITLEMENT = production;
+				DJONEHUB_APNS_ENVIRONMENT = production;
 				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = DJOneHub;
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "与同一网络中的 DJOneHub 建立通话音频连接。";

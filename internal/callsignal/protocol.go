@@ -221,7 +221,7 @@ func (m Message) ValidateDelivery(receiver string) error {
 		if receiver == "installation" && Decode(m.Payload, &p) == nil && p.Accepted {
 			return nil
 		}
-	case "delivered":
+	case "delivered", "waking":
 		var p Result
 		if receiver == "hub" && Decode(m.Payload, &p) == nil && p.Accepted {
 			return nil

@@ -20,6 +20,9 @@ type queuedPCM struct {
 	arrived time.Time
 }
 type SenderStats struct {
+	CapturedFrames                uint64
+	SignalFrames                  uint64
+	PeakPCM16                     uint32
 	DroppedFrames, EncodedPackets uint64
 	QueuedFrames                  int
 }
@@ -48,6 +51,25 @@ func (s *Sender) Push(f Frame, now time.Time) error {
 	if err := s.guard.Accept(f); err != nil {
 		return err
 	}
+	s.stats.CapturedFrames++
+	var peak uint32
+	for _, sample := range f.PCM {
+		value := int32(sample)
+		if value < 0 {
+			value = -value
+		}
+		if uint32(value) > peak {
+			peak = uint32(value)
+		}
+	}
+	// Amplitude counters only: never retain or expose captured audio. A small
+	// threshold separates digital silence/noise from a useful input signal.
+	if peak >= 128 {
+		s.stats.SignalFrames++
+	}
+	if peak > s.stats.PeakPCM16 {
+		s.stats.PeakPCM16 = peak
+	}
 	s.queue = append(s.queue, queuedPCM{f, now})
 	if len(s.queue) > 6 {
 		s.stats.DroppedFrames += uint64(len(s.queue) - 6)
@@ -75,7 +97,15 @@ func (s *Sender) Next(now time.Time) (*EncodedAudio, error) {
 	}
 	first, second := s.queue[0].frame, s.queue[1].frame
 	s.queue = s.queue[2:]
-	s.next = now.Add(20 * time.Millisecond)
+	// Keep the original cadence across ordinary timer jitter. Re-basing on
+	// every wakeup makes a tick a few nanoseconds early miss an entire 10 ms
+	// turn, repeatedly reducing the send rate. A genuine stall starts a fresh
+	// cadence instead of catching up with a burst of old audio.
+	if s.next.IsZero() || now.Sub(s.next) >= 20*time.Millisecond {
+		s.next = now.Add(20 * time.Millisecond)
+	} else {
+		s.next = s.next.Add(20 * time.Millisecond)
+	}
 	s.mu.Unlock()
 	pcm := make([]int16, 2*FrameSamples)
 	copy(pcm, first.PCM[:])

@@ -258,7 +258,10 @@ func (r *Receiver) Read(now time.Time) (*Frame, error) {
 	r.pcm = r.pcm[FrameSamples:]
 	r.sequence++
 	r.sampleIndex += FrameSamples
-	r.deadline = now.Add(10 * time.Millisecond)
+	// Advance the media clock, not the scheduler wakeup time. Otherwise tiny
+	// ticker phase differences skip render turns until valid incoming RTP is
+	// permanently ahead of the admission window. Real stalls rebuffer above.
+	r.deadline = r.deadline.Add(10 * time.Millisecond)
 	return frame, nil
 }
 func (r *Receiver) Stats() ReceiverStats {
