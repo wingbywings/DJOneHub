@@ -172,8 +172,11 @@ func TestTransportPriorityAgingPreventsEUICCStarvation(t *testing.T) {
 
 	order := make(chan string, 2)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	var workers sync.WaitGroup
+	defer func() { cancel(); workers.Wait() }()
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		lease, acquireErr := arb.AcquireTransport(ctx, Request{Owner: "aged-euicc", Mode: "QMI", Class: APDUClassEUICCWrite})
 		if acquireErr != nil {
 			t.Errorf("AcquireTransport(euicc) error=%v", acquireErr)
@@ -183,7 +186,9 @@ func TestTransportPriorityAgingPreventsEUICCStarvation(t *testing.T) {
 		lease.Release()
 	}()
 	time.Sleep(transportPriorityAging + 80*time.Millisecond)
+	workers.Add(1)
 	go func() {
+		defer workers.Done()
 		lease, acquireErr := arb.AcquireTransport(ctx, Request{Owner: "sim_aka", Mode: "QMI", Class: APDUClassUSIMAKA})
 		if acquireErr != nil {
 			t.Errorf("AcquireTransport(aka) error=%v", acquireErr)
@@ -202,6 +207,14 @@ func TestTransportPriorityAgingPreventsEUICCStarvation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for first transport")
+	}
+	select {
+	case got := <-order:
+		if got != "aka" {
+			t.Fatalf("second acquired transport=%q want aka", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for second transport")
 	}
 }
 

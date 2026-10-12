@@ -186,6 +186,10 @@ func (a *app) remoteCallStatus(w http.ResponseWriter, _ *http.Request) {
 	if configured && config.Enabled && !agent.Enabled {
 		reason = "remote_validation_pending"
 	}
+	journal := a.ensureRemoteJournal().status()
+	if journal.RecoveryRequired {
+		reason = "recovery_required"
+	}
 	var sessionState map[string]any
 	a.remoteSessionMu.Lock()
 	if a.remoteSession != nil {
@@ -204,8 +208,9 @@ func (a *app) remoteCallStatus(w http.ResponseWriter, _ *http.Request) {
 		"online_transport": map[string]any{"configured": configured, "state": connectionState},
 		"config":           config, "effective_route": route.Mode, "active_route": activeRoute,
 		"available": false, "reason": reason, "last_error": loadError,
-		"session": sessionState,
-		"codec":   map[string]any{"available": opus.Available(), "version": opus.Version()},
+		"session":  sessionState,
+		"recovery": journal,
+		"codec":    map[string]any{"available": opus.Available(), "version": opus.Version()},
 		// Local protocol support; Relay APNs configuration is not verified by this status endpoint.
 		"capabilities": map[string]bool{"signaling": configured, "voip_push": configured, "push_configuration_verified": false, "remote_media": configured && opus.Available()},
 	})

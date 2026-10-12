@@ -1,5 +1,7 @@
 # 现有服务器升级 APNs（保留配对）
 
+> 2026-10-12：你已确认 APNs 与后台来电通过。已有服务的日常重启、复用服务器 APNs 配置升级、最新 Mac/iPhone 部署，请使用[当前操作指南](REMOTE_OPERATIONS_GUIDE.md#8-公网服务只重启或升级源码)。下面关于 `voip_push:false` 和安装进度的描述是首次 APNs 升级时的记录，不是当前实时状态；正常更新无需重新上传 `.p8` 或重新配对。
+
 本次由用户自行执行服务器升级；Codex 不通过 SSH 登录或上传私钥。目标为现有 `root@47.108.184.34`、`https://oops.work`、Nginx 转发 `127.0.0.1:18443` 的部署。
 
 本机已完成：签名 Debug App 包含 `aps-environment=development`，Bundle ID 为 `com.oops.djonehub`，已覆盖安装到 Wings Black；私有 sandbox 配置经过 Relay 自身校验。公网健康查询目前仍是 `voip_push:false`，**不能据此宣称后台电话验收完成**。

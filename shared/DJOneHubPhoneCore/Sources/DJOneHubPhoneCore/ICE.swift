@@ -1,6 +1,31 @@
 import Darwin
 import Foundation
 
+// The same peer's SDP origin must advance, and both ICE credentials must
+// change. A new wire negotiation ID cannot make an old SDP safe to replay.
+public enum ICERevision {
+  public static func isRestart(previous: String, next: String) -> Bool {
+    func fields(_ sdp: String) -> (String, UInt64, String, String, Int)? {
+      guard sdp.utf8.count <= 65536 else { return nil }
+      let lines = sdp.components(separatedBy: .newlines).filter { !$0.isEmpty }
+      let origins = lines.filter { $0.hasPrefix("o=") }
+      let media = lines.filter { $0.hasPrefix("m=") }
+      guard origins.count == 1, (1...2).contains(media.count), media[0].hasPrefix("m=audio "),
+        media.count == 1 || media[1].hasPrefix("m=application ") else { return nil }
+      let origin = origins[0].dropFirst(2).split(separator: " ")
+      guard origin.count == 6, let version = UInt64(origin[2]) else { return nil }
+      let audioLines = Array(lines.prefix(while: { !$0.hasPrefix("m=application ") }))
+      guard let u = audioLines.last(where: { $0.hasPrefix("a=ice-ufrag:") }),
+            let p = audioLines.last(where: { $0.hasPrefix("a=ice-pwd:") }) else { return nil }
+      let username = String(u.dropFirst(12)), password = String(p.dropFirst(10))
+      guard !username.isEmpty, !password.isEmpty else { return nil }
+      return (String(origin[1]), version, username, password, media.count)
+    }
+    guard let old = fields(previous), let new = fields(next) else { return false }
+    return old.4 == new.4 && old.0 == new.0 && new.1 > old.1 && new.2 != old.2 && new.3 != old.3
+  }
+}
+
 public struct ICEServer: Codable, Sendable {
   public let urls: [String]
   public let username: String

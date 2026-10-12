@@ -60,7 +60,7 @@ func signalClients(t *testing.T) (*callsignal.Client, *callsignal.Client, identi
 	hub, phone, tokens, store, _ := renewableSignalClients(t)
 	return hub, phone, tokens, store
 }
-func renewableSignalClients(t *testing.T) (*callsignal.Client, *callsignal.Client, identity.Tokens, *identity.Store, ed25519.PrivateKey) {
+func renewableSignalClients(t *testing.T, configure ...func(*callsignal.ClientConfig)) (*callsignal.Client, *callsignal.Client, identity.Tokens, *identity.Store, ed25519.PrivateKey) {
 	t.Helper()
 	store, err := identity.Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
@@ -97,7 +97,11 @@ func renewableSignalClients(t *testing.T) (*callsignal.Client, *callsignal.Clien
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
 	dial := func(token identity.Tokens) *callsignal.Client {
-		c, err := callsignal.Dial(ctx, callsignal.ClientConfig{URL: "wss" + strings.TrimPrefix(server.URL, "https") + "/v1/signaling", AccessToken: token.AccessToken, IdentityID: token.Principal.ID, Kind: token.Principal.Kind, HubID: token.Principal.HubID, TLSConfig: &tls.Config{RootCAs: roots}})
+		config := callsignal.ClientConfig{URL: "wss" + strings.TrimPrefix(server.URL, "https") + "/v1/signaling", AccessToken: token.AccessToken, IdentityID: token.Principal.ID, Kind: token.Principal.Kind, HubID: token.Principal.HubID, TLSConfig: &tls.Config{RootCAs: roots}}
+		for _, option := range configure {
+			option(&config)
+		}
+		c, err := callsignal.Dial(ctx, config)
 		if err != nil {
 			t.Fatal(err)
 		}

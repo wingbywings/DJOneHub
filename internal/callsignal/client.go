@@ -3,6 +3,7 @@ package callsignal
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/http"
@@ -17,6 +18,8 @@ import (
 var ErrConnection = errors.New("call signaling connection unavailable")
 
 type ClientConfig struct {
+	Resumption              bool     // explicit protocol capability; false preserves v1 fail-closed behavior
+	Resume                  *Message // original call binding, never a command to replay
 	URL, AccessToken        string
 	IdentityID, Kind, HubID string // expected identity, never learned from a caller's frame
 	AllowInsecureLoopback   bool
@@ -65,7 +68,20 @@ func Dial(parent context.Context, config ClientConfig) (*Client, error) {
 		tlsConfig = config.TLSConfig.Clone()
 	}
 	d := websocket.Dialer{HandshakeTimeout: 5 * time.Second, Subprotocols: []string{Subprotocol}, TLSClientConfig: tlsConfig}
-	ws, response, err := d.DialContext(ctx, config.URL, http.Header{"Authorization": []string{"Bearer " + config.AccessToken}})
+	headers := http.Header{"Authorization": []string{"Bearer " + config.AccessToken}}
+	if config.Resumption {
+		headers.Set(RecoveryHeader, "1")
+	}
+	if config.Resume != nil {
+		if !config.Resumption || config.Resume.validateBinding() != nil {
+			cancel()
+			return nil, ErrProtocol
+		}
+		m := *config.Resume
+		m.Type, m.Payload = "resume", Body(struct{}{})
+		headers.Set(ResumeHeader, base64.RawURLEncoding.EncodeToString(Body(m)))
+	}
+	ws, response, err := d.DialContext(ctx, config.URL, headers)
 	if response != nil && response.Body != nil {
 		response.Body.Close()
 	}
@@ -81,6 +97,13 @@ func Dial(parent context.Context, config ClientConfig) (*Client, error) {
 	var hello Message
 	var identity Welcome
 	if err != nil || kind != websocket.TextMessage || ws.Subprotocol() != Subprotocol || Decode(data, &hello) != nil || hello.Version != 1 || hello.Type != "welcome" || !ID(hello.HubEpoch) || Decode(hello.Payload, &identity) != nil || identity.ID != config.IdentityID || identity.Kind != config.Kind || identity.HubID != config.HubID || !identity.AccessExpiresAt.After(time.Now()) {
+		cancel()
+		ws.Close()
+		stop()
+		return nil, ErrConnection
+	}
+	if identity.Recovery != config.Resumption || identity.Resumed != (config.Resume != nil) ||
+		(config.Resume != nil && config.Kind == "hub" && hello.HubEpoch != config.Resume.HubEpoch) {
 		cancel()
 		ws.Close()
 		stop()

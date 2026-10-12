@@ -19,8 +19,9 @@ type Connection interface {
 }
 
 type Config struct {
-	Connect func(context.Context) (Connection, error)
-	Refresh func(context.Context) (string, error)
+	RecoverCalls bool // active runner owns bounded reconnect; idle loss still reconnects normally
+	Connect      func(context.Context) (Connection, error)
+	Refresh      func(context.Context) (string, error)
 	// Only explicitly authorized idle requests may create outgoing work.
 	Incoming func(context.Context, Connection, callsignal.Message)
 }
@@ -98,7 +99,7 @@ func (m *Manager) loop(ctx context.Context, config Config) {
 		c, err := config.Connect(ctx)
 		if err == nil && c != nil {
 			started := time.Now()
-			used := m.serve(ctx, c, config.Refresh, config.Incoming)
+			used := m.serve(ctx, c, config.Refresh, config.Incoming, config.RecoverCalls)
 			if used || time.Since(started) >= 30*time.Second {
 				delay = time.Second
 			}
@@ -123,7 +124,7 @@ func (m *Manager) loop(ctx context.Context, config Config) {
 	}
 }
 
-func (m *Manager) serve(ctx context.Context, c Connection, refresh func(context.Context) (string, error), incoming func(context.Context, Connection, callsignal.Message)) (used bool) {
+func (m *Manager) serve(ctx context.Context, c Connection, refresh func(context.Context) (string, error), incoming func(context.Context, Connection, callsignal.Message), recoverCalls bool) (used bool) {
 	authCtx, stopAuth := context.WithCancel(ctx)
 	authDone := make(chan struct{})
 	go func() { defer close(authDone); _ = c.MaintainAuthorization(authCtx, refresh); c.Close() }()
@@ -169,7 +170,9 @@ func (m *Manager) serve(ctx context.Context, c Connection, refresh func(context.
 			defer close(watchDone)
 			select {
 			case <-c.Done():
-				cancel()
+				if !recoverCalls {
+					cancel()
+				}
 			case <-callCtx.Done():
 			}
 		}()

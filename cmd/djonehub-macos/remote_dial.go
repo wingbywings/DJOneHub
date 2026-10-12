@@ -50,6 +50,9 @@ func (a *app) reserveRemoteDial(request callsignal.Message, number string) strin
 	}
 	a.callRouteMu.Lock()
 	defer a.callRouteMu.Unlock()
+	if a.ensureRemoteJournal().status().RecoveryRequired {
+		return "recovery_required"
+	}
 	config, loadError := a.ensureRemoteCalls().snapshot()
 	agent := a.ensureVoiceAgent().snapshot()
 	if loadError != "" || agent.Enabled || !config.Enabled || config.TargetInstallationID != request.InstallationID {

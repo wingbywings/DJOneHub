@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -48,8 +49,9 @@ func connectPeerHost(t *testing.T, p *Peer) *websocket.Conn {
 func TestWebRTCPeersCarryRealOpusBetweenHostBridges(t *testing.T) {
 	t.Run("complete_gathering", func(t *testing.T) { testPeerAudioTransport(t, nil, false) })
 	t.Run("trickle", func(t *testing.T) { testPeerAudioTransport(t, nil, true) })
+	t.Run("restart_preserves_live_audio", func(t *testing.T) { testPeerAudioTransport(t, nil, false, true) })
 }
-func testPeerAudioTransport(t *testing.T, servers []webrtc.ICEServer, trickle bool) {
+func testPeerAudioTransport(t *testing.T, servers []webrtc.ICEServer, trickle bool, restart ...bool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -222,9 +224,170 @@ func testPeerAudioTransport(t *testing.T, servers []webrtc.ICEServer, trickle bo
 			t.Fatalf("status did not expose both audio directions: %+v", state)
 		}
 	}
+	if len(restart) > 0 && restart[0] {
+		hostA, hostB := a.Host().Binding(), b.Host().Binding()
+		originalOffer := offer
+		for attempt := uint64(1); attempt <= 2; attempt++ {
+			previousLocal := a.pc.LocalDescription()
+			offer, err := a.CreateRestartOffer(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if offer.ID != attempt || !changedICE(previousLocal, offer.Description.SDP) {
+				t.Fatal("restart reused ICE credentials")
+			}
+			if _, err := a.CreateRestartOffer(ctx); !errors.Is(err, ErrRestartState) {
+				t.Fatal("overlapping restart accepted", err)
+			}
+			if err := a.AcceptAnswer(answer); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("initial answer entered restart", err)
+			}
+			stale := offer
+			stale.ID++
+			if _, err := b.AcceptRestartOffer(ctx, stale); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("skipped negotiation accepted", err)
+			}
+			stale = offer
+			stale.Description = originalOffer
+			if _, err := b.AcceptRestartOffer(ctx, stale); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("old ICE offer accepted", err)
+			}
+			stale = offer
+			stale.Description.Generation++
+			if _, err := b.AcceptRestartOffer(ctx, stale); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("foreign media binding accepted", err)
+			}
+			response, err := b.AcceptRestartOffer(ctx, offer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stale = response
+			stale.ID++
+			if err := a.AcceptRestartAnswer(stale); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("wrong answer version accepted", err)
+			}
+			if err := a.AcceptRestartAnswer(response); err != nil {
+				t.Fatal(err)
+			}
+			if err := a.AcceptRestartAnswer(response); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("answer replay accepted", err)
+			}
+			if _, err := b.AcceptRestartOffer(ctx, offer); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("offer replay accepted", err)
+			}
+			if err := b.AddCandidate(Candidate{CallUUID: config.CallUUID, Generation: config.Generation}); !errors.Is(err, ErrSignalBinding) {
+				t.Fatal("old trickle accepted", err)
+			}
+			_, beforeA := a.Stats()
+			_, beforeB := b.Stats()
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				_, afterA := a.Stats()
+				_, afterB := b.Stats()
+				if afterA.DecodedPackets >= beforeA.DecodedPackets+5 && afterB.DecodedPackets >= beforeB.DecodedPackets+5 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("audio failed after restart: %v/%v", a.Err(), b.Err())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if a.Host().Binding() != hostA || b.Host().Binding() != hostB {
+				t.Fatal("ICE restart replaced native host lease")
+			}
+			if !a.SignalingState().AudioActive || !b.SignalingState().AudioActive {
+				t.Fatal("ICE restart lost CallKit audio readiness")
+			}
+		}
+	}
+	// Real SRTCP feedback must reach the custom Opus encoder (not just be
+	// drained by Pion). The report is scoped to this peer's outgoing SSRC.
+	parameters := a.pc.GetSenders()[0].GetParameters()
+	if err := b.pc.WriteRTCP([]rtcp.Packet{&rtcp.ReceiverReport{SSRC: 12345, Reports: []rtcp.ReceptionReport{{SSRC: uint32(parameters.Encodings[0].SSRC), LastSequenceNumber: 200000, FractionLost: 26, Jitter: 1440}}}}); err != nil {
+		t.Fatal(err)
+	}
+	feedbackDeadline := time.Now().Add(time.Second)
+	for a.feedback.snapshot().LossPercent != 11 {
+		if time.Now().After(feedbackDeadline) {
+			t.Fatal("RTCP feedback did not reach encoder", a.feedback.snapshot())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Hub mute must discard live RTP even if a faulty client keeps transmitting.
+	if err := a.SetMuted(true); err != nil {
+		t.Fatal(err)
+	}
+	muteSend, muteReceive := a.Stats()
+	time.Sleep(160 * time.Millisecond)
+	mutedSend, mutedReceive := a.Stats()
+	if mutedReceive.DecodedPackets != muteReceive.DecodedPackets || mutedReceive.BufferedPackets != 0 || mutedSend.EncodedPackets <= muteSend.EncodedPackets {
+		t.Fatal("mute stopped downlink or leaked uplink")
+	}
+	if err := a.SetMuted(false); err != nil {
+		t.Fatal(err)
+	}
+	unmuteDeadline := time.Now().Add(time.Second)
+	for {
+		_, receive := a.Stats()
+		if receive.DecodedPackets >= mutedReceive.DecodedPackets+3 {
+			break
+		}
+		if time.Now().After(unmuteDeadline) {
+			t.Fatal("unmute failed to resume uplink")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	// A later CallKit deactivation revokes media even while native capture and
 	// the other peer keep sending. Old activation snapshots cannot restore it.
-	paused := Readiness{CallUUID: config.CallUUID, Generation: config.Generation, Revision: 3, CellularActive: true, ModuleReady: true}
+	hostBinding := a.Host().Binding()
+	if err := a.SuspendAudio(); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(a.Activate(), ErrMediaNotReady) {
+		t.Fatal("suspension resumed without a new trusted audio sequence")
+	}
+	if err := a.SetMuted(true); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.SetMuted(false); err != nil {
+		t.Fatal(err)
+	}
+	suspendedSend, suspendedReceive := a.Stats()
+	time.Sleep(60 * time.Millisecond)
+	stillSend, stillReceive := a.Stats()
+	if stillSend.EncodedPackets != suspendedSend.EncodedPackets || stillReceive.DecodedPackets != suspendedReceive.DecodedPackets || stillReceive.BufferedPackets != 0 {
+		t.Fatal("suspended media kept audio")
+	}
+	unchanged := a.readiness
+	unchanged.Revision++
+	if err := a.UpdateReadiness(unchanged); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(a.Activate(), ErrMediaNotReady) {
+		t.Fatal("revision alone resumed suspended audio")
+	}
+	resumed := Readiness{CallUUID: config.CallUUID, Generation: config.Generation, Revision: 4, AudioSequence: 2, CellularActive: true, ModuleReady: true, IOSAudioActive: true}
+	if err := a.UpdateReadiness(resumed); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Activate(); err != nil {
+		t.Fatal(err)
+	}
+	resumeDeadline := time.Now().Add(time.Second)
+	for {
+		send, receive := a.Stats()
+		if send.EncodedPackets >= stillSend.EncodedPackets+3 && receive.DecodedPackets >= stillReceive.DecodedPackets+3 {
+			break
+		}
+		if time.Now().After(resumeDeadline) {
+			t.Fatal("real Opus did not resume")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if a.Host().Binding() != hostBinding {
+		t.Fatal("audio interruption replaced host lease")
+	}
+	paused := Readiness{CallUUID: config.CallUUID, Generation: config.Generation, Revision: 5, CellularActive: true, ModuleReady: true}
 	if err := a.UpdateReadiness(paused); err != nil {
 		t.Fatal(err)
 	}

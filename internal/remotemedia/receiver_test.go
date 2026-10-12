@@ -233,3 +233,45 @@ func TestReceiverMaintainsRateWithTickerJitter(t *testing.T) {
 		t.Fatalf("sub-millisecond jitter slowed playout: %+v", stats)
 	}
 }
+
+func TestMutedReceiverAdvancesWindowWithoutRetainingSpeech(t *testing.T) {
+	r, _ := receiverForTest()
+	now := time.Unix(1, 0)
+	// More than one sequence wrap, representing over twenty minutes of mute.
+	for n := 0; n < 70000; n++ {
+		packet := rtpInput(uint16(n), uint32(n*960), 9)
+		if err := r.Discard(packet, now.Add(time.Duration(n)*20*time.Millisecond)); err != nil {
+			t.Fatal(n, err)
+		}
+	}
+	if r.Stats().BufferedPackets != 0 || r.Stats().DecodedPackets != 0 {
+		t.Fatal("muted speech retained", r.Stats())
+	}
+	if frame, _ := r.Read(now.Add(1400 * time.Second)); frame != nil {
+		t.Fatal("muted audio played")
+	}
+	if err := r.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	lastSeq := uint16(69999 % 65536)
+	if err := r.Push(rtpInput(lastSeq, 69999*960, 9), now.Add(1400*time.Second)); err == nil {
+		t.Fatal("muted packet replayed after unmute")
+	}
+	freshSeq := uint16(70000 % 65536)
+	fresh := rtpInput(freshSeq, 70000*960, 3)
+	wrong := fresh
+	wrong.SSRC++
+	if !errors.Is(r.Discard(wrong, now), ErrRTPStream) {
+		t.Fatal("muted SSRC replaced")
+	}
+	wrong = fresh
+	wrong.Generation++
+	if !errors.Is(r.Discard(wrong, now), ErrRTPStream) {
+		t.Fatal("muted generation replaced")
+	}
+	resume := now.Add(1400 * time.Second)
+	if err := r.Push(fresh, resume); err != nil {
+		t.Fatal("unmute locked out", err)
+	}
+	readValue(t, r, resume.Add(60*time.Millisecond), 3)
+}

@@ -15,12 +15,17 @@ struct AudioReceiveSnapshot {
   var energy: Double = 0
 }
 
-@MainActor final class PhoneMedia: NSObject, RTCPeerConnectionDelegate {
+@MainActor final class PhoneMedia: NSObject, RTCPeerConnectionDelegate, RTCDataChannelDelegate {
   let binding: Binding
   var onCandidate: (([String: Scalar]) -> Void)?
   var onConnected: (() -> Void)?
   var onFailure: (() -> Void)?
   var onDiagnostic: ((String) -> Void)?
+  var onControl: ((Data) -> Void)?
+  private let controlEnabled: Bool
+  private var control: RTCDataChannel?
+  private var controlWindow = Date.distantPast
+  private var controlCount = 0
   private var localCandidateCount = 0, remoteCandidateCount = 0
   private var localKinds = Set<String>(), remoteKinds = Set<String>()
   private static let factory: RTCPeerConnectionFactory = {
@@ -31,11 +36,28 @@ struct AudioReceiveSnapshot {
   private var track: RTCAudioTrack!
   private var pending: [RTCIceCandidate] = []
   private var diagnosticsTask: Task<Void, Never>?
+  private var recoveryTask: Task<Void, Never>?
+  private let recoveryEnabled: Bool
+  private var restartID: UInt64 = 0
+  private var restarting = false
+  private var restartTask: Task<String, Error>?
+  private var restartProposal: (id: UInt64, sdp: String)?
+  private(set) var turnExpiry: Date?
+  private var pendingTurnExpiry: Date?
+  private var renewalConfirmation: Task<Void, Never>?
+  private let relayOnly: Bool
+  private var turnUsername: String?
+  private var fullGatherOnly = false
   private var remoteSet = false, closed = false, muted = false, audioEnabled = false,
     systemAudioActive = false
-  init(binding: Binding, ice: ICECredentials = .direct) throws {
+  init(binding: Binding, ice: ICECredentials = .direct, recoveryEnabled: Bool = false, controlEnabled: Bool = false) throws {
     try ice.validate()
     self.binding = binding
+    self.recoveryEnabled = recoveryEnabled
+    self.controlEnabled = controlEnabled
+    self.turnExpiry = ice.expires_at
+    self.relayOnly = ice.relay_only
+    self.turnUsername = ice.servers.first?.username
     super.init()
     let audio = RTCAudioSession.sharedInstance()
     audio.useManualAudio = true
@@ -78,10 +100,11 @@ struct AudioReceiveSnapshot {
     try a.setPreferredIOBufferDuration(0.02)
     // CallKit, not this class, activates AVAudioSession.
   }
-  func answer(_ sdp: String) async throws -> String {
+  func answer(_ sdp: String, gather: Bool = false) async throws -> String {
+    let media = sdp.components(separatedBy: "\n").filter { $0.hasPrefix("m=") }
     guard !closed, sdp.utf8.count <= 65536,
-      sdp.components(separatedBy: "\n").filter({ $0.hasPrefix("m=") }).count == 1,
-      sdp.contains("m=audio ")
+      media.first?.hasPrefix("m=audio ") == true,
+      media.count == 1 || (controlEnabled && media.count == 2 && media[1].hasPrefix("m=application "))
     else { throw PhoneError.invalidData }
     try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
       peer.setRemoteDescription(RTCSessionDescription(type: .offer, sdp: sdp)) { error in
@@ -120,10 +143,111 @@ struct AudioReceiveSnapshot {
       }
       sender.parameters = parameters
     }
+    if gather {
+      let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+      var firstCandidateAt: ContinuousClock.Instant?
+      while peer.iceGatheringState != .complete {
+        guard !closed else { throw PhoneError.unavailable }
+        // Gathering can wait for the remote answer to prune obsolete ports.
+        // Once usable candidates exist, allow a short collection window and
+        // send the snapshot instead of adding five seconds of avoidable silence.
+        let candidates = peer.localDescription?.sdp.components(separatedBy: .newlines)
+          .filter { $0.hasPrefix("a=candidate:") } ?? []
+        let usable = candidates.contains { !relayOnly || iceCandidateKind($0) == "relay" }
+        if usable && firstCandidateAt == nil { firstCandidateAt = .now }
+        if usable && (firstCandidateAt.map { ContinuousClock.now >= $0.advanced(by: .milliseconds(300)) } == true || ContinuousClock.now >= deadline) {
+          onDiagnostic?("ice_gathering_candidate_snapshot")
+          break
+        }
+        guard ContinuousClock.now < deadline else { throw PhoneError.unavailable }
+        try await Task.sleep(for: .milliseconds(20))
+      }
+      guard !closed, let complete = peer.localDescription, complete.sdp.utf8.count <= 65536 else {
+        throw PhoneError.invalidData
+      }
+      return complete.sdp
+    }
     return answer.sdp
   }
+  func answerRestart(_ sdp: String, id: UInt64, refreshICE: (() async throws -> ICECredentials)? = nil) async throws -> String {
+    guard recoveryEnabled, !closed else { throw PhoneError.invalidData }
+    if let proposal = restartProposal, proposal.id == id {
+      guard proposal.sdp == sdp, let task = restartTask else { throw PhoneError.invalidData }
+      return try await task.value // exact retry resends the cached/in-flight answer
+    }
+    guard !restarting, restartID != UInt64.max, id == restartID + 1,
+      peer.signalingState == .stable, let previous = peer.remoteDescription,
+      ICERevision.isRestart(previous: previous.sdp, next: sdp)
+    else { throw PhoneError.invalidData }
+    restarting = true
+    fullGatherOnly = true
+    pending.removeAll()
+    restartProposal = (id, sdp)
+    let recoveryDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+    let task = Task { @MainActor in
+      var previousPair: String?
+      if let previousExpiry = self.turnExpiry {
+        guard let refreshICE else { throw PhoneError.unavailable }
+        let ice = try await refreshICE()
+        try ice.validate()
+        guard !self.closed, ice.enabled, ice.relay_only == self.relayOnly,
+          let expiry = ice.expires_at, expiry >= previousExpiry,
+          ice.servers.first?.username != self.turnUsername else { throw PhoneError.invalidData }
+        let config = self.peer.configuration
+        config.iceServers = ice.servers.map {
+          RTCIceServer(urlStrings: $0.urls, username: $0.username, credential: $0.credential)
+        }
+        previousPair = await self.selectedCandidatePair()
+        guard previousPair != nil else { throw PhoneError.unavailable }
+        guard self.peer.setConfiguration(config) else { throw PhoneError.unavailable }
+        self.pendingTurnExpiry = expiry
+        self.turnUsername = ice.servers.first?.username
+      }
+      let answer = try await self.answer(sdp, gather: true)
+      if let previousPair { self.confirmRenewal(replacing: previousPair, deadline: recoveryDeadline) }
+      return answer
+    }
+    restartTask = task
+    defer { restarting = false }
+    let response = try await task.value
+    guard !closed else { throw PhoneError.unavailable }
+    restartID = id
+    return response
+  }
+  private func selectedCandidatePair() async -> String? {
+    await withCheckedContinuation { continuation in
+      peer.statistics { report in
+        for stat in report.statistics.values where stat.type == "transport" {
+          if let id = stat.values["selectedCandidatePairId"] as? String,
+            let pair = report.statistics[id], pair.values["state"] as? String == "succeeded" {
+            continuation.resume(returning: id); return
+          }
+        }
+        continuation.resume(returning: nil)
+      }
+    }
+  }
+  private func confirmRenewal(replacing previousPair: String, deadline: ContinuousClock.Instant) {
+    renewalConfirmation?.cancel()
+    renewalConfirmation = Task { @MainActor [weak self] in
+      while ContinuousClock.now < deadline {
+        guard !Task.isCancelled, let self, !self.closed, self.pendingTurnExpiry != nil else { return }
+        if let pair = await self.selectedCandidatePair(), pair != previousPair,
+          self.peer.connectionState == .connected {
+          self.turnExpiry = self.pendingTurnExpiry
+          self.pendingTurnExpiry = nil
+          self.onDiagnostic?("turn_renewed")
+          return
+        }
+        do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+      }
+      guard let self, !self.closed else { return }
+      self.onDiagnostic?("turn_renewal_unconfirmed")
+      self.onFailure?()
+    }
+  }
   func candidate(_ payload: [String: Scalar]) {
-    guard !closed, let sdp = payload["candidate"]?.string, !sdp.isEmpty else { return }
+    guard !closed, !fullGatherOnly, let sdp = payload["candidate"]?.string, !sdp.isEmpty else { return }
     remoteCandidateCount += 1
     let kind = iceCandidateKind(sdp)
     if remoteKinds.insert(kind).inserted { onDiagnostic?("remote_ice_" + kind) }
@@ -205,12 +329,28 @@ struct AudioReceiveSnapshot {
       }
     }
   }
+  var controlReady: Bool { !closed && control?.readyState == .open }
+  @discardableResult func sendControl(_ message: Signal) -> Bool {
+    guard controlReady, let control, control.bufferedAmount <= 32768,
+      let data = try? message.encoded(), data.count <= 8192 else { return false }
+    return control.sendData(RTCDataBuffer(data: data, isBinary: false))
+  }
   func close() {
+    control?.delegate = nil
+    control?.close()
+    control = nil
+    restartTask?.cancel()
+    restartTask = nil
+    restartProposal = nil
     guard !closed else { return }
     setAudio(false)
     closed = true
     diagnosticsTask?.cancel()
     diagnosticsTask = nil
+    recoveryTask?.cancel()
+    recoveryTask = nil
+    renewalConfirmation?.cancel()
+    renewalConfirmation = nil
     peer?.close()
     pending.removeAll()
     onCandidate = nil
@@ -254,10 +394,33 @@ struct AudioReceiveSnapshot {
   nonisolated func peerConnection(
     _ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel
   ) {
-    dataChannel.close()
     Task { @MainActor [weak self] in
-      guard let self, !self.closed else { return }
-      self.onFailure?()
+      guard let self, !self.closed else { dataChannel.close(); return }
+      guard self.controlEnabled, self.control == nil, dataChannel.label == "call-control",
+        dataChannel.protocol == "djonehub.calls.v1", dataChannel.isOrdered,
+        dataChannel.isReliable, !dataChannel.isNegotiated else {
+        dataChannel.close(); self.onFailure?(); return
+      }
+      self.control = dataChannel
+      dataChannel.delegate = self
+      self.onDiagnostic?("control_channel_open")
+    }
+  }
+  nonisolated func dataChannelDidChangeState(_ dataChannel: RTCDataChannel) {}
+  nonisolated func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
+    guard !buffer.isBinary, !buffer.data.isEmpty, buffer.data.count <= 8192 else {
+      dataChannel.close()
+      Task { @MainActor [weak self] in self?.onFailure?() }
+      return
+    }
+    let data = buffer.data
+    Task { @MainActor [weak self] in
+      guard let self, !self.closed, self.control === dataChannel else { return }
+      let now = Date()
+      if now.timeIntervalSince(self.controlWindow) >= 1 { self.controlWindow = now; self.controlCount = 0 }
+      self.controlCount += 1
+      guard self.controlCount <= 20 else { dataChannel.close(); self.onFailure?(); return }
+      self.onControl?(data)
     }
   }
   nonisolated func peerConnection(
@@ -272,6 +435,7 @@ struct AudioReceiveSnapshot {
       self.localCandidateCount += 1
       let kind = iceCandidateKind(candidate.sdp)
       if self.localKinds.insert(kind).inserted { self.onDiagnostic?("local_ice_" + kind) }
+      if self.fullGatherOnly { return }
       self.onCandidate?(payload)
     }
   }
@@ -282,10 +446,21 @@ struct AudioReceiveSnapshot {
       guard let self, !self.closed else { return }
       self.onDiagnostic?("peer_state_\(newState.rawValue)")
       if newState == .connected {
+        self.recoveryTask?.cancel()
+        self.recoveryTask = nil
         self.startDiagnostics()
         self.onConnected?()
       }
-      if newState == .failed || newState == .disconnected || newState == .closed {
+      if self.recoveryEnabled && (newState == .failed || newState == .disconnected) {
+        guard self.recoveryTask == nil else { return }
+        self.onDiagnostic?("transport_recovering")
+        self.recoveryTask = Task { @MainActor [weak self] in
+          do { try await Task.sleep(for: .seconds(10)) } catch { return }
+          guard let self, !self.closed else { return }
+          self.onDiagnostic?("transport_recovery_timeout")
+          self.onFailure?()
+        }
+      } else if newState == .failed || newState == .disconnected || newState == .closed {
         self.onFailure?()
       }
     }

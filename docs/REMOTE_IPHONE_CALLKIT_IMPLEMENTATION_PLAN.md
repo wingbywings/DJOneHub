@@ -2,6 +2,23 @@
 
 日期：2026-09-30。状态：设计基线，正在分批实施；当前交付范围见 [第一批后端基础](remote-calls-first-batch.md)、[第二批通话控制](remote-calls-second-batch.md)、[第三批媒体基础](remote-calls-third-batch.md)、[第四批 WebRTC 与接收音频](remote-calls-fourth-batch.md)、[第五批会话协调与通话收尾](remote-calls-fifth-batch.md)、[第六批受认证的本机宿主控制](remote-calls-sixth-batch.md)、[第七批配对与安装身份](remote-calls-seventh-batch.md)、[第八批鉴权 WSS 与 Hub 会话适配](remote-calls-eighth-batch.md)、[第九批活动连接续期与凭据刷新](remote-calls-ninth-batch.md)、[第十批 Keychain 与原生命令](remote-calls-tenth-batch.md)、[第十一批常驻连接与来电调度](remote-calls-eleventh-batch.md) 、[第十二批 iOS 在线 App 与 TURN](remote-calls-twelfth-batch.md) 和 [第十三批后台推送与离线邀请](remote-calls-thirteenth-batch.md)。本文描述完整目标，未在实现进度中列为完成的接口、目录和参数仍为设计，不代表已经实现或通过真机验收。
 
+## 0. 当前执行状态（2026-10-10 核对）
+
+**核心接听链路已可用，主计划尚未全部完成。** 用户已确认 APNs/后台来电完成，并在音频时钟修复后确认真机声音恢复。
+原批次文档保留当时状态；不能继续把早期“iOS/APNs 未实现”作为当前结论，也不能把单次真机成功等同于完整发布验收。
+
+| 阶段 | 当前结论 |
+| --- | --- |
+| P0 关键路径 | 真机签名、APNs/CallKit、iOS/Pion/Opus 与真实模块主链路已验证；系统/网络组合见待验收矩阵 |
+| P1 通话控制 | 核心互斥、绑定、仲裁、幂等和取消已实现；持久通话恢复等完整目标仍有差距 |
+| P2 远程媒体 | 双向音频已跑通，调度漂移已修复；弱网自适应、采样时钟补偿、RTCP 反馈已实现并通过自动化，实际网络复测获用户确认，完整弱网/长通话验收仍待完成 |
+| P3 公网与 App | 配对、身份、APNs、TURN、CallKit 主流程已实现；网络恢复、TURN 续租、DTMF、管理界面等未完成 |
+| P4 稳定性与发布 | 部署/排查文档已有；完整真机矩阵、长通话及分发验收未完成；远程 Mac 打包支持及独立包自检已完成 |
+
+完整待办、优先级、代码依据与“未实现/未验收/设计差异”的区分，见[主计划核对清单 R01–R14](REMOTE_PLAN_STATUS_2026-10-10.md)。
+已交付的音频及发行包工作见[第十四批](remote-calls-fourteenth-batch.md)；2026-10-11 的 R04 ICE 恢复与 R05 续通协议基础见[第十五批](remote-calls-fifteenth-batch.md)。后续 R05 产品恢复链路和 R06 有界续租实现见[第十六批](remote-calls-sixteenth-batch.md)；R07 系统音频打断恢复见[第十七批](remote-calls-seventeenth-batch.md)；仍保留三端升级/真机验收及 R06 新旧通路并行迁移的缺口。
+下文保留设计基线；API 路径、外呼范围、TURN 期限和 APNs 重试等与当前实现的差异，以该清单列明。
+
 ## 1. 确定的产品约束
 
 1. 使用自研原生 iOS App，通过 CallKit 展示系统来电并处理接听、拒接、挂断、静音和 DTMF。
@@ -495,3 +512,9 @@ P0 可以使用仅用于验证的音频源，但 P2/P3 完成标准必须是实�
 发布阻断条件：AI 来电触发了远程通知；任何跨通话/跨模块误接或误挂；默认泄漏 Mac 麦克风/扬声器音频；接听失败后留下无人控制的接通通话；长通话缓冲持续增长；UDP 受限时未按部署承诺建立 TURN/TLS；凭证过期导致长通话静默中断。
 
 完成时交付 Mac 发行包、iOS 安装/签名说明、公网部署包、API/协议定义、实测报告和故障定位手册。所有硬件或系统限制在报告中记录实际结果，不用“理论支持”替代验收。
+
+2026-10-12 更新：R08 的协商式 DTMF/Hub 静音同步与 R09 最小通话 journal/启动隔离已实现并运行自动化，见[第十八批](remote-calls-eighteenth-batch.md)、[第十九批](remote-calls-nineteenth-batch.md)。尚未部署或完成真机验收，其余未完成项以[总体状态](REMOTE_PLAN_STATUS_2026-10-10.md)为准。
+
+2026-10-12 R10 更新：AudioHost 事件订阅、独立健康上报与轮询兜底已接入并通过 Go/Swift 实际互通，见[第二十批](remote-calls-twentieth-batch.md)。
+
+2026-10-12 R11 更新：Mac 原生配对窗口、模块远程设置、iPhone 扫码确认及本机通话记录已实现并通过自动化，见[第二十一批](remote-calls-twenty-first-batch.md)。首次 Hub enrollment 仍使用 CLI；真机扫码、授权撤销和安装升级尚未验收。

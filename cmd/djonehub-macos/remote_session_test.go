@@ -334,3 +334,38 @@ func TestCancelledATAIsNotClassifiedAsAttempted(t *testing.T) {
 		t.Fatal(attempted, err)
 	}
 }
+
+func TestRemoteDTMFUsesBoundHardwareCommand(t *testing.T) {
+	a, call := remoteIncoming(t)
+	b := backendFor(a, call)
+	if err := b.Claim(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Answer(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	a.demo = false
+	var commands []string
+	a.callAT = func(command string, _ time.Duration) (string, error) {
+		commands = append(commands, command)
+		if command == "AT+CLCC" {
+			return "+CLCC: 1,1,0,0,0,\"10086\",129\r\nOK", nil
+		}
+		return "OK", nil
+	}
+	if err := b.DTMF(context.Background(), "#"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(commands, []string{"AT+CLCC", "AT+VTS=\"#\""}) {
+		t.Fatal(commands)
+	}
+	// A stale owner cannot send into a replacement call, even with the same index.
+	a.applyCallPoll(nil, time.Now())
+	startCommandCall(a, "active")
+	if err := b.DTMF(context.Background(), "1"); err == nil {
+		t.Fatal("old owner targeted replacement")
+	}
+	if len(commands) != 2 {
+		t.Fatal("replacement received AT command", commands)
+	}
+}

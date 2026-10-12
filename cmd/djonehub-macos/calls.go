@@ -16,21 +16,22 @@ import (
 const defaultCallPollInterval = 3 * time.Second
 
 type callRecord struct {
-	Revision     uint64                    `json:"revision"`
-	ControlState string                    `json:"control_state,omitempty"`
-	ControlOwner string                    `json:"control_owner,omitempty"`
-	UUID         string                    `json:"call_uuid,omitempty"`
-	Route        callcontrol.RouteSnapshot `json:"route"`
-	ID           string                    `json:"id"`
-	Index        int                       `json:"index"`
-	Direction    string                    `json:"direction"`
-	State        string                    `json:"state"`
-	Number       string                    `json:"number,omitempty"`
-	StartedAt    time.Time                 `json:"started_at"`
-	UpdatedAt    time.Time                 `json:"updated_at"`
-	EndedAt      *time.Time                `json:"ended_at,omitempty"`
-	Missed       bool                      `json:"missed"`
-	AIHandled    bool                      `json:"ai_handled,omitempty"`
+	RecoveryRequired bool                      `json:"recovery_required,omitempty"`
+	Revision         uint64                    `json:"revision"`
+	ControlState     string                    `json:"control_state,omitempty"`
+	ControlOwner     string                    `json:"control_owner,omitempty"`
+	UUID             string                    `json:"call_uuid,omitempty"`
+	Route            callcontrol.RouteSnapshot `json:"route"`
+	ID               string                    `json:"id"`
+	Index            int                       `json:"index"`
+	Direction        string                    `json:"direction"`
+	State            string                    `json:"state"`
+	Number           string                    `json:"number,omitempty"`
+	StartedAt        time.Time                 `json:"started_at"`
+	UpdatedAt        time.Time                 `json:"updated_at"`
+	EndedAt          *time.Time                `json:"ended_at,omitempty"`
+	Missed           bool                      `json:"missed"`
+	AIHandled        bool                      `json:"ai_handled,omitempty"`
 }
 
 type parsedCall struct {
@@ -64,6 +65,32 @@ func parseCLCC(response string) []parsedCall {
 	return out
 }
 
+// A partial/error CLCC reply is not evidence of idle. In particular, malformed
+// +CLCC rows must not disappear through the tolerant display parser.
+func validatedCallPoll(response string) ([]parsedCall, error) {
+	if validateCallATResponse(response) != nil || !strings.HasSuffix(strings.TrimSpace(response), "OK") {
+		return nil, fmt.Errorf("incomplete CLCC response")
+	}
+	ok := false
+	for _, line := range strings.Split(strings.ReplaceAll(response, "\r", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "OK" {
+			ok = true
+		}
+		if !strings.HasPrefix(line, "+CLCC") {
+			continue
+		}
+		match := clccPattern.FindStringSubmatch(line)
+		if match == nil || match[0] != line || match[1] == "0" || (match[2] != "0" && match[2] != "1") || mapCallState(match[3]) == "unknown" {
+			return nil, fmt.Errorf("invalid CLCC row")
+		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("missing CLCC completion")
+	}
+	return parseCLCC(response), nil
+}
+
 func mapCallDirection(raw string) string {
 	if raw == "1" {
 		return "incoming"
@@ -91,10 +118,44 @@ func mapCallState(raw string) string {
 }
 
 func (a *app) callInterval() time.Duration {
+	base := defaultCallPollInterval
 	if a.callPollInterval > 0 {
-		return a.callPollInterval
+		base = a.callPollInterval
 	}
-	return defaultCallPollInterval
+	// Snapshot the immutable per-call route before consulting idle settings.
+	// Do not hold callMu while loading configuration or acquiring route locks.
+	a.callMu.RLock()
+	var active *callRecord
+	if a.activeCall != nil {
+		copied := *a.activeCall
+		active = &copied
+	}
+	a.callMu.RUnlock()
+	interval := base
+	if active != nil {
+		if active.Route.Mode != callcontrol.Remote {
+			return base
+		}
+		interval = time.Second
+		if active.State != "active" && active.State != "held" {
+			interval = 250 * time.Millisecond
+		} else if active.ControlState == "answering" || strings.HasSuffix(active.ControlState, "_pending") {
+			interval = 250 * time.Millisecond
+		}
+	} else {
+		a.callRouteMu.Lock()
+		remote, loadError := a.ensureRemoteCalls().snapshot()
+		agent := a.ensureVoiceAgent().snapshot()
+		a.callRouteMu.Unlock()
+		if loadError == "" && !agent.Enabled && remote.Enabled {
+			interval = time.Second
+		}
+	}
+	// Preserve a faster explicitly configured interval.
+	if base < interval {
+		return base
+	}
+	return interval
 }
 
 func (a *app) startCallPoller(ctx context.Context) {
@@ -147,12 +208,21 @@ func (a *app) pollCallOnce() error {
 		a.setCallPollStatus(err)
 		return err
 	}
-	a.applyCallPoll(parseCLCC(response), time.Now())
+	calls, err := validatedCallPoll(response)
+	if err != nil {
+		a.setCallPollStatus(err)
+		return err
+	}
+	a.applyObservedCallPoll(calls, time.Now(), true)
 	a.setCallPollStatus(nil)
 	return nil
 }
 
 func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
+	a.applyObservedCallPoll(calls, now, a.demo)
+}
+
+func (a *app) applyObservedCallPoll(calls []parsedCall, now time.Time, confirmed bool) {
 	var selected *parsedCall
 	for i := range calls {
 		candidate := &calls[i]
@@ -167,6 +237,9 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 	agent := a.ensureVoiceAgent().snapshot()
 	remote, _ := a.ensureRemoteCalls().snapshot()
 	a.callMu.Lock()
+	if confirmed && !a.demo {
+		a.ensureRemoteJournal().observeStartup(calls)
+	}
 	previousState := ""
 	var previous *callRecord
 	if a.activeCall != nil {
@@ -209,6 +282,11 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 			a.activeCall = nil
 		}
 		if selected == nil {
+			if confirmed {
+				_ = a.ensureRemoteJournal().confirmedIdle()
+			} else if previous != nil {
+				a.ensureRemoteJournal().uncertain()
+			}
 			a.callMu.Unlock()
 			a.callRouteMu.Unlock()
 			if finishedAIRecord != nil {
@@ -219,6 +297,9 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 				a.forwardCallBark(*notify)
 			}
 			a.syncVoiceRouteForCall(previous, nil)
+			if previous != nil {
+				a.notifyNative()
+			}
 			return
 		}
 	}
@@ -230,17 +311,23 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 		if selected.Direction != "incoming" {
 			remote.Enabled = false
 		}
+		recovery := a.ensureRemoteJournal().status().RecoveryRequired
+		route := callcontrol.SelectRoute(agent.Enabled, agent.Revision, remote)
+		if recovery {
+			route = callcontrol.RouteSnapshot{Mode: callcontrol.Local}
+		}
 		a.activeCall = &callRecord{
-			Revision:  1,
-			UUID:      callcontrol.NewCallUUID(),
-			Route:     callcontrol.SelectRoute(agent.Enabled, agent.Revision, remote),
-			ID:        fmt.Sprintf("%d-%d", now.UnixMilli(), selected.Index),
-			Index:     selected.Index,
-			Direction: selected.Direction,
-			State:     selected.State,
-			Number:    selected.Number,
-			StartedAt: now,
-			UpdatedAt: now,
+			RecoveryRequired: recovery,
+			Revision:         1,
+			UUID:             callcontrol.NewCallUUID(),
+			Route:            route,
+			ID:               fmt.Sprintf("%d-%d", now.UnixMilli(), selected.Index),
+			Index:            selected.Index,
+			Direction:        selected.Direction,
+			State:            selected.State,
+			Number:           selected.Number,
+			StartedAt:        now,
+			UpdatedAt:        now,
 		}
 	} else {
 		if a.activeCall.State != selected.State || (selected.Number != "" && a.activeCall.Number != selected.Number) {
@@ -263,6 +350,9 @@ func (a *app) applyCallPoll(calls []parsedCall, now time.Time) {
 	current := *a.activeCall
 	a.callMu.Unlock()
 	a.callRouteMu.Unlock()
+	if previous == nil || previous.UUID != current.UUID || previous.State != current.State || previous.ControlState != current.ControlState || previous.RecoveryRequired != current.RecoveryRequired {
+		a.notifyNative()
+	}
 	if finishedAIRecord != nil {
 		a.ensureVoiceAgent().finishCallRecord(finishedAIRecord.ID, now)
 	}
@@ -291,7 +381,7 @@ func (a *app) syncVoiceRouteForCall(previous, current *callRecord) {
 			go a.stopModuleVoiceRouteForCall(previous.UUID)
 		}
 	}
-	if current == nil || a.demo || a.usbLocator == nil {
+	if current == nil || current.RecoveryRequired || a.demo || a.usbLocator == nil {
 		return
 	}
 	if current.State == "active" && (previous == nil || changed || previous.State != "active") {
@@ -345,6 +435,7 @@ func (a *app) syncVoiceAgentRecording(previousState, currentState string) {
 	a.audioHostMu.Lock()
 	a.audioHost.WantRecording = true
 	a.audioHostMu.Unlock()
+	a.notifyNative()
 }
 
 func callStatePriority(state string) int {
@@ -376,6 +467,7 @@ func (a *app) setCallPollStatus(err error) {
 }
 
 func (a *app) callStatus(w http.ResponseWriter, _ *http.Request) {
+	interval := a.callInterval()
 	a.callMu.RLock()
 	defer a.callMu.RUnlock()
 	var active *callRecord
@@ -384,13 +476,15 @@ func (a *app) callStatus(w http.ResponseWriter, _ *http.Request) {
 		active = &copy
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"active":          active,
-		"history":         append([]callRecord(nil), a.callHistory...),
-		"polling":         !a.demo,
-		"poll_interval_s": int(a.callInterval().Seconds()),
-		"last_poll":       a.callLastPoll,
-		"last_poll_error": a.callLastPollError,
-		"audio_host":      a.audioHostSnapshot(),
+		"active":           active,
+		"history":          append([]callRecord(nil), a.callHistory...),
+		"polling":          !a.demo,
+		"poll_interval_s":  interval.Seconds(),
+		"poll_interval_ms": interval.Milliseconds(),
+		"last_poll":        a.callLastPoll,
+		"last_poll_error":  a.callLastPollError,
+		"audio_host":       a.audioHostSnapshot(),
+		"recovery":         a.ensureRemoteJournal().status(),
 	})
 }
 
@@ -496,6 +590,9 @@ func (a *app) setActiveCallState(state string, now time.Time) {
 	}
 	a.activeCall.UpdatedAt = now
 	a.callMu.Unlock()
+	if previousState != state {
+		a.notifyNative()
+	}
 	a.syncVoiceAgentRecording(previousState, state)
 }
 

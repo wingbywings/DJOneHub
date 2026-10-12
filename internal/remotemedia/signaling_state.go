@@ -5,6 +5,7 @@ import "strings"
 // SignalingState retains the last state before Close. No SDP, candidate
 // addresses, identity, TURN credential or raw error is exposed.
 type SignalingState struct {
+	UplinkMuted             bool          `json:"uplink_muted"`
 	LocalCandidates         uint64        `json:"local_candidates"`
 	LocalRelayCandidates    uint64        `json:"local_relay_candidates"`
 	RemoteTrickleCandidates uint64        `json:"remote_trickle_candidates"`
@@ -16,6 +17,7 @@ type SignalingState struct {
 	AudioActive             bool          `json:"audio_active"`
 	Downlink                SenderStats   `json:"downlink"`
 	Uplink                  ReceiverStats `json:"uplink"`
+	Feedback                FeedbackStats `json:"feedback"`
 	closing                 bool
 }
 
@@ -24,9 +26,13 @@ func (p *Peer) SignalingState() SignalingState {
 	state := p.diagnostics
 	p.diagnosticMu.Unlock()
 	p.mediaMu.Lock()
+	state.UplinkMuted = p.muted
 	state.AudioActive = p.active && p.ctx.Err() == nil
 	state.Downlink, state.Uplink = p.Stats()
 	p.mediaMu.Unlock()
+	if p.feedback != nil {
+		state.Feedback = p.feedback.snapshot()
+	}
 	return state
 }
 

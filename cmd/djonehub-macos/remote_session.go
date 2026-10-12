@@ -36,7 +36,7 @@ type remoteCallBackend struct {
 // Hub connection manager supplies its enrolled client. No public HTTP endpoint
 // accepts identity or TURN credentials. Incoming dispatch is opt-in online-only;
 // AI routing is checked before any media allocation or invitation.
-func (a *app) runRemoteSignaling(ctx context.Context, client *callsignal.Client, mediaConfig remotemedia.PeerConfig, refreshAccess func(context.Context) (string, error)) (remotecall.Snapshot, error) {
+func (a *app) runRemoteSignaling(ctx context.Context, client *callsignal.Client, mediaConfig remotemedia.PeerConfig, refreshAccess func(context.Context) (string, error), options ...func(*remotecall.SignalCall)) (remotecall.Snapshot, error) {
 	a.callMu.RLock()
 	if a.activeCall == nil || a.activeCall.UUID != mediaConfig.CallUUID || a.activeCall.Route.Mode != callcontrol.Remote {
 		a.callMu.RUnlock()
@@ -46,7 +46,7 @@ func (a *app) runRemoteSignaling(ctx context.Context, client *callsignal.Client,
 	a.callMu.RUnlock()
 	mediaConfig.Trickle = true // a blocked UDP TURN endpoint must not delay the SDP offer
 	binding := remotecall.Binding{CallUUID: call.UUID, Generation: mediaConfig.Generation, InstallationID: call.Route.TargetInstallationID}
-	config := remotecall.SignalCall{Config: remotecall.Config{Binding: binding, Route: call.Route, RingDeadline: call.StartedAt.Add(time.Duration(call.Route.RingTimeoutSeconds) * time.Second), Outgoing: call.Direction == "outgoing"}, ModuleID: a.deviceID, Display: "DJOneHub"}
+	config := remotecall.SignalCall{Config: remotecall.Config{CallControls: remoteCallControls, ControlCleanup: remoteSignalResume, RecoverAudio: remoteAudioRecovery, RecoverTransport: remoteICERestart, Binding: binding, Route: call.Route, RingDeadline: call.StartedAt.Add(time.Duration(call.Route.RingTimeoutSeconds) * time.Second), Outgoing: call.Direction == "outgoing"}, ModuleID: a.deviceID, Display: "DJOneHub", EnableICERestart: remoteICERestart}
 	config.Display = a.deviceID
 	if call.Direction == "outgoing" || call.Route.CallerDisplay == "number" {
 		if call.Number != "" && len(call.Number) <= 128 {
@@ -57,6 +57,9 @@ func (a *app) runRemoteSignaling(ctx context.Context, client *callsignal.Client,
 		config.Display = "DJOneHub"
 	}
 	config.RefreshAccess = refreshAccess
+	for _, option := range options {
+		option(&config)
+	}
 	return remotecall.RunSignaledCall(ctx, client, config, func(ctx context.Context) (*remotecall.Session, remotecall.SignalMedia, error) {
 		var peer *remotemedia.Peer
 		session, err := a.startRemoteSession(ctx, binding, nil, func(ctx context.Context) (remotecall.Media, error) {
@@ -140,13 +143,19 @@ func (a *app) startRemoteSession(parent context.Context, binding remotecall.Bind
 		cancel()
 		return nil, remotecall.ErrState
 	}
-	session, err := remotecall.New(ctx, remotecall.Config{Binding: binding, Route: call.Route, RingDeadline: deadline, Outgoing: call.Direction == "outgoing"}, backend, wrappedFactory)
+	if err := a.ensureRemoteJournal().begin(binding); err != nil {
+		stop()
+		cancel()
+		return nil, err
+	}
+	session, err := remotecall.New(ctx, remotecall.Config{CallControls: remoteCallControls, ControlCleanup: remoteSignalResume, RecoverAudio: remoteAudioRecovery, RecoverTransport: remoteICERestart, Binding: binding, Route: call.Route, RingDeadline: deadline, Outgoing: call.Direction == "outgoing"}, backend, wrappedFactory)
 	if err != nil {
 		stop()
 		cancel()
 		return nil, err
 	}
 	a.remoteSession = &remoteSessionHandle{session: session, binding: binding, native: native, peer: peer}
+	a.notifyNative()
 	go func() { <-session.Done(); stop(); cancel() }()
 	return session, nil
 }
@@ -173,6 +182,10 @@ func (b *remoteCallBackend) Claim(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := a.ensureRemoteJournal().begin(binding); err != nil {
+		arbiter.Release(lease)
+		return err
+	}
 	a.callAudioLease, a.remoteCallOwner = lease, b.owner
 	call.ControlOwner = "remote"
 	call.Revision++
@@ -190,6 +203,9 @@ func remoteClaimable(call *callRecord) bool {
 }
 func (b *remoteCallBackend) Answer(ctx context.Context) (bool, error) {
 	a := b.owner.app
+	if err := a.ensureRemoteJournal().phase(b.owner.binding, "answer_pending"); err != nil {
+		return false, err
+	}
 	a.callMu.RLock()
 	outgoing := a.activeCall != nil && a.activeCall.UUID == b.owner.binding.CallUUID && a.activeCall.Direction == "outgoing"
 	a.callMu.RUnlock()
@@ -224,6 +240,11 @@ func (b *remoteCallBackend) Observe() (remotecall.Observation, error) {
 	}
 	active := call.State == "active"
 	a.callMu.RUnlock()
+	if active {
+		if err := a.ensureRemoteJournal().phase(b.owner.binding, "active"); err != nil {
+			return remotecall.Observation{}, err
+		}
+	}
 	a.moduleVoiceMu.Lock()
 	moduleReady := a.moduleVoiceReady
 	a.moduleVoiceMu.Unlock()
@@ -238,6 +259,8 @@ func (b *remoteCallBackend) Finish(ctx context.Context, mayHaveAnswered bool) er
 	}
 	a := b.owner.app
 	if mayHaveAnswered {
+		// A failed journal write must not prevent call-bound hardware cleanup.
+		_ = a.ensureRemoteJournal().phase(b.owner.binding, "ending")
 		// Bind a newly allocated outgoing modem index before using bound ATH.
 		if err := b.reconcileOutgoing(ctx); err != nil {
 			return err
@@ -274,4 +297,12 @@ func (b *remoteCallBackend) Finish(ctx context.Context, mayHaveAnswered bool) er
 	// Active/answer-pending/ending-pending calls retain ownership until CLCC
 	// teardown releases the exact call lease through the normal lifecycle.
 	return nil
+}
+
+// The ordinary bound-command path checks ownership and fresh CLCC again at the
+// modem boundary. DTMF never goes through an arbitrary AT endpoint.
+func (b *remoteCallBackend) DTMF(ctx context.Context, digit string) error {
+	ctx = context.WithValue(ctx, remoteOwnerContextKey{}, b.owner)
+	_, err := b.owner.app.executeCallCommand(ctx, callcontrol.Command{RequestID: callcontrol.NewCallUUID(), CallUUID: b.owner.binding.CallUUID, Type: "dtmf", Digit: digit, Actor: "remote"})
+	return err
 }

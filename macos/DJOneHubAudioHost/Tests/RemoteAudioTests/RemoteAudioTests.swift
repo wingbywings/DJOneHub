@@ -49,4 +49,31 @@ final class RemoteAudioTests: XCTestCase {
         queue.append(Data(repeating: 3, count: 160), now: 70_000_000)
         queue.clear(); XCTAssertTrue(queue.peek(now: 70_000_000).isEmpty)
     }
+    func testIndependentUACClockWithPartialWrites() {
+        for drift in [-500.0, 500.0] {
+            var queue = RemotePCMQueue()
+            func pcm(_ count: Int) -> Data { Data((0..<count).flatMap { _ in [UInt8(232), UInt8(3)] }) }
+            queue.append(pcm(160), now: 0)
+            var generated = 0.0
+            for tick in 0..<30_000 { // Five minutes of independent sample clocks.
+                let now = UInt64(tick) * 10_000_000
+                generated += 80 * (1 + drift / 1_000_000)
+                let count = Int(generated); generated -= Double(count)
+                queue.append(pcm(count), now: now)
+                for _ in 0..<2 {
+                    let output = queue.peek(now: now)
+                    guard output.count >= 80, output.prefix(80) == pcm(40) else {
+                        XCTFail("Partial output starved/corrupted at tick \(tick), drift \(drift), queue \(queue.samples), ppm \(queue.clockCorrectionPPM)"); return
+                    }
+                    queue.consume(samples: 40)
+                }
+                XCTAssertLessThanOrEqual(queue.samples, 320)
+            }
+            XCTAssertEqual(queue.droppedSamples, 0, "Normal drift must not discard whole audio chunks")
+            XCTAssertEqual(queue.clockCorrectionPPM, drift, accuracy: 40)
+            queue.clear()
+            XCTAssertEqual(queue.clockCorrectionPPM, 0)
+            XCTAssertEqual(queue.samples, 0)
+        }
+    }
 }

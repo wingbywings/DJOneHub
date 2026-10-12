@@ -164,6 +164,11 @@ func (a *app) buildAudioHostConfig() (audioHostConfigResponse, error) {
 		MediaMode: agent.MediaMode(), AgentProvider: agent.Provider, AgentMediaURL: agentMediaURL,
 		AgentRevision: agent.Revision,
 	}
+	if a.ensureRemoteJournal().status().RecoveryRequired {
+		config.RouteReady = false
+		config.RouteError = "重启前通话归属未确认，请在本机挂断或等待模块空闲"
+		config.Recording = false
+	}
 	if remoteOwned {
 		// Until the authenticated native control channel supplies remote media
 		// credentials, the host must fail closed, never open Mac mic/speakers.
@@ -190,6 +195,7 @@ func (a *app) audioHostMute(w http.ResponseWriter, r *http.Request) {
 	a.audioHostMu.Lock()
 	a.audioHost.WantMuted = body.Muted
 	a.audioHostMu.Unlock()
+	a.notifyNative()
 	writeJSON(w, http.StatusOK, map[string]bool{"muted": body.Muted})
 }
 
@@ -216,6 +222,7 @@ func (a *app) audioHostRecord(w http.ResponseWriter, r *http.Request) {
 	a.audioHostMu.Lock()
 	a.audioHost.WantRecording = body.Enabled
 	a.audioHostMu.Unlock()
+	a.notifyNative()
 	writeJSON(w, http.StatusOK, map[string]bool{"recording": body.Enabled})
 }
 
@@ -224,6 +231,7 @@ func (a *app) resetAudioHostIntent() {
 	a.audioHost.WantMuted = false
 	a.audioHost.WantRecording = false
 	a.audioHostMu.Unlock()
+	a.notifyNative()
 }
 
 func validateAudioHostConfig(config audioHostConfigResponse) error {

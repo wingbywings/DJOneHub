@@ -1,10 +1,11 @@
 # Relay 与 TURN 在线联调
 
-当前为前台在线接听版本，尚无 APNs 后台唤醒。以下是配置模板，不会自动部署服务。
+2026-10-12：已实现 CallKit/PushKit/APNs，且本线程用户已确认后台来电及双向音频通过。
+日常运维、已有服务器升级与扫码配对请先看[当前操作指南](../../docs/REMOTE_OPERATIONS_GUIDE.md)。以下为 TURN 配置和协议说明，不会自动部署服务。
 
 CentOS 8 已有 Nginx/SSL 时，使用 [Nginx 自动安装手册](../../docs/RELAY_CENTOS8_NGINX_QUICKSTART.md) 与 `scripts/install-relay-centos8.sh`，复用 HTTPS 443。
 
-首次安装请按 [完整安装、配对与双向音频联调指南](../../docs/REMOTE_IPHONE_INSTALL_AND_TEST.md) 执行，覆盖 Mac Hub、CentOS 8 上的 Relay/coturn、iPhone 真机签名、配对和分方向验收。当前目标机已有 TCP 80/443 网站，Relay 复用 `https://oops.work` 证书并监听 `https://oops.work:8443`。
+首次安装请按 [完整安装、配对与双向音频联调指南](../../docs/REMOTE_IPHONE_INSTALL_AND_TEST.md) 执行，覆盖 Mac Hub、CentOS 8 上的 Relay/coturn、iPhone 真机签名、配对和分方向验收。当前本线程使用 Nginx 443 反代到回环 `127.0.0.1:18443`，公网 origin 为 `https://oops.work`；完整旧指南中的独立 8443 是另一种历史拓扑，不要混用。
 
 1. 使用 `oops.work` 上已经受信任的 TLS 证书。Mac/iPhone 必须信任证书链；客户端不跳过校验。
 2. 安装 coturn，复制 `turnserver.conf.example`，填写 realm、证书路径和公网地址。如 TURN 在 NAT 后面，配置正确的公网/内网映射。
@@ -16,10 +17,10 @@ CentOS 8 已有 Nginx/SSL 时，使用 [Nginx 自动安装手册](../../docs/REL
 
 `POST /v1/ice` 需要 Bearer access token 和 `{ "module_id": "dji-..." }`。它检查当前身份撤销状态和模块范围，返回 no-store 的临时 TURN username/password；每次调用生成独立凭据，客户端仅在本通媒体对象中使用。用户配对身份不能修改 TURN 地址或获得主密钥。
 
-临时凭据有效期 4 小时。当前不在通话中轮换 ICE 身份；两端在其到期前 30 秒结束本通，避免凭据失效后留下无音频电话。新的来电重新获取凭据。该期限不代表已完成 4 小时稳定性验收。
+临时凭据有效期 4 小时。普通启动未开启通话中续租，两端在到期前 30 秒结束本通。当前可选 `--remote-turn-renew` 使用刷新凭据和 ICE restart，但旧/新通路并行迁移尚未完成；须先同步升级三端并专项验收，不能宣称无缝续租。新的来电重新获取凭据。该期限不代表已完成 4 小时稳定性验收。
 
 撤销安装身份会禁止新的签发，并关闭其信令/通话；已经签发的 coturn 凭据仍可能被持有者使用到自身到期。coturn 的 user-quota 按临时 username 计算，不是按 DJOneHub 安装身份计算，所以必须同时设置总分配数和带宽上限。Relay 现有全局/来源限流继续适用。需要立即废止全部已签发凭据时，应按运维流程轮换共享 secret 并处理现存分配；这会影响活动通话。
 
 模板拒绝 TURN 对内网等地址的转发，避免将中继当成访问内部网络的代理。需结合实际公网地址规划检查规则。服务日志中的临时用户名也应按凭据相关数据管理，不记录 password 或主密钥。
 
-已通过本机 Pion TURN/UDP、TURN/TCP 的强制中继与 Opus 双向测试；尚未部署 coturn，尚未完成真实 TLS 证书、公网 NAT、NAT64、受限网络和 iPhone 硬件验收。协议参考 [coturn 官方配置](https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf)及 [TURN REST 鉴权说明](https://github.com/coturn/coturn/blob/master/README.turnserver)。
+已通过本机 Pion TURN/UDP、TURN/TCP 的强制中继与 Opus 双向测试，后续已完成公网部署并获用户确认真实 iPhone 双向通话。完整 TURN/TLS、NAT64、受限网络与长通话矩阵仍待验收，不能用一次成功通话替代。协议参考 [coturn 官方配置](https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf)及 [TURN REST 鉴权说明](https://github.com/coturn/coturn/blob/master/README.turnserver)。

@@ -7,6 +7,8 @@ DJOneHub 是一款面向**大疆第一代 4G 模块**的第三方 macOS 管理�
 > [!IMPORTANT]
 > DJOneHub 是非官方第三方项目，与 DJI、Quectel、运营商及 eSIM 卡片厂商不存在隶属、授权或合作关系。
 
+远程 iPhone 接听的升级、服务重启、Mac 配对管理与手机扫码操作，见[当前操作指南](docs/REMOTE_OPERATIONS_GUIDE.md)（2026-10-12 / R11）。已有配对通常无需因升级重建。
+
 ## 功能概览
 
 | 功能 | 状态 | 说明 |

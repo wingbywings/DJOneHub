@@ -226,6 +226,8 @@ private final class AudioHostController {
     private var nativeReportSequence: UInt64 = 0
     private var remoteBridgeReady = false
     private var lifecycleGeneration: UInt64 = 0
+    private var eventsOnline = false
+    private var eventAttempt: UUID?
     private var currentAgentRevision: UInt64?
 
     init(client: APIClient, fixedDeviceID: String?) {
@@ -270,10 +272,59 @@ private final class AudioHostController {
 
     func run() async {
         print("DJOneHubAudioHost connected to \(client.baseURL.absoluteString)")
-        while !Task.isCancelled {
-            await pollOnce()
-            try? await Task.sleep(for: .milliseconds(500))
+        let (changes, wake) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        wake.yield(())
+        let refresh = Task { [weak self] in
+            while !Task.isCancelled {
+                let seconds = NativeRefreshPolicy.interval(
+                    eventsOnline: self?.eventsOnline == true,
+                    remoteRunning: self?.isRemoteMode == true && self?.remoteBridgeReady == true,
+                    transitioning: self?.lastError != nil || (self?.currentCallID != nil && (self?.audio.isRunning != true || (self?.isRemoteMode == true && self?.remoteBridgeReady != true))))
+                do { try await Task.sleep(for: .seconds(seconds)) } catch { break }
+                wake.yield(())
+            }
         }
+        let health = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.reportRemoteHealth()
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { break }
+            }
+        }
+        let events = Task { [weak self] in
+            guard let native = self?.client.native else { return }
+            var retry: UInt64 = 1
+            while !Task.isCancelled {
+                let connectedAt = Date()
+                let attempt = UUID()
+                self?.eventAttempt = attempt
+                do {
+                    try await native.events { [weak self] _ in
+                        Task { @MainActor in
+                            guard let self, self.eventAttempt == attempt else { return }
+                            self.eventsOnline = true
+                            wake.yield(())
+                        }
+                    }
+                } catch { }
+                self?.eventAttempt = nil
+                self?.eventsOnline = false
+                if Task.isCancelled { break }
+                // Lost events never authorize audio. Re-read full state and
+                // retain the legacy 500 ms fallback until subscription returns.
+                wake.yield(())
+                if Date().timeIntervalSince(connectedAt) > 10 { retry = 1 }
+                do { try await Task.sleep(for: .seconds(retry)) } catch { break }
+                retry = min(5, retry * 2)
+            }
+        }
+        await withTaskCancellationHandler {
+            for await _ in changes {
+                if Task.isCancelled { break }
+                await pollOnce()
+            }
+        } onCancel: { wake.finish() }
+        refresh.cancel(); health.cancel(); events.cancel(); wake.finish()
+        await refresh.value; await health.value; await events.value
         stopAudio()
         currentDeviceID = nil
         await report(enabled: false)
@@ -331,11 +382,6 @@ private final class AudioHostController {
                 }
             }
             lastError = nil
-            if isRemoteMode, remoteBridgeReady, let uuid = currentCallUUID, let generation = currentMediaGeneration {
-                guard let native = client.native else { throw HostError.message("远程音频缺少受认证的宿主控制通道") }
-                nativeReportSequence &+= 1
-                try await native.report(deviceID: currentDeviceID, callUUID: uuid, generation: generation, sequence: nativeReportSequence, running: audio.isRunning)
-            }
             await report(enabled: true)
         } catch {
             if lastError != error.localizedDescription {
@@ -344,6 +390,22 @@ private final class AudioHostController {
             if isRemoteMode { stopAudio() }
             lastError = error.localizedDescription
             await report(enabled: true)
+        }
+    }
+
+    private func reportRemoteHealth() async {
+        guard isRemoteMode, remoteBridgeReady, let uuid = currentCallUUID,
+              let generation = currentMediaGeneration, let native = client.native else { return }
+        let lifecycle = lifecycleGeneration
+        nativeReportSequence &+= 1
+        do {
+            try await native.report(deviceID: currentDeviceID, callUUID: uuid, generation: generation,
+                                    sequence: nativeReportSequence, running: audio.isRunning)
+        } catch {
+            guard lifecycleGeneration == lifecycle, currentCallUUID == uuid,
+                  currentMediaGeneration == generation, isRemoteMode else { return }
+            stopAudio()
+            lastError = error.localizedDescription
         }
     }
 

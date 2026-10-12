@@ -4,6 +4,22 @@ import "errors"
 
 var ErrReadinessRevision = errors.New("stale or conflicting media readiness revision")
 
+// SuspendAudio preserves the authenticated transport/host lease, but no queued
+// speech. Only a later trusted readiness update and Activate can resume media.
+func (p *Peer) SuspendAudio() error {
+	p.mediaMu.Lock()
+	defer p.mediaMu.Unlock()
+	if p.ctx.Err() != nil || p.quiesced.Load() {
+		return ErrMediaNotReady
+	}
+	p.active = false
+	p.audioSuspendRevision = p.readiness.Revision
+	p.audioSuspendSequence = p.readiness.AudioSequence
+	p.sender.Discard()
+	p.bridge.DiscardQueuedAudio()
+	return p.receiver.Reset()
+}
+
 // Readiness is a trusted coordinator snapshot, not a client request body.
 // CellularActive/ModuleReady must come from the Hub; IOSAudioActive must come
 // from the authorized installation's CallKit didActivate confirmation. The
@@ -12,6 +28,7 @@ var ErrReadinessRevision = errors.New("stale or conflicting media readiness revi
 type Readiness struct {
 	CallUUID                                           string
 	Generation, Revision                               uint64
+	AudioSequence                                      uint64
 	CellularActive, ModuleReady, IOSAudioActive, Ended bool
 }
 
@@ -26,6 +43,9 @@ func (p *Peer) UpdateReadiness(state Readiness) error {
 	defer p.mediaMu.Unlock()
 	if p.ctx.Err() != nil {
 		return p.ctx.Err()
+	}
+	if p.quiesced.Load() {
+		return ErrMediaNotReady
 	}
 	if state.Revision < p.readiness.Revision {
 		return ErrReadinessRevision

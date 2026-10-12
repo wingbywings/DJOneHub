@@ -147,6 +147,7 @@ func (a *app) resetModuleVoiceSession() {
 }
 
 func (a *app) closeModuleVoiceSessionLocked() {
+	defer a.notifyNative()
 	if a.moduleVoiceSession != nil && a.moduleVoiceSession.adb != nil {
 		a.moduleVoiceSession.adb.Close()
 	}
@@ -159,6 +160,7 @@ func (a *app) closeModuleVoiceSessionLocked() {
 }
 
 func (a *app) setVoiceStatus(ready bool, err error, detail string) {
+	defer a.notifyNative()
 	a.moduleVoiceMu.Lock()
 	defer a.moduleVoiceMu.Unlock()
 	a.moduleVoiceReady = ready

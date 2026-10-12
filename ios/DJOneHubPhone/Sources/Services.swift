@@ -185,7 +185,7 @@ final class PingCompletion: @unchecked Sendable {
   private(set) var pendingWriteSince: Date?
   private var closed = false
   var onFailure: (() -> Void)?
-  init(identity: StoredIdentity) throws {
+  init(identity: StoredIdentity, resume: DJOneHubPhoneCore.Binding? = nil) throws {
     guard let tokens = identity.tokens else { throw PhoneError.invalidData }
     var c = URLComponents(url: try Wire.origin(identity.relay), resolvingAgainstBaseURL: false)!
     c.scheme = "wss"
@@ -193,6 +193,15 @@ final class PingCompletion: @unchecked Sendable {
     var r = URLRequest(url: c.url!)
     r.setValue("Bearer \(tokens.access_token)", forHTTPHeaderField: "Authorization")
     r.setValue("djonehub.calls.v1", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+    r.setValue("1", forHTTPHeaderField: "X-DJOneHub-Recovery")
+    if let resume {
+      let message = Signal(type: "resume", binding: resume, payload: [:])
+      let encoded = try message.encoded().base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+      guard encoded.utf8.count <= 2048 else { throw PhoneError.invalidData }
+      r.setValue(encoded, forHTTPHeaderField: "X-DJOneHub-Resume")
+    }
     delegate = NetworkDelegate()
     let configuration = NetworkDelegate.configuration()
     configuration.timeoutIntervalForResource = 0

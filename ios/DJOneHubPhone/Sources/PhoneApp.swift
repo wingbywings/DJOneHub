@@ -15,6 +15,8 @@ final class PhoneApplicationDelegate: NSObject, UIApplicationDelegate {
   @UIApplicationDelegateAdaptor(PhoneApplicationDelegate.self) private var delegate
   @StateObject private var runtime = PhoneRuntime.shared
   @Environment(\.scenePhase) private var phase
+  @State private var scanning = false
+  @State private var clearingHistory = false
   @State private var importing = false
   @State private var forgetting = false
   var body: some Scene {
@@ -55,6 +57,15 @@ final class PhoneApplicationDelegate: NSObject, UIApplicationDelegate {
                   Label(runtime.speaker ? "切回听筒" : "扬声器", systemImage: "speaker.wave.2.fill")
                 }.disabled(runtime.callPhase == "ending")
               }
+              if runtime.callControlsSupported && runtime.connectedAt != nil {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3)) {
+                  ForEach(Array("123456789*0#"), id: \.self) { digit in
+                    Button(String(digit)) { runtime.sendDTMF(String(digit)) }
+                      .font(.title2).frame(maxWidth: .infinity).buttonStyle(.bordered)
+                      .accessibilityLabel("拨号键 \(digit)")
+                  }
+                }.disabled(runtime.dtmfPending || runtime.callPhase != "connected")
+              }
               Button(role: .destructive) {
                 runtime.endCall()
               } label: {
@@ -89,7 +100,25 @@ final class PhoneApplicationDelegate: NSObject, UIApplicationDelegate {
           if !runtime.lastCallResult.isEmpty {
             Section { Text(runtime.lastCallResult) }
           }
+          Section("通话记录（仅保存在此 iPhone）") {
+            if runtime.history.entries.isEmpty { Text("暂无通话记录").foregroundStyle(.secondary) }
+            ForEach(runtime.history.entries) { entry in
+              VStack(alignment: .leading, spacing: 4) {
+                Label(entry.display, systemImage: entry.outgoing ? "phone.arrow.up.right" : "phone.arrow.down.left")
+                Text(entry.module + " · " + entry.started.formatted()).font(.caption)
+                Text((entry.result ?? "通话进行中") + (entry.connected != nil && entry.ended != nil ? " · \(entry.duration) 秒" : ""))
+                  .font(.caption).foregroundStyle(.secondary)
+              }
+            }
+            if !runtime.historyError.isEmpty { Text(runtime.historyError).foregroundStyle(.red) }
+            if !runtime.history.entries.isEmpty || !runtime.historyError.isEmpty {
+              Button("清除已结束的通话记录", role: .destructive) { clearingHistory = true }
+            }
+          }
           Section("配对与接听") {
+            Button("扫描 Hub 配对二维码") { scanning = true }.disabled(
+              runtime.paired || runtime.working || runtime.online || runtime.callUUID != nil)
+
             Button("导入 Hub 配对文件") { importing = true }.disabled(
               runtime.paired || runtime.working || runtime.online)
             Button(runtime.online ? "断开连接" : "连接并等待来电") {
@@ -127,9 +156,13 @@ final class PhoneApplicationDelegate: NSObject, UIApplicationDelegate {
           }
         }
         .navigationTitle("DJOneHub")
+        .sheet(isPresented: $scanning) { PairingScanner(runtime: runtime) }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
           if case .success(let url) = result { Task { await runtime.importPairing(url) } }
         }
+      }
+      .confirmationDialog("清除本机已结束的通话记录？", isPresented: $clearingHistory, titleVisibility: .visible) {
+        Button("清除记录", role: .destructive) { runtime.clearHistory() }
       }
       .confirmationDialog(
         "请先在 Hub/Relay 撤销旧安装身份。本操作仅删除此 iPhone 的凭据，不能撤销服务端身份。", isPresented: $forgetting,

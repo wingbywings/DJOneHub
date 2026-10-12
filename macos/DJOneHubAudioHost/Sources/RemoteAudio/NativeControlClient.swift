@@ -67,6 +67,43 @@ public final class NativeControlClient: @unchecked Sendable {
               url.host == "127.0.0.1" else { throw NativeControlError.invalidMediaPath }
         return url
     }
+    // Every connection reloads the private bootstrap. Events carry only an
+    // invalidation revision; callers must fetch current authenticated config.
+    public func events(onChange: @escaping @Sendable (UInt64) -> Void) async throws {
+        let credentials = try NativeControlCredentials.load(path: path)
+        var components = URLComponents(url: credentials.baseURL, resolvingAgainstBaseURL: false)!
+        components.scheme = "ws"
+        components.path = "/events"
+        var request = URLRequest(url: components.url!, timeoutInterval: 3)
+        request.setValue("Bearer \(credentials.token)", forHTTPHeaderField: "Authorization")
+        request.setValue(hostID, forHTTPHeaderField: "X-DJOneHub-Host-ID")
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        config.timeoutIntervalForRequest = 3
+        config.timeoutIntervalForResource = 86400
+        let eventSession = URLSession(configuration: config, delegate: NativeNoRedirect(), delegateQueue: nil)
+        defer { eventSession.invalidateAndCancel() }
+        let socket = eventSession.webSocketTask(with: request)
+        socket.maximumMessageSize = 1024
+        try await withTaskCancellationHandler {
+            defer { socket.cancel(with: .goingAway, reason: nil) }
+            socket.resume()
+            var revision: UInt64?
+            while !Task.isCancelled {
+                let message = try await socket.receive()
+                let data: Data
+                switch message {
+                case .string(let text): data = Data(text.utf8)
+                case .data(let bytes): data = bytes
+                @unknown default: throw NativeControlError.invalidResponse
+                }
+                let next = try NativeChangeEvent.decode(data)
+                if let revision, next < revision { throw NativeControlError.invalidResponse }
+                if revision == nil || next > revision! { revision = next; onChange(next) }
+            }
+            try Task.checkCancellation()
+        } onCancel: { socket.cancel(with: .goingAway, reason: nil) }
+    }
     private func request(endpoint: String, deviceID: String?, body: Data?) async throws -> Data {
         // Reread after every restart; never retain the old bootstrap token.
         let credentials = try NativeControlCredentials.load(path: path)
@@ -82,5 +119,27 @@ public final class NativeControlClient: @unchecked Sendable {
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count <= 65536 else { throw NativeControlError.invalidResponse }
         return data
+    }
+}
+
+// Kept separate from transport for deterministic malformed-event tests.
+public enum NativeChangeEvent {
+    public static func decode(_ data: Data) throws -> UInt64 {
+        guard data.count <= 1024,
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              Set(root.keys) == ["type", "revision"] else { throw NativeControlError.invalidResponse }
+        struct Event: Decodable { let type: String; let revision: UInt64 }
+        let event = try JSONDecoder().decode(Event.self, from: data)
+        guard event.type == "changed" else { throw NativeControlError.invalidResponse }
+        return event.revision
+    }
+}
+
+public enum NativeRefreshPolicy {
+    // Remote readiness has its own 500 ms reporter. Manual/idle legacy status
+    // must still refresh well inside the Hub's five-second registration lease.
+    public static func interval(eventsOnline: Bool, remoteRunning: Bool, transitioning: Bool) -> Double {
+        guard eventsOnline && !transitioning else { return 0.5 }
+        return remoteRunning ? 5 : 2
     }
 }

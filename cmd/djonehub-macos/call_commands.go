@@ -180,6 +180,10 @@ func (a *app) runBoundCallCommand(parent context.Context, command callcontrol.Co
 	}
 	a.ensureCallIdentityLocked()
 	call := *a.activeCall
+	if call.RecoveryRequired && command.Type != "hangup" && command.Type != "reject" {
+		a.callMu.Unlock()
+		return result, commandError("recovery_required", "重启前通话归属未确认，请先在本机挂断")
+	}
 	if command.Actor == "remote" {
 		owner, _ := parent.Value(remoteOwnerContextKey{}).(*remoteCallOwner)
 		if owner == nil || a.remoteCallOwner != owner || call.Route.Mode != callcontrol.Remote || call.Route.TargetInstallationID != owner.binding.InstallationID {

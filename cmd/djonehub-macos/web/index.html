@@ -160,6 +160,22 @@
           <button id="install-voice-runtime" class="secondary" type="button" hidden>安装语音运行时</button>
         </div>
       </section>
+      <details id="remote-settings-panel" class="call-submodule">
+        <summary><span class="call-feature-copy"><strong>iPhone 远程接听</strong><small id="remote-status">展开后读取当前模块设置</small></span></summary>
+        <p>启用 AI 接听时，本模块只走 AI，不会通知远程 iPhone。通话过程中不能更改接听路由。</p>
+        <form id="remote-form">
+          <fieldset id="remote-fields" class="agent-settings-grid" disabled>
+            <label class="agent-toggle"><input id="remote-enabled" type="checkbox"><span>启用此模块的远程接听</span></label>
+            <label>目标 iPhone 安装 ID<input id="remote-installation" type="text" maxlength="128" pattern="[A-Za-z0-9_-]*" autocomplete="off" placeholder="从 Mac 配对窗口或 iPhone 连接状态复制"></label>
+            <label>响铃超时（秒）<input id="remote-timeout" type="number" min="10" max="90" required value="45"></label>
+            <label>来电显示<select id="remote-display"><option value="number">电话号码</option><option value="module">仅模块</option></select></label>
+            <button type="submit">保存远程接听设置</button>
+          </fieldset>
+        </form>
+        <button id="remote-refresh" type="button" class="secondary">重新读取</button>
+        <p>在 Mac 运行 <code>djonehub remote-ui</code> 打开配对管理窗口，可生成扫码凭据、查看或撤销 iPhone 授权。此网页不接收配对密钥。</p>
+      </details>
+
       <details id="voice-agent-settings-panel" class="call-submodule">
         <summary class="agent-settings-summary">
           <span class="call-feature-copy"><strong id="voice-agent-title">智能语音接听与拨号</strong><small id="voice-agent-status">正在读取 Voice Agent 状态...</small></span>

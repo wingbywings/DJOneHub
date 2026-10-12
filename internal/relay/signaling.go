@@ -15,9 +15,11 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// All routes are bound to these exact connection objects. A reconnect starts a
-// new epoch and never resumes or replays an earlier hardware command.
+// Routes are bound to exact connection objects. Only an explicitly negotiated,
+// authenticated call resumption may transfer a connected route to a new socket.
 type signalConnection struct {
+	recovery          bool
+	resumed           bool
 	ready             bool // guarded by broker.mu; welcome must be enqueued first
 	principal         identity.Principal
 	token, epoch      string
@@ -31,12 +33,14 @@ type signalConnection struct {
 	seen              map[string]bool // bounded call tombstones for this Hub connection
 }
 type signalRoute struct {
-	invite     callsignal.Message
-	hub, phone *signalConnection
-	iceCount   int
-	outgoing   bool
-	invited    bool
-	stopWake   context.CancelFunc
+	connected      bool
+	suspendedUntil time.Time
+	invite         callsignal.Message
+	hub, phone     *signalConnection
+	iceCount       int
+	outgoing       bool
+	invited        bool
+	stopWake       context.CancelFunc
 }
 type signalBroker struct {
 	push        voippush.Sender
@@ -79,7 +83,8 @@ func (c *signalConnection) send(m callsignal.Message) bool {
 	}
 }
 func (b *signalBroker) serve(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Origin") != "" || r.URL.RawQuery != "" || len(websocket.Subprotocols(r)) != 1 || websocket.Subprotocols(r)[0] != callsignal.Subprotocol {
+	if (r.Header.Get(callsignal.RecoveryHeader) != "" && r.Header.Get(callsignal.RecoveryHeader) != "1") ||
+		(len(r.Header.Get(callsignal.ResumeHeader)) > 2048) || r.Header.Get("Origin") != "" || r.URL.RawQuery != "" || len(websocket.Subprotocols(r)) != 1 || websocket.Subprotocols(r)[0] != callsignal.Subprotocol {
 		respond(w, http.StatusBadRequest, callsignal.Failure{Code: "invalid_signal_handshake"})
 		return
 	}
@@ -96,16 +101,12 @@ func (b *signalBroker) serve(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusUnauthorized, callsignal.Failure{Code: "invalid_credential"})
 		return
 	}
-	c := &signalConnection{principal: p, token: token, epoch: uuid.NewString(), ctx: ctx, cancel: cancel, authorization: authorization, stopAuthorization: stopAuthorization, out: make(chan callsignal.Message, 8), seen: make(map[string]bool)}
+	c := &signalConnection{recovery: r.Header.Get(callsignal.RecoveryHeader) == "1", principal: p, token: token, epoch: uuid.NewString(), ctx: ctx, cancel: cancel, authorization: authorization, stopAuthorization: stopAuthorization, out: make(chan callsignal.Message, 8), seen: make(map[string]bool)}
 	defer func() { c.authMu.Lock(); c.stopAuthorization(); c.authMu.Unlock() }()
-	b.mu.Lock()
-	if b.closed || len(b.connections) >= 128 || b.connections[p.ID] != nil {
-		b.mu.Unlock()
+	if !b.reserveConnection(c, r.Header.Get(callsignal.ResumeHeader)) {
 		respond(w, http.StatusConflict, callsignal.Failure{Code: "connection_unavailable"})
 		return
 	}
-	b.connections[p.ID] = c
-	b.mu.Unlock()
 	defer b.detach(c)
 	u := websocket.Upgrader{Subprotocols: []string{callsignal.Subprotocol}, HandshakeTimeout: 5 * time.Second, CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "" }}
 	c.ws, err = u.Upgrade(w, r, nil)
@@ -130,8 +131,9 @@ func (b *signalBroker) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		return c.ws.WriteControl(websocket.PongMessage, []byte(data), time.Now().Add(5*time.Second))
 	})
-	c.send(callsignal.Message{Version: 1, Type: "welcome", HubEpoch: c.epoch, Payload: callsignal.Body(callsignal.Welcome{ID: p.ID, Kind: p.Kind, HubID: p.HubID, AccessExpiresAt: p.AccessExpiresAt})})
+	c.send(callsignal.Message{Version: 1, Type: "welcome", HubEpoch: c.epoch, Payload: callsignal.Body(callsignal.Welcome{Recovery: c.recovery, Resumed: c.resumed, ID: p.ID, Kind: p.Kind, HubID: p.HubID, AccessExpiresAt: p.AccessExpiresAt})})
 	b.attachPending(c)
+	b.finishResume(c)
 	writerDone := make(chan struct{})
 	authDone := make(chan struct{})
 	go func() { defer close(authDone); c.watchAuthorization() }()
@@ -313,6 +315,20 @@ func (b *signalBroker) route(c *signalConnection, m callsignal.Message) string {
 	if target == nil {
 		return "call_pending"
 	}
+	if !route.suspendedUntil.IsZero() {
+		// Never queue commands or SDP against a detached endpoint. A terminal
+		// Hub state still removes the route immediately during an outage.
+		if m.Type == "state" {
+			var state callsignal.State
+			callsignal.Decode(m.Payload, &state)
+			if state.State == "ended" {
+				delete(b.routes, c.principal.HubID)
+				target.send(m)
+				return ""
+			}
+		}
+		return "peer_reconnecting"
+	}
 	if _, err := target.authenticate(b.store, m.ModuleID); err != nil {
 		target.cancel()
 		return "target_unavailable"
@@ -329,6 +345,9 @@ func (b *signalBroker) route(c *signalConnection, m callsignal.Message) string {
 	if m.Type == "state" {
 		var state callsignal.State
 		callsignal.Decode(m.Payload, &state)
+		if state.State == "connected" {
+			route.connected = true
+		}
 		if state.State == "ended" {
 			delete(b.routes, c.principal.HubID)
 		}
@@ -397,6 +416,10 @@ func (b *signalBroker) detach(c *signalConnection) {
 		delete(b.connections, c.principal.ID)
 	}
 	if route := b.routes[c.principal.HubID]; route != nil && (route.hub == c || route.phone == c) {
+		if b.canSuspend(route) {
+			b.suspend(route)
+			return
+		}
 		delete(b.routes, c.principal.HubID)
 		if route.stopWake != nil {
 			route.stopWake()

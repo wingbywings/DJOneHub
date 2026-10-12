@@ -38,6 +38,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.oops.djonehub
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_CFBundleDisplayName: DJOneHub
+        INFOPLIST_KEY_NSCameraUsageDescription: 扫描 Mac 上的 DJOneHub 配对二维码。
         INFOPLIST_KEY_NSMicrophoneUsageDescription: 接听 DJOneHub 转接的电话时需要使用麦克风。
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: 与同一网络中的 DJOneHub 建立通话音频连接。
         INFOPLIST_KEY_UILaunchScreen_Generation: YES

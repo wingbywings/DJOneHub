@@ -42,6 +42,7 @@ type managedUSBDevice struct {
 }
 
 type usbDeviceHub struct {
+	nativeEvents          nativeEvents
 	remoteHub             *remoteHubService // guarded by mu
 	mu                    sync.RWMutex
 	reconcileMu           sync.Mutex
@@ -190,6 +191,7 @@ func sameUSBEnumeration(a, b usbDeviceLocator) bool {
 // retaining the logical device record. A mode change can therefore return on
 // the same physical port without losing its alias, device ID or setup progress.
 func (h *usbDeviceHub) beginPhysicalReconnect(physicalID, reason string) {
+	defer h.nativeEvents.publish()
 	h.mu.Lock()
 	id, ok := h.physical[physicalID]
 	managed := h.devices[id]
@@ -225,6 +227,7 @@ func (h *usbDeviceHub) beginPhysicalReconnect(physicalID, reason string) {
 }
 
 func (h *usbDeviceHub) resumePhysicalRuntime(locator usbDeviceLocator) {
+	defer h.nativeEvents.publish()
 	physicalID := locator.PhysicalID()
 	h.mu.RLock()
 	id := h.physical[physicalID]
@@ -338,6 +341,7 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 		smsReassembler:   smscodec.NewReassembler(),
 		callPollInterval: 3 * time.Second,
 	}
+	runtime.nativeEvents = &h.nativeEvents
 	runtime.remoteDispatch = func(ctx context.Context, call callRecord) { h.dispatchRemote(runtime, ctx, call) }
 	runtime.remoteConnectionState = func() string {
 		h.mu.RLock()
@@ -387,6 +391,7 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 	h.physical[physicalID] = id
 	h.mu.Unlock()
 
+	h.nativeEvents.publish()
 	go runtime.startSMSPoller(deviceCtx)
 	go runtime.startCallPoller(deviceCtx)
 	go runtime.resumeModuleSetup(deviceCtx)
@@ -395,6 +400,7 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 }
 
 func (h *usbDeviceHub) recordAttachError(locator usbDeviceLocator, attachErr error) {
+	defer h.nativeEvents.publish()
 	physicalID := locator.PhysicalID()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -474,6 +480,7 @@ func (h *usbDeviceHub) configureVoiceRouteGuard(runtime *app, id string) {
 }
 
 func (h *usbDeviceHub) detachPhysical(physicalID, reason string) {
+	defer h.nativeEvents.publish()
 	h.mu.Lock()
 	id, ok := h.physical[physicalID]
 	if !ok {
@@ -774,7 +781,7 @@ func (h *usbDeviceHub) dispatchDeviceAPI(w http.ResponseWriter, r *http.Request)
 func serveUSBDeviceHub(hub *usbDeviceHub, listen string) {
 	// Native requests must name a concrete module. Do not silently retarget a
 	// disappearing device to whichever module becomes the new default.
-	closeNative, err := startNativeControl(nativeControlFile, hub.runtime)
+	closeNative, err := startNativeControl(nativeControlFile, hub.runtime, &hub.nativeEvents)
 	if err != nil {
 		log.Printf("native audio control: %v", err)
 		hub.close()

@@ -93,7 +93,9 @@ public struct Signal: Codable, Sendable {
     guard version == 1, type == "welcome", hub_epoch.map(Wire.id) == true,
       module_id == nil, call_uuid == nil, generation == nil, installation_id == nil,
       request_id == nil,
-      Set(payload.keys) == ["id", "kind", "hub_id", "access_expires_at"],
+      Set(payload.keys).isSubset(of: ["id", "kind", "hub_id", "access_expires_at", "recovery", "resumed"]),
+      (payload["recovery"] == nil || payload["recovery"]?.bool != nil),
+      (payload["resumed"] == nil || payload["resumed"]?.bool != nil),
       payload["id"]?.string == principal.id, payload["kind"]?.string == "installation",
       payload["hub_id"]?.string == principal.hub_id,
       let expiry = payload["access_expires_at"]?.string.flatMap(Wire.date), expiry > now
@@ -127,9 +129,17 @@ public struct Signal: Codable, Sendable {
             || ["incoming", "outgoing"].contains(payload["direction"]?.string ?? ""))
       }
     case "offer":
-      keys = ["type", "sdp"]
+      keys = ["type", "sdp", "recovery", "signal_recovery", "audio_recovery", "call_controls"]
       valid =
         payload["type"]?.string == "offer"
+        && (payload["sdp"]?.string.map { !$0.isEmpty && $0.utf8.count <= 65536 } ?? false)
+        && (payload["recovery"] == nil || payload["recovery"]?.bool != nil)
+        && (payload["signal_recovery"] == nil || payload["signal_recovery"]?.bool != nil)
+        && (payload["audio_recovery"] == nil || payload["audio_recovery"]?.bool != nil)
+        && (payload["call_controls"] == nil || payload["call_controls"]?.bool != nil)
+    case "restart_offer":
+      keys = ["negotiation_id", "sdp"]
+      valid = (payload["negotiation_id"]?.uint ?? 0) > 0
         && (payload["sdp"]?.string.map { !$0.isEmpty && $0.utf8.count <= 65536 } ?? false)
     case "ice":
       keys = ["candidate", "sdpMid", "sdpMLineIndex", "usernameFragment"]
@@ -157,7 +167,7 @@ public struct Signal: Codable, Sendable {
       valid =
         payload["accepted"]?.bool != nil
         && (payload["code"] == nil || (payload["code"]?.string?.utf8.count ?? 129) <= 128)
-    case "peer_closed", "error":
+    case "peer_closed", "peer_reconnecting", "peer_resumed", "error":
       keys = ["code"]
       valid = payload["code"]?.string.map(Wire.id) ?? false
     default: break
@@ -189,9 +199,11 @@ public enum CallFailure: String, Sendable {
 }
 public enum CallEffect {
   case reportIncoming(Binding, String)
-  case acceptOffer(Binding, String)
+  case acceptOffer(Binding, String, Bool)
+  case acceptRestartOffer(Binding, String, UInt64)
   case candidate(Binding, [String: Scalar])
   case send(Signal)
+  case controlCompleted(Binding, String, Bool)
   case answerCompleted(Binding)
   case audio(Binding, Bool)
   case phase(Binding, String)
@@ -208,6 +220,12 @@ public enum CallEffect {
   public private(set) var ending = false
   public private(set) var outgoing = false
   public private(set) var endReason = ""
+  public private(set) var callControls = false
+  private var pendingDTMF: (id: String, deadline: Date)?
+  private var pendingMute: (id: String, deadline: Date)?
+  private var muteSequence: UInt64 = 0
+  private var muted = false
+  private var lastDTMF = Date.distantPast
   private var dialAcknowledged = false, inviteReceived = false
   private var endRetry = false, endRetried = false
   private var commandRevision: UInt64 = 0
@@ -218,6 +236,11 @@ public enum CallEffect {
   private var reported = false, offerReceived = false, transportReady = false, wantsAnswer = false
   private var answerSent = false, audioActive = false
   private var sequence: UInt64 = 0, iceCount = 0
+  private var restartID: UInt64 = 0
+  private var recoveryEnabled = false
+  private var audioRecoveryEnabled = false, wasConnected = false
+  private var audioInterruptionDeadline: Date?
+  private var restartSDP: String?
   private var deadline = Date.distantPast
   private var actionDeadline: Date?
   public init(principal: Principal, effect: @escaping (CallEffect) -> Void) {
@@ -264,6 +287,18 @@ public enum CallEffect {
     answerSent = false
     sequence = 0
     iceCount = 0
+    restartID = 0
+    restartSDP = nil
+    recoveryEnabled = false
+    audioRecoveryEnabled = false
+    callControls = false
+    pendingDTMF = nil
+    pendingMute = nil
+    muteSequence = 0
+    muted = false
+    lastDTMF = .distantPast
+    wasConnected = false
+    audioInterruptionDeadline = nil
     pendingCommand = nil
     actionDeadline = nil
     audioActive = false
@@ -319,8 +354,32 @@ public enum CallEffect {
         return
       }
       offerReceived = true
-      effect(.acceptOffer(b, m.payload["sdp"]!.string!))
+      recoveryEnabled = m.payload["recovery"]?.bool == true
+      audioRecoveryEnabled = m.payload["audio_recovery"]?.bool == true
+      callControls = m.payload["call_controls"]?.bool == true
+      effect(.acceptOffer(b, m.payload["sdp"]!.string!, recoveryEnabled))
+    case "restart_offer":
+      if ending { return }
+      guard recoveryEnabled, answered, audioActive || audioInterruptionDeadline != nil else {
+        fail(.unexpectedMessage)
+        return
+      }
+      let id = m.payload["negotiation_id"]!.uint!
+      if id < restartID { return }
+      if id == restartID {
+        guard restartSDP == m.payload["sdp"]?.string else { fail(.invalidMessage); return }
+        effect(.acceptRestartOffer(b, restartSDP!, id))
+        return
+      }
+      guard restartID != UInt64.max, id == restartID + 1 else {
+        fail(.invalidMessage)
+        return
+      }
+      restartID = id
+      restartSDP = m.payload["sdp"]?.string
+      effect(.acceptRestartOffer(b, m.payload["sdp"]!.string!, id))
     case "ice":
+      if restartID > 0 { return } // restart SDP owns its candidate generation
       iceCount += 1
       guard iceCount <= 256 else {
         fail(.candidateLimit)
@@ -346,20 +405,33 @@ public enum CallEffect {
         }
       case "connected":
         if ending { break }
-        guard answered, audioActive else {
+        guard answered, audioActive || audioInterruptionDeadline != nil else {
           fail(.unexpectedConnected)
           return
         }
         actionDeadline = nil
+        let firstConnection = !wasConnected
+        wasConnected = true
+        if firstConnection && muted { setMuted(b, muted: true, now: now) }
       default: break
       }
-      if binding == b, !ending { effect(.phase(b, m.payload["state"]!.string!)) }
+      if binding == b, !ending { effect(.phase(b, audioInterruptionDeadline != nil ? "audio_interrupted" : m.payload["state"]!.string!)) }
       if binding == b, ending, endRetry, !endRetried, revision > commandRevision {
         endRetried = true
         endRetry = false
         command(answerSent ? "hangup" : "reject", b)
       }
     case "result":
+      if let pending = pendingDTMF, m.request_id == pending.id {
+        pendingDTMF = nil
+        effect(.controlCompleted(b, pending.id, m.payload["accepted"]?.bool == true))
+        return
+      }
+      if let pending = pendingMute, m.request_id == pending.id {
+        pendingMute = nil
+        effect(.controlCompleted(b, pending.id, m.payload["accepted"]?.bool == true))
+        return
+      }
       guard m.request_id == pendingCommand else { return }
       if m.payload["accepted"]?.bool != true {
         if ending, m.payload["code"]?.string == "stale_revision", !endRetried {
@@ -416,9 +488,39 @@ public enum CallEffect {
     pendingCommand = m.request_id
     effect(.send(m))
   }
+  // Only explicit user actions create DTMF. Uncertain outcomes are not replayed
+  // after reconnect; callers may send a new digit once the previous action ends.
+  public func requestDTMF(_ b: Binding, digit: String, now: Date = Date()) -> String? {
+    guard binding == b, callControls, wasConnected, audioActive, !ending,
+      pendingDTMF == nil, now.timeIntervalSince(lastDTMF) >= 0.12,
+      digit.utf8.count == 1, "0123456789*#".contains(digit) else { return nil }
+    let m = Signal(type: "command", binding: b,
+      payload: ["action": .string("dtmf"), "digit": .string(digit), "expected_revision": .uint(revision)])
+    pendingDTMF = (m.request_id!, now.addingTimeInterval(4))
+    lastDTMF = now
+    effect(.send(m))
+    return m.request_id
+  }
+  public func setMuted(_ b: Binding, muted: Bool, now: Date = Date()) {
+    guard binding == b, !ending else { return }
+    self.muted = muted
+    guard callControls, wasConnected else { return }
+    muteSequence += 1
+    let m = Signal(type: "mute", binding: b,
+      payload: ["sequence": .uint(muteSequence), "muted": .bool(muted)])
+    pendingMute = (m.request_id!, now.addingTimeInterval(4))
+    effect(.send(m))
+  }
+  private func finishControls(_ b: Binding) {
+    let pending = [pendingDTMF?.id, pendingMute?.id].compactMap { $0 }
+    pendingDTMF = nil
+    pendingMute = nil
+    for id in pending { effect(.controlCompleted(b, id, false)) }
+  }
   public func requestEnd(_ b: Binding, now: Date = Date()) {
     guard binding == b, !ending else { return }
     ending = true
+    finishControls(b)
     effect(.phase(b, "ending"))
     effect(.audio(b, false))
     if outgoing && !dialAcknowledged {
@@ -428,8 +530,11 @@ public enum CallEffect {
     }
     actionDeadline = now.addingTimeInterval(18)
   }
-  public func activated(_ b: Binding) {
+  public func activated(_ b: Binding, now: Date = Date()) {
     guard binding == b, answered, !ending, !audioActive else { return }
+    if let deadline = audioInterruptionDeadline, now >= deadline { fail(.audioDeactivated); return }
+    let resuming = audioInterruptionDeadline != nil
+    audioInterruptionDeadline = nil
     audioActive = true
     sequence += 1
     effect(.audio(b, true))
@@ -438,13 +543,30 @@ public enum CallEffect {
         Signal(
           type: "audio_active", binding: b,
           payload: ["sequence": .uint(sequence), "active": .bool(true)])))
+    if resuming { effect(.phase(b, "connected")) }
   }
-  public func deactivated(_ b: Binding) {
+  public func deactivated(_ b: Binding, now: Date = Date()) {
     guard binding == b, !ending else { return }
-    fail(.audioDeactivated)
+    guard audioRecoveryEnabled, wasConnected else { fail(.audioDeactivated); return }
+    guard audioActive else { return }
+    audioActive = false
+    if audioInterruptionDeadline == nil { audioInterruptionDeadline = now.addingTimeInterval(10) }
+    sequence += 1
+    effect(.audio(b, false))
+    effect(.send(Signal(type: "audio_active", binding: b, payload: ["sequence": .uint(sequence), "active": .bool(false)])))
+    effect(.phase(b, "audio_interrupted"))
   }
   public func tick(now: Date = Date()) {
-    guard binding != nil else { return }
+    guard let b = binding else { return }
+    if let pending = pendingDTMF, now >= pending.deadline {
+      pendingDTMF = nil
+      effect(.controlCompleted(b, pending.id, false))
+    }
+    if let pending = pendingMute, now >= pending.deadline {
+      pendingMute = nil
+      effect(.controlCompleted(b, pending.id, false))
+    }
+    if let deadline = audioInterruptionDeadline, now >= deadline { fail(.audioDeactivated); return }
     if !answerSent && now >= deadline {
       fail(.ringTimeout)
     } else if actionDeadline.map({ now >= $0 }) ?? false {
@@ -468,6 +590,7 @@ public enum CallEffect {
   public func finish(reason: String = "ended") {
     guard let b = binding else { return }
     endReason = reason
+    finishControls(b)
     binding = nil
     effect(.audio(b, false))
     effect(.ended(b))

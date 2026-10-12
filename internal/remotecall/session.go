@@ -48,10 +48,15 @@ type Media interface {
 var _ Media = (*remotemedia.Peer)(nil)
 
 type Config struct {
-	Binding      Binding
-	Route        callcontrol.RouteSnapshot
-	RingDeadline time.Time
-	Outgoing     bool
+	CallControls         bool
+	RecoverAudio         bool
+	AudioRecoveryTimeout time.Duration
+	ControlCleanup       bool // caller closes media after bounded terminal delivery
+	RecoverTransport     bool
+	Binding              Binding
+	Route                callcontrol.RouteSnapshot
+	RingDeadline         time.Time
+	Outgoing             bool
 	// Zero selects production defaults. Shorter budgets are useful for tests;
 	// these are internal policy, never copied from an untrusted request.
 	AnswerTimeout, AudioTimeout, CleanupTimeout time.Duration
@@ -64,6 +69,7 @@ type Snapshot struct {
 	CleanupError string `json:"cleanup_error,omitempty"`
 }
 type Request struct {
+	Digit            string
 	CallUUID         string
 	Generation       uint64
 	RequestID        string
@@ -75,20 +81,26 @@ type Request struct {
 // never hold mu. Cancellation stops preparation immediately; Done closes only
 // after the worker reconciles the ATA outcome and attempts bounded cleanup.
 type Session struct {
-	mu             sync.Mutex
-	config         Config
-	backend        Backend
-	media          Media
-	ctx            context.Context
-	cancel         context.CancelFunc
-	done           chan struct{}
-	wake           chan struct{}
-	snapshot       Snapshot
-	intent         string
-	answerDeadline time.Time
-	audioRevision  uint64
-	audioActive    bool
-	commands       callcontrol.Commands
+	mu                    sync.Mutex
+	config                Config
+	backend               Backend
+	media                 Media
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	wake                  chan struct{}
+	snapshot              Snapshot
+	intent                string
+	answerDeadline        time.Time
+	audioRevision         uint64
+	audioActive           bool
+	muteSequence          uint64
+	muted                 bool
+	dtmfBusy              bool
+	lastDTMF              time.Time
+	audioRecoveryDeadline time.Time
+	audioSuspended        bool
+	commands              callcontrol.Commands
 }
 
 func New(parent context.Context, config Config, backend Backend, factory func(context.Context) (Media, error)) (*Session, error) {
@@ -117,6 +129,12 @@ func New(parent context.Context, config Config, backend Backend, factory func(co
 	if config.CleanupTimeout == 0 {
 		config.CleanupTimeout = 12 * time.Second
 	}
+	if config.AudioRecoveryTimeout == 0 {
+		config.AudioRecoveryTimeout = 10 * time.Second
+	}
+	if config.AudioRecoveryTimeout <= 0 || config.AudioRecoveryTimeout > 10*time.Second {
+		return nil, ErrState
+	}
 	maxAnswer := 12 * time.Second
 	if config.Outgoing {
 		maxAnswer = 90 * time.Second
@@ -133,6 +151,31 @@ func New(parent context.Context, config Config, backend Backend, factory func(co
 	if media == nil {
 		cancel()
 		return nil, ErrState
+	}
+	if config.ControlCleanup {
+		if _, ok := media.(interface{ Quiesce() }); !ok {
+			media.Close()
+			cancel()
+			return nil, ErrState
+		}
+	}
+	if config.CallControls {
+		_, backendOK := backend.(interface {
+			DTMF(context.Context, string) error
+		})
+		_, mediaOK := media.(interface{ SetMuted(bool) error })
+		if !backendOK || !mediaOK {
+			media.Close()
+			cancel()
+			return nil, ErrState
+		}
+	}
+	if config.RecoverAudio {
+		if _, ok := media.(interface{ SuspendAudio() error }); !ok {
+			media.Close()
+			cancel()
+			return nil, ErrState
+		}
 	}
 	s := &Session{config: config, backend: backend, media: media, ctx: ctx, cancel: cancel, done: make(chan struct{}), wake: make(chan struct{}, 1), snapshot: Snapshot{Binding: b, Revision: 1, State: "offered"}}
 	go s.run()
@@ -169,6 +212,12 @@ func (s *Session) Command(ctx context.Context, installation string, request Requ
 	}
 	if request.RequestID == "" || len(request.RequestID) > 128 || request.ExpectedRevision == 0 {
 		return callcontrol.Result{}, ErrRevision
+	}
+	if request.Type == "dtmf" {
+		return s.dtmf(ctx, installation, request)
+	}
+	if request.Digit != "" {
+		return callcontrol.Result{}, ErrState
 	}
 	if request.Type != "answer" && request.Type != "reject" && request.Type != "hangup" {
 		return callcontrol.Result{}, ErrState
@@ -209,8 +258,8 @@ func (s *Session) Command(ctx context.Context, installation string, request Requ
 }
 
 // AudioActive uses its own monotonic sequence, independent of business state.
-// Deactivation ends the first-version session; interruption recovery is future
-// work. Stale activation cannot reverse a later deactivation or terminal state.
+// Negotiated audio interruption has one fixed deadline. Stale activation cannot
+// reverse a later deactivation or resurrect a terminal session.
 func (s *Session) AudioActive(installation, uuid string, generation, revision uint64, active bool) error {
 	if !s.matches(installation, uuid, generation) {
 		return ErrBinding
@@ -233,9 +282,26 @@ func (s *Session) AudioActive(installation, uuid string, generation, revision ui
 		return nil
 	}
 	s.audioRevision, s.audioActive = revision, active
+	if !s.audioRecoveryDeadline.IsZero() && !time.Now().Before(s.audioRecoveryDeadline) {
+		s.endLocked("audio_recovery_timeout")
+		return context.DeadlineExceeded
+	}
 	if !active {
-		s.endLocked("audio_deactivated")
+		if !s.config.RecoverAudio || s.snapshot.State != "connected" {
+			s.endLocked("audio_deactivated")
+		} else {
+			if s.audioRecoveryDeadline.IsZero() {
+				s.audioRecoveryDeadline = time.Now().Add(s.config.AudioRecoveryTimeout)
+			}
+			s.audioSuspended = true
+			if err := s.media.(interface{ SuspendAudio() error }).SuspendAudio(); err != nil {
+				s.endLocked("media_failed")
+				return err
+			}
+			s.signal()
+		}
 	} else {
+		s.audioRecoveryDeadline = time.Time{}
 		s.signal()
 	}
 	return nil
@@ -284,11 +350,15 @@ func (s *Session) wait(ctx context.Context) error {
 
 func (s *Session) run() {
 	claimed, mayHaveAnswered := false, false
-	stopClose := context.AfterFunc(s.ctx, s.media.Close)
+	stopMedia := s.media.Close
+	if s.config.ControlCleanup {
+		stopMedia = s.media.(interface{ Quiesce() }).Quiesce
+	}
+	stopClose := context.AfterFunc(s.ctx, stopMedia)
 	defer func() {
 		s.end("cancelled")
 		stopClose()
-		s.media.Close()
+		stopMedia()
 		if claimed {
 			ctx, cancel := context.WithTimeout(context.Background(), s.config.CleanupTimeout)
 			err := s.backend.Finish(ctx, mayHaveAnswered)
@@ -362,9 +432,9 @@ func (s *Session) run() {
 			return errors.New("cellular call ended")
 		}
 		s.mu.Lock()
-		audio := s.audioActive
+		audio, audioSequence := s.audioActive, s.audioRevision
 		s.mu.Unlock()
-		state := remotemedia.Readiness{CallUUID: s.config.Binding.CallUUID, Generation: s.config.Binding.Generation, Revision: previous.Revision, CellularActive: observed.CellularActive, ModuleReady: observed.ModuleReady, IOSAudioActive: audio}
+		state := remotemedia.Readiness{CallUUID: s.config.Binding.CallUUID, Generation: s.config.Binding.Generation, Revision: previous.Revision, AudioSequence: audioSequence, CellularActive: observed.CellularActive, ModuleReady: observed.ModuleReady, IOSAudioActive: audio}
 		if previous.Revision == 0 || state != previous {
 			state.Revision++
 			if err := s.media.UpdateReadiness(state); err != nil {
@@ -420,6 +490,7 @@ func (s *Session) run() {
 	if !s.transition("connected") {
 		return
 	}
+	var transportLostAt time.Time
 	for {
 		if err := s.wait(s.ctx); err != nil {
 			s.end("media_failed")
@@ -429,9 +500,43 @@ func (s *Session) run() {
 			s.end("call_unavailable")
 			return
 		}
-		if !s.media.AnswerReady() {
-			s.end("media_unavailable")
+		s.mu.Lock()
+		audioDeadline := s.audioRecoveryDeadline
+		s.mu.Unlock()
+		if !audioDeadline.IsZero() && !time.Now().Before(audioDeadline) {
+			s.end("audio_recovery_timeout")
 			return
+		}
+		if s.config.RecoverAudio && !previous.IOSAudioActive && previous.CellularActive && previous.ModuleReady {
+			continue
+		}
+		if !s.media.AnswerReady() {
+			if !s.config.RecoverTransport || !previous.CellularActive || !previous.ModuleReady || !previous.IOSAudioActive || s.media.TransportConnected() {
+				s.end("media_unavailable")
+				return
+			}
+			if transportLostAt.IsZero() {
+				transportLostAt = time.Now()
+			}
+			if time.Since(transportLostAt) >= 10*time.Second {
+				s.end("ice_recovery_timeout")
+				return
+			}
+		} else {
+			transportLostAt = time.Time{}
+			s.mu.Lock()
+			var activationErr error
+			if s.audioSuspended && s.audioActive {
+				activationErr = s.media.Activate()
+				if activationErr == nil {
+					s.audioSuspended = false
+				}
+			}
+			s.mu.Unlock()
+			if activationErr != nil {
+				s.end("media_failed")
+				return
+			}
 		}
 	}
 }

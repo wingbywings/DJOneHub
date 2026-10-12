@@ -60,7 +60,7 @@ final class PhoneMediaTests: XCTestCase {
     let base = URL(string: "http://127.0.0.1:39096")!
     let config = URLSessionConfiguration.ephemeral
     config.connectionProxyDictionary = [:]
-    config.timeoutIntervalForRequest = 2
+    config.timeoutIntervalForRequest = 7
     let session = URLSession(configuration: config)
     defer { session.invalidateAndCancel() }
     let offerData: Data
@@ -74,7 +74,14 @@ final class PhoneMediaTests: XCTestCase {
     invite.call_uuid = UUID().uuidString.lowercased()
     invite.installation_id = "phone"
     invite.generation = 1
-    let phone = try PhoneMedia(binding: XCTUnwrap(invite.binding))
+    func fetchICE(renew: Bool = false) async throws -> ICECredentials {
+      let url = URL(string: renew ? "ice?renew=1" : "ice", relativeTo: base.appendingPathComponent("/"))!
+      let (data, _) = try await session.data(from: url)
+      return try Wire.decoder().decode(ICECredentials.self, from: data)
+    }
+    let ice = try await fetchICE()
+    let phone = try PhoneMedia(binding: XCTUnwrap(invite.binding), ice: ice, recoveryEnabled: true, controlEnabled: true)
+    phone.onDiagnostic = { print("interop_media_" + $0) }
     defer { phone.close() }
     func post(_ path: String, _ data: Data) async throws {
       var request = URLRequest(url: base.appendingPathComponent(path))
@@ -113,6 +120,7 @@ final class PhoneMediaTests: XCTestCase {
     }
     defer { polling.cancel() }
     let answer = try await phone.answer(sdp)
+    print("interop_initial_answer")
     try await post(
       "answer", JSONSerialization.data(withJSONObject: ["type": "answer", "sdp": answer]))
     await fulfillment(of: [connected], timeout: 15)
@@ -130,6 +138,63 @@ final class PhoneMediaTests: XCTestCase {
     for task in candidateTasks { await task.value }
     polling.cancel()
     await polling.value
+    for expectedID in 1...2 {
+      let (data, _) = try await session.data(from: base.appendingPathComponent("restart-offer"))
+      let offer = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+      let id = try XCTUnwrap(offer["negotiation_id"] as? UInt64)
+      XCTAssertEqual(id, UInt64(expectedID))
+      let sdp = try XCTUnwrap(offer["sdp"] as? String)
+      let previous = await phone.receiveSnapshot()
+      let oldExpiry = phone.turnExpiry
+      print("interop_restart_begin_\(id)")
+      var fetches = 0
+      let refresh = { @MainActor in
+        fetches += 1
+        return try await fetchICE(renew: true)
+      }
+      let answer = try await phone.answerRestart(sdp, id: id, refreshICE: refresh)
+      print("interop_restart_answer_\(id)")
+      try await post("restart-answer", JSONSerialization.data(withJSONObject: ["negotiation_id": id, "sdp": answer]))
+      var after = previous
+      for _ in 0..<50 {
+        after = await phone.receiveSnapshot()
+        if after.packets >= previous.packets + 5 { break }
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      XCTAssertGreaterThanOrEqual(after.packets, previous.packets + 5)
+      XCTAssertFalse(RTCAudioSession.sharedInstance().isAudioEnabled)
+      if let oldExpiry {
+        for _ in 0..<30 {
+          if phone.turnExpiry != oldExpiry { break }
+          try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertGreaterThan(try XCTUnwrap(phone.turnExpiry), oldExpiry)
+      }
+      let replay = try await phone.answerRestart(sdp, id: id, refreshICE: refresh)
+      XCTAssertEqual(replay, answer, "Exact retry must return the same answer without restarting ICE")
+      XCTAssertEqual(fetches, ice.enabled ? 1 : 0, "Retry must not rotate credentials or allocation again")
+      do {
+        _ = try await phone.answerRestart(sdp + "a=conflict:1\r\n", id: id)
+        XCTFail("Conflicting ICE restart was accepted")
+      } catch {}
+    }
+    for _ in 0..<50 {
+      if phone.controlReady { break }
+      try await Task.sleep(for: .milliseconds(100))
+    }
+    XCTAssertTrue(phone.controlReady)
+    let stateReceived = expectation(description: "SCTP state received")
+    let terminalReceived = expectation(description: "control survives audio shutdown")
+    phone.onControl = { data in
+      if String(data: data, encoding: .utf8)?.contains("fixture_ended") == true { terminalReceived.fulfill() }
+      else { stateReceived.fulfill() }
+    }
+    try await post("control", Data())
+    await fulfillment(of: [stateReceived], timeout: 3)
+    XCTAssertTrue(phone.sendControl(Signal(type: "sync", binding: invite.binding!, payload: [:])))
+    try await post("control-received", Data())
+    try await post("quiesce", Data())
+    await fulfillment(of: [terminalReceived], timeout: 3)
     try await post("complete", Data())
     XCTAssertFalse(RTCAudioSession.sharedInstance().isAudioEnabled)
   }

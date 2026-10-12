@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/iniwex5/vohive/internal/remotemedia/opus"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -19,6 +21,7 @@ var ErrSignalBinding = errors.New("signaling does not belong to this call/media 
 var ErrMediaNotReady = errors.New("transport, host, cellular call, module and iOS audio must be ready before media activation")
 
 type PeerConfig struct {
+	Control    bool // Hub creates one reliable ordered call-control channel
 	CallUUID   string
 	Generation uint64
 	ICEServers []webrtc.ICEServer
@@ -41,34 +44,44 @@ type Candidate struct {
 // coordinator must explicitly Activate after its answer-ready prerequisites.
 // No app HTTP route creates peers yet; the AI path never constructs one.
 type Peer struct {
-	config        PeerConfig
-	pc            *webrtc.PeerConnection
-	track         *webrtc.TrackLocalStaticRTP
-	bridge        *HostBridge
-	codec         *opus.Codec
-	sender        *Sender
-	receiver      *Receiver
-	ctx           context.Context
-	cancel        context.CancelFunc
-	closeOnce     sync.Once
-	workerMu      sync.Mutex
-	closed        bool
-	workers       sync.WaitGroup
-	mediaMu       sync.Mutex
-	active        bool
-	readiness     Readiness
-	remoteTrack   bool
-	signalMu      sync.Mutex
-	pendingICE    []webrtc.ICECandidateInit
-	candidates    chan Candidate
-	connected     chan struct{}
-	connectedOnce sync.Once
-	errMu         sync.Mutex
-	lastError     error
-	diagnosticMu  sync.Mutex
-	diagnostics   SignalingState
-	sequence      uint16
-	timestampBase uint32
+	control              *webrtc.DataChannel
+	controlMessages      chan []byte
+	quiesced             atomic.Bool
+	config               PeerConfig
+	pc                   *webrtc.PeerConnection
+	track                *webrtc.TrackLocalStaticRTP
+	bridge               *HostBridge
+	codec                *opus.Codec
+	sender               *Sender
+	receiver             *Receiver
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	closeOnce            sync.Once
+	workerMu             sync.Mutex
+	closed               bool
+	workers              sync.WaitGroup
+	mediaMu              sync.Mutex
+	active               bool
+	muted                bool
+	audioSuspendRevision uint64
+	audioSuspendSequence uint64
+	readiness            Readiness
+	remoteTrack          bool
+	signalMu             sync.Mutex
+	restartID            uint64
+	pendingRestart       uint64
+	fullGatherOnly       atomic.Bool
+	pendingICE           []webrtc.ICECandidateInit
+	candidates           chan Candidate
+	connected            chan struct{}
+	connectedOnce        sync.Once
+	errMu                sync.Mutex
+	lastError            error
+	diagnosticMu         sync.Mutex
+	diagnostics          SignalingState
+	feedback             *feedbackController
+	sequence             uint16
+	timestampBase        uint32
 }
 
 func NewPeer(ctx context.Context, config PeerConfig) (*Peer, error) {
@@ -129,11 +142,24 @@ func newPeer(parent context.Context, config PeerConfig, settings webrtc.SettingE
 		bridge.Close()
 		return nil, err
 	}
-	ctx, cancel := context.WithCancel(parent)
+	lifetime := parent
+	if config.Control {
+		lifetime = context.WithoutCancel(parent)
+	}
+	ctx, cancel := context.WithCancel(lifetime)
 	sender, _ := NewSender(config.Generation, codec)
 	receiver, _ := NewReceiver(config.Generation, codec, opus.PacketSamples)
 	p := &Peer{config: config, pc: pc, track: track, bridge: bridge, codec: codec, sender: sender, receiver: receiver, ctx: ctx, cancel: cancel, candidates: make(chan Candidate, 128), connected: make(chan struct{})}
+	if config.Control {
+		p.controlMessages = make(chan []byte, 8)
+		if err := p.openControl(); err != nil {
+			p.Close()
+			return nil, err
+		}
+		go p.retainControlUntilCleanup(parent.Done())
+	}
 	p.diagnostics = SignalingState{PeerState: "new", ICEState: "new", GatheringState: "new"}
+	p.feedback = newFeedbackController()
 	var seed [6]byte
 	if _, err = rand.Read(seed[:]); err != nil {
 		p.Close()
@@ -151,6 +177,9 @@ func newPeer(parent context.Context, config PeerConfig, settings webrtc.SettingE
 			p.diagnostics.LocalRelayCandidates++
 		}
 		p.diagnosticMu.Unlock()
+		if p.fullGatherOnly.Load() {
+			return
+		}
 		select {
 		case p.candidates <- Candidate{config.CallUUID, config.Generation, candidate.ToJSON()}:
 		case <-p.ctx.Done():
@@ -203,8 +232,28 @@ func newPeer(parent context.Context, config PeerConfig, settings webrtc.SettingE
 	})
 	p.startWorker(func() {
 		for {
-			if _, _, err := transceiver.Sender().ReadRTCP(); err != nil {
+			packets, _, err := transceiver.Sender().ReadRTCP()
+			if err != nil {
 				return
+			}
+			parameters := transceiver.Sender().GetParameters()
+			if len(parameters.Encodings) != 1 {
+				continue
+			}
+			for _, packet := range packets {
+				var reports []rtcp.ReceptionReport
+				switch packet := packet.(type) {
+				case *rtcp.ReceiverReport:
+					reports = packet.Reports
+				case *rtcp.SenderReport:
+					reports = packet.Reports
+				}
+				for _, report := range reports {
+					if err := p.feedback.observe(report, uint32(parameters.Encodings[0].SSRC), time.Now(), p.codec); err != nil {
+						p.fail(fmt.Errorf("configure remote Opus feedback: %w", err))
+						return
+					}
+				}
 			}
 		}
 	})
@@ -262,8 +311,19 @@ func (p *Peer) Activate() error {
 	if p.ctx.Err() != nil {
 		return p.ctx.Err()
 	}
-	if !p.transportReady() || !p.readiness.CellularActive || !p.readiness.ModuleReady || !p.readiness.IOSAudioActive || p.readiness.Ended {
+	if p.quiesced.Load() || !p.transportReady() || !p.readiness.CellularActive || !p.readiness.ModuleReady || !p.readiness.IOSAudioActive || p.readiness.Ended {
 		return ErrMediaNotReady
+	}
+	if p.audioSuspendRevision != 0 {
+		if p.readiness.Revision <= p.audioSuspendRevision || p.readiness.AudioSequence <= p.audioSuspendSequence {
+			return ErrMediaNotReady
+		}
+		p.sender.Discard()
+		if err := p.receiver.Reset(); err != nil {
+			return err
+		}
+		p.bridge.DiscardQueuedAudio()
+		p.audioSuspendRevision = 0
 	}
 	p.active = true
 	return nil
@@ -280,6 +340,9 @@ func (p *Peer) AddCandidate(candidate Candidate) error {
 	}
 	p.signalMu.Lock()
 	defer p.signalMu.Unlock()
+	if p.restartID != 0 {
+		return ErrSignalBinding
+	}
 	if p.ctx.Err() != nil {
 		return p.ctx.Err()
 	}
@@ -326,6 +389,9 @@ func (p *Peer) remoteDescription(description Description, kind webrtc.SDPType) e
 func (p *Peer) CreateOffer(ctx context.Context) (Description, error) {
 	p.signalMu.Lock()
 	defer p.signalMu.Unlock()
+	if p.restartID != 0 {
+		return Description{}, ErrSignalBinding
+	}
 	offer, err := p.pc.CreateOffer(nil)
 	if err != nil {
 		return Description{}, err
@@ -335,6 +401,9 @@ func (p *Peer) CreateOffer(ctx context.Context) (Description, error) {
 func (p *Peer) AcceptOffer(ctx context.Context, offer Description) (Description, error) {
 	p.signalMu.Lock()
 	defer p.signalMu.Unlock()
+	if p.restartID != 0 {
+		return Description{}, ErrSignalBinding
+	}
 	if err := p.remoteDescription(offer, webrtc.SDPTypeOffer); err != nil {
 		return Description{}, err
 	}
@@ -347,17 +416,23 @@ func (p *Peer) AcceptOffer(ctx context.Context, offer Description) (Description,
 func (p *Peer) AcceptAnswer(answer Description) error {
 	p.signalMu.Lock()
 	defer p.signalMu.Unlock()
+	if p.restartID != 0 {
+		return ErrSignalBinding
+	}
 	return p.remoteDescription(answer, webrtc.SDPTypeAnswer)
 }
 func (p *Peer) localDescription(ctx context.Context, description webrtc.SessionDescription) (Description, error) {
+	return p.gatherDescription(ctx, description, p.config.Trickle)
+}
+func (p *Peer) gatherDescription(ctx context.Context, description webrtc.SessionDescription, trickle bool) (Description, error) {
 	var done <-chan struct{}
-	if !p.config.Trickle {
+	if !trickle {
 		done = webrtc.GatheringCompletePromise(p.pc)
 	}
 	if err := p.pc.SetLocalDescription(description); err != nil {
 		return Description{}, err
 	}
-	if p.config.Trickle {
+	if trickle {
 		return Description{p.config.CallUUID, p.config.Generation, *p.pc.LocalDescription()}, nil
 	}
 	select {
@@ -373,7 +448,7 @@ func (p *Peer) capture() {
 	for {
 		frame, err := p.bridge.Receive(p.ctx)
 		if err != nil {
-			if p.ctx.Err() == nil {
+			if p.ctx.Err() == nil && !p.quiesced.Load() {
 				p.fail(err)
 			}
 			return
@@ -393,14 +468,19 @@ func (p *Peer) readTrack(track *webrtc.TrackRemote) {
 	for {
 		packet, _, err := track.ReadRTP()
 		if err != nil {
-			if p.ctx.Err() == nil {
+			if p.ctx.Err() == nil && !p.quiesced.Load() {
 				p.fail(err)
 			}
 			return
 		}
 		p.mediaMu.Lock()
 		if p.active {
-			_ = p.receiver.Push(IncomingRTP{p.config.Generation, uint32(track.SSRC()), packet.SequenceNumber, packet.Timestamp, packet.Payload}, time.Now())
+			incoming := IncomingRTP{p.config.Generation, uint32(track.SSRC()), packet.SequenceNumber, packet.Timestamp, packet.Payload}
+			if p.muted {
+				_ = p.receiver.Discard(incoming, time.Now())
+			} else {
+				_ = p.receiver.Push(incoming, time.Now())
+			}
 		}
 		p.mediaMu.Unlock()
 	}
@@ -433,7 +513,7 @@ func (p *Peer) play() {
 			err = p.track.WriteRTP(packet)
 		}
 		var pcm *Frame
-		if err == nil {
+		if err == nil && !p.muted {
 			pcm, err = p.receiver.Read(now)
 		}
 		if err == nil && pcm != nil {

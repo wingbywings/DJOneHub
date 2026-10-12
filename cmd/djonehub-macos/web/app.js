@@ -153,7 +153,7 @@ async function refreshActiveDevice() {
   currentVoiceAgentCalls = [];
   closeVoiceAgentCallDetail();
   closeVoiceAgentEvents();
-  const tasks = [loadStatus(), loadSMS(), loadBarkSettings("sms")];
+  const tasks = [loadStatus(), loadSMS(), loadBarkSettings("sms"), loadRemoteSettings()];
   if ($("#calls").classList.contains("active")) tasks.push(loadCalls(), loadVoiceAgentCalls());
   if ($("#esim").classList.contains("active")) tasks.push(loadESIM());
   if ($("#network").classList.contains("active")) tasks.push(loadNetwork());
@@ -465,6 +465,7 @@ async function testBarkSettings(kind) {
 }
 
 function callStateLabel(call) {
+  if (call?.recovery_required) return "重启前通话待处理，请在本机挂断";
   switch (call?.state) {
     case "incoming": return "正在来电";
     case "waiting": return "来电等待";
@@ -726,6 +727,62 @@ function renderVoiceAgentProviders(status) {
     return card;
   }));
 }
+
+let remoteLoadID = 0;
+let remoteLoadedDevice = null;
+async function loadRemoteSettings() {
+  const device = activeDeviceID;
+  const attempt = ++remoteLoadID;
+  remoteLoadedDevice = null;
+  $("#remote-fields").disabled = true;
+  $("#remote-status").textContent = "正在读取当前模块设置…";
+  try {
+    const state = await api("/api/remote-calls/status");
+    if (device !== activeDeviceID || attempt !== remoteLoadID) return;
+    const config = state.config;
+    $("#remote-enabled").checked = config.enabled;
+    $("#remote-installation").value = config.target_installation_id || "";
+    $("#remote-timeout").value = config.ring_timeout_seconds;
+    $("#remote-display").value = config.caller_display;
+    remoteLoadedDevice = device;
+    $("#remote-fields").disabled = Boolean(state.active_route);
+    $("#remote-status").textContent = state.recovery?.recovery_required
+      ? "有待核对的模块通话，请先在本机处理"
+      : state.effective_route === "agent" ? "AI 接听优先，远程接听不会触发"
+      : !config.enabled ? "此模块未启用远程接听"
+      : `已启用 · Hub 连接：${state.online_transport?.state || "未知"}（实际接听以手机连接与推送状态为准）`;
+  } catch (error) {
+    if (device === activeDeviceID && attempt === remoteLoadID) $("#remote-status").textContent = `读取失败：${error.message}`;
+  }
+}
+$("#remote-settings-panel").addEventListener("toggle", () => {
+  if ($("#remote-settings-panel").open) void loadRemoteSettings();
+});
+$("#remote-refresh").addEventListener("click", loadRemoteSettings);
+$("#remote-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const device = activeDeviceID;
+  if (remoteLoadedDevice !== device || $("#remote-fields").disabled) return;
+  const attempt = ++remoteLoadID;
+  // Capture the module path before awaiting; switching modules cannot redirect this write.
+  const path = routedAPIPath("/api/remote-calls/config");
+  const config = {
+    enabled: $("#remote-enabled").checked,
+    target_installation_id: $("#remote-installation").value.trim(),
+    ring_timeout_seconds: Number($("#remote-timeout").value),
+    caller_display: $("#remote-display").value,
+  };
+  $("#remote-fields").disabled = true;
+  try {
+    await api(path, { method: "PUT", body: JSON.stringify(config) });
+    if (device === activeDeviceID && attempt === remoteLoadID) { notice("远程接听设置已保存"); await loadRemoteSettings(); }
+  } catch (error) {
+    if (device === activeDeviceID && attempt === remoteLoadID) {
+      notice(error.message);
+      $("#remote-fields").disabled = false;
+    }
+  }
+});
 
 async function loadVoiceAgentStatus({ forcePopulate = false } = {}) {
   try {
@@ -998,8 +1055,10 @@ async function loadCalls() {
       ? `每 ${status.poll_interval_s || 3} 秒检查`
       : "演示模式";
     const monitorStatus = $("#call-monitor-status");
-    monitorStatus.classList.toggle("attention", Boolean(active || status.last_poll_error));
-    monitorStatus.textContent = status.last_poll_error
+    monitorStatus.classList.toggle("attention", Boolean(active || status.last_poll_error || status.recovery?.recovery_required));
+    monitorStatus.textContent = status.recovery?.recovery_required
+      ? "重启前通话待核对：请在本机挂断，或等待模块确认空闲"
+      : status.last_poll_error
       ? `监听异常 · ${status.last_poll_error}`
       : (active
         ? `${callStateLabel(active)} · ${active.number || "未知号码"}`
@@ -1011,11 +1070,11 @@ async function loadCalls() {
       $("#active-call-number").textContent = active.number || "未知号码";
       $("#active-call-time").textContent = new Date(active.started_at).toLocaleString();
       const ringing = active.state === "incoming" || active.state === "waiting";
-      $("#answer-call").hidden = !ringing;
+      $("#answer-call").hidden = !ringing || Boolean(active.recovery_required);
       $("#reject-call").hidden = !ringing;
       $("#hangup-call").hidden = false;
-      $("#dtmf-panel").hidden = active.state !== "active";
-      const mediaActive = active.state === "active" && audioHost.registered;
+      $("#dtmf-panel").hidden = active.state !== "active" || Boolean(active.recovery_required);
+      const mediaActive = active.state === "active" && audioHost.registered && !active.recovery_required;
       $("#mute-call").hidden = !mediaActive;
       $("#record-call").hidden = !mediaActive;
       $("#mute-call").textContent = audioHost.want_muted ? "取消静音" : "静音";
@@ -2105,3 +2164,6 @@ setInterval(loadSMS, 5000);
 setInterval(() => {
   if ($("#calls").classList.contains("active")) loadCalls();
 }, 2000);
+
+// Local management window can deep-link to the existing calls view.
+if (location.hash === "#calls") document.querySelector('.tab[data-view="calls"]')?.click();

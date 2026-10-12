@@ -1460,33 +1460,38 @@ func TestNotifyModemResetClearsOverviewAndDiscoveredEUICCs(t *testing.T) {
 }
 
 func TestNotifyModemResetDelayedClearsCacheImmediatelyAndReloadsAfterDelay(t *testing.T) {
-	loaded := make(chan struct{}, 1)
+	loaded := make(chan time.Time, 1)
+	allowReload := make(chan struct{})
+	defer close(allowReload)
 	mgr := newTestManagerWithOverviewLoader(func() (*EsimOverview, error) {
-		loaded <- struct{}{}
+		loaded <- time.Now()
+		<-allowReload
 		return &EsimOverview{ChipInfo: &EUICCChipInfo{SkuName: "reloaded"}}, nil
 	})
 	mgr.overviewCache = &EsimOverview{ChipInfo: &EUICCChipInfo{SkuName: "cached"}}
 	mgr.chipInfoCache = &EUICCChipInfo{SkuName: "cached"}
 	mgr.discoveredEUICCs = []EUICCInfo{{AIDHex: "0102", EID: "eid-before-reset", Spec: EUICCSpecSGP22}}
 
+	started := time.Now()
 	mgr.NotifyModemResetDelayed(80 * time.Millisecond)
 
 	if mgr.cachedOverview() != nil {
 		t.Fatal("overview cache should be cleared immediately")
 	}
-	if mgr.chipInfoCache != nil {
+	mgr.cacheMu.RLock()
+	chipCleared := mgr.chipInfoCache == nil
+	mgr.cacheMu.RUnlock()
+	if !chipCleared {
 		t.Fatal("chipInfoCache should be cleared immediately")
 	}
 	if len(mgr.discoveredEUICCs) != 0 {
 		t.Fatalf("discoveredEUICCs = %v, want cleared", mgr.discoveredEUICCs)
 	}
 	select {
-	case <-loaded:
-		t.Fatal("overview reloaded before delay elapsed")
-	case <-time.After(30 * time.Millisecond):
-	}
-	select {
-	case <-loaded:
+	case began := <-loaded:
+		if began.Sub(started) < 80*time.Millisecond {
+			t.Fatal("overview reloaded before delay elapsed")
+		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("overview did not reload after delay")
 	}

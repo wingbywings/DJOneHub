@@ -72,6 +72,20 @@ func (b *HostBridge) Ready() bool {
 	defer b.mu.Unlock()
 	return b.conn != nil && !b.closed
 }
+
+// Drop queued PCM without resetting generation or anti-replay guards.
+func (b *HostBridge) DiscardQueuedAudio() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, queue := range []chan timedFrame{b.incoming, b.outgoing} {
+		for n := 0; n < cap(queue); n++ {
+			select {
+			case <-queue:
+			default:
+			}
+		}
+	}
+}
 func (b *HostBridge) Receive(ctx context.Context) (Frame, error) {
 	for {
 		select {

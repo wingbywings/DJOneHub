@@ -29,7 +29,13 @@ type Message struct {
 	RequestID      string          `json:"request_id,omitempty"`
 	Payload        json.RawMessage `json:"payload"`
 }
+
+const RecoveryHeader = "X-DJOneHub-Recovery"
+const ResumeHeader = "X-DJOneHub-Resume"
+
 type Welcome struct {
+	Recovery        bool      `json:"recovery,omitempty"`
+	Resumed         bool      `json:"resumed,omitempty"`
 	ID              string    `json:"id"`
 	Kind            string    `json:"kind"`
 	HubID           string    `json:"hub_id"`
@@ -71,8 +77,16 @@ type Invite struct {
 	Direction string    `json:"direction,omitempty"`
 }
 type SDP struct {
-	Type string `json:"type"`
-	SDP  string `json:"sdp"`
+	CallControls   bool   `json:"call_controls,omitempty"`
+	AudioRecovery  bool   `json:"audio_recovery,omitempty"`
+	SignalRecovery bool   `json:"signal_recovery,omitempty"`
+	Type           string `json:"type"`
+	SDP            string `json:"sdp"`
+	Recovery       bool   `json:"recovery,omitempty"`
+}
+type RestartSDP struct {
+	ID  uint64 `json:"negotiation_id"`
+	SDP string `json:"sdp"`
 }
 type ICE struct {
 	Candidate        string  `json:"candidate"`
@@ -81,9 +95,19 @@ type ICE struct {
 	UsernameFragment *string `json:"usernameFragment,omitempty"`
 }
 type Command struct {
+	Digit            string `json:"digit,omitempty"`
 	Action           string `json:"action"`
 	ExpectedRevision uint64 `json:"expected_revision"`
 }
+type Mute struct {
+	Sequence uint64 `json:"sequence"`
+	Muted    bool   `json:"muted"`
+}
+
+func DTMFDigit(digit string) bool {
+	return len(digit) == 1 && ((digit[0] >= '0' && digit[0] <= '9') || digit == "*" || digit == "#")
+}
+
 type Audio struct {
 	Sequence uint64 `json:"sequence"`
 	Active   bool   `json:"active"`
@@ -175,13 +199,26 @@ func (m Message) validatePayload(kind string) error {
 		if m.Type == "answer_sdp" {
 			want, sender = "answer", "installation"
 		}
-		valid = kind == sender && Decode(m.Payload, &p) == nil && p.Type == want && len(p.SDP) > 0 && len(p.SDP) <= 65536
+		valid = kind == sender && Decode(m.Payload, &p) == nil && p.Type == want && len(p.SDP) > 0 && len(p.SDP) <= 65536 && (m.Type == "offer" || (!p.Recovery && !p.SignalRecovery && !p.AudioRecovery && !p.CallControls))
+	case "restart_offer", "restart_answer":
+		var p RestartSDP
+		sender := "hub"
+		if m.Type == "restart_answer" {
+			sender = "installation"
+		}
+		valid = kind == sender && Decode(m.Payload, &p) == nil && p.ID > 0 && len(p.SDP) > 0 && len(p.SDP) <= 65536
 	case "ice":
 		var p ICE
 		valid = Decode(m.Payload, &p) == nil && len(p.Candidate) <= 4096 && (p.SDPMid == nil || len(*p.SDPMid) <= 128) && (p.UsernameFragment == nil || len(*p.UsernameFragment) <= 256)
+	case "sync":
+		var p struct{}
+		valid = kind == "installation" && Decode(m.Payload, &p) == nil
 	case "command":
 		var p Command
-		valid = kind == "installation" && Decode(m.Payload, &p) == nil && p.ExpectedRevision > 0 && (p.Action == "answer" || p.Action == "reject" || p.Action == "hangup")
+		valid = kind == "installation" && Decode(m.Payload, &p) == nil && p.ExpectedRevision > 0 && ((p.Action == "dtmf" && DTMFDigit(p.Digit)) || (p.Digit == "" && (p.Action == "answer" || p.Action == "reject" || p.Action == "hangup")))
+	case "mute":
+		var p Mute
+		valid = kind == "installation" && Decode(m.Payload, &p) == nil && p.Sequence > 0
 	case "audio_active":
 		var p Audio
 		valid = kind == "installation" && Decode(m.Payload, &p) == nil && p.Sequence > 0
@@ -211,7 +248,7 @@ func (m Message) ValidateDelivery(receiver string) error {
 		return ErrProtocol
 	}
 	switch m.Type {
-	case "error", "peer_closed":
+	case "error", "peer_closed", "peer_reconnecting", "peer_resumed":
 		var p Failure
 		if Decode(m.Payload, &p) == nil && ID(p.Code) {
 			return nil
@@ -238,4 +275,27 @@ func (m Message) ValidateDelivery(receiver string) error {
 
 func (m Message) SameCall(other Message) bool {
 	return m.HubEpoch == other.HubEpoch && m.ModuleID == other.ModuleID && m.CallUUID == other.CallUUID && m.Generation == other.Generation && m.InstallationID == other.InstallationID
+}
+
+// DataChannel never authorizes a new call or a new hardware action. Only the
+// pre-bound installation's state query/hangup can enter the same command path.
+func (m Message) ValidateControl(sender string) error {
+	if m.Validate(sender) != nil {
+		return ErrProtocol
+	}
+	if sender == "installation" {
+		if m.Type == "sync" {
+			return nil
+		}
+		if m.Type == "command" {
+			var command Command
+			Decode(m.Payload, &command)
+			if command.Action == "hangup" {
+				return nil
+			}
+		}
+	} else if sender == "hub" && (m.Type == "state" || m.Type == "result") {
+		return nil
+	}
+	return ErrProtocol
 }

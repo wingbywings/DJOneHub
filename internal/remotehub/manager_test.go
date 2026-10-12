@@ -197,3 +197,25 @@ func TestAuthorizedIncomingJobReservesConnectionAndJoinsCleanup(t *testing.T) {
 	}
 	release.Do(func() { close(cleanup) })
 }
+
+func TestManagerDelegatesActiveDisconnectButStillCancelsOnClose(t *testing.T) {
+	c := fake()
+	m := Start(context.Background(), Config{RecoverCalls: true, Connect: func(context.Context) (Connection, error) { return c, nil }, Refresh: refresh})
+	state(t, m, "online")
+	started, ended := make(chan struct{}), make(chan struct{})
+	if !m.TryStart(context.Background(), func(ctx context.Context, _ Connection) { close(started); <-ctx.Done(); close(ended) }) {
+		t.Fatal("not reserved")
+	}
+	signal(t, started)
+	c.Close()
+	select {
+	case <-ended:
+		t.Fatal("manager cancelled resumable call")
+	case <-time.After(30 * time.Millisecond):
+	}
+	if m.Snapshot().State != "busy" {
+		t.Fatal("manager released active call")
+	}
+	m.Close()
+	signal(t, ended)
+}

@@ -76,6 +76,7 @@ type modulePhonebookEntry struct {
 }
 
 type app struct {
+	nativeEvents *nativeEvents
 	// operationMu keeps multi-command writes (SMS/eSIM/mode changes) atomic
 	// relative to background SMS and call polling for this one module. Each
 	// module owns a separate lock, so different modules still run in parallel.
@@ -167,6 +168,9 @@ type app struct {
 	remoteCallOnce         sync.Once
 	remoteCalls            *remoteCallController
 	remoteCallSettingsPath string
+	remoteJournalOnce      sync.Once
+	remoteJournal          *remoteJournal
+	remoteJournalPath      string
 
 	profileNotesMu     sync.Mutex
 	profileNotes       map[string]profileNote
@@ -275,7 +279,18 @@ func main() {
 	flag.BoolVar(&demo, "demo", false, "run the web UI with simulated modem data")
 	flag.StringVar(&nativeControlFile, "native-control-file", "", "private native audio bootstrap file (absolute path; opt-in)")
 	flag.StringVar(&remoteOnlineProfile, "remote-online-profile", "", "EXPERIMENTAL online-only remote answering with a Keychain Hub profile (USB multi-module mode)")
+	flag.BoolVar(&remoteICERestart, "remote-ice-restart", false, "enable bounded ICE recovery; requires upgraded Relay and iOS app")
+	flag.BoolVar(&remoteSignalResume, "remote-signal-resume", false, "enable bounded active-call WSS resumption (requires upgraded Relay/iOS)")
+	flag.BoolVar(&remoteTURNRenew, "remote-turn-renew", false, "renew active-call TURN credentials with ICE restart (implies remote-signal-resume)")
+	flag.BoolVar(&remoteCallControls, "remote-call-controls", false, "enable remote DTMF and Hub mute synchronization (requires upgraded Relay/iOS)")
+	flag.BoolVar(&remoteAudioRecovery, "remote-audio-recovery", false, "allow bounded CallKit audio interruption recovery (requires upgraded Relay/iOS)")
 	flag.Parse()
+	if remoteTURNRenew || remoteAudioRecovery {
+		remoteSignalResume = true
+	}
+	if remoteSignalResume {
+		remoteICERestart = true
+	}
 	if remoteOnlineProfile != "" && (demo || port != "") {
 		log.Print("remote online mode requires automatic USB multi-module discovery")
 		return
@@ -413,7 +428,8 @@ func serve(instance *app, listen string) {
 		log.Print("remote online mode requires USB multi-module mode; serial fallback is unsupported")
 		return
 	}
-	closeNative, err := startNativeControl(nativeControlFile, func(id string) (*app, bool) { return instance, id == instance.deviceID })
+	instance.nativeEvents = &nativeEvents{}
+	closeNative, err := startNativeControl(nativeControlFile, func(id string) (*app, bool) { return instance, id == instance.deviceID }, instance.nativeEvents)
 	if err != nil {
 		log.Printf("native audio control: %v", err)
 		return

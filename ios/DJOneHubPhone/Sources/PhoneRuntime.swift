@@ -2,6 +2,7 @@ import AVFAudio
 import CallKit
 import DJOneHubPhoneCore
 import OSLog
+import Network
 import PushKit
 import SwiftUI
 
@@ -46,6 +47,31 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   @Published private(set) var callControlPending = false
   @Published private(set) var connectedAt: Date?
   @Published private(set) var lastCallResult = ""
+  @Published private(set) var history = CallHistory()
+  @Published private(set) var historyError = ""
+  private var historyWritable = true
+  private var historyURL: URL {
+    FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("call-history.json")
+  }
+  private func saveHistory() {
+    guard historyWritable else { return }
+    do {
+      try FileManager.default.createDirectory(at: historyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try JSONEncoder().encode(history).write(to: historyURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      var url = historyURL
+      var values = URLResourceValues()
+      values.isExcludedFromBackup = true
+      try url.setResourceValues(values)
+      historyError = ""
+    } catch { historyError = "本机通话记录保存失败" }
+  }
+  private func finishHistory(_ result: String) {
+    guard let id = callUUID else { return }
+    history.finish(id: id, result: result)
+    saveHistory()
+  }
+  func clearHistory() { history.clearCompleted(); historyWritable = true; saveHistory() }
   private let controller = CXCallController()
   private let provider: CXProvider
   private var socket: SignalSocket?
@@ -63,6 +89,20 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   private var pingStarted: Date?
   private var lastPing = Date.distantPast
   private var connectionID = UUID()
+  private var relayRecovery = false
+  private var callRecovery = false
+  private var signalRecovery = SignalRecoveryWindow()
+  private var reconnectTask: Task<Void, Never>?
+  private var recoveryTimeout: Task<Void, Never>?
+  private var recoveryCommand: Signal?
+  private var latestAudioState: Signal?
+  private var latestMuteState: Signal?
+  private var dtmfAction: (id: String, action: CXPlayDTMFCallAction)?
+  @Published private(set) var callControlsSupported = false
+  @Published private(set) var dtmfPending = false
+  private var networkMonitor: NWPathMonitor?
+  private var networkPath: String?
+  private var lastControlSync = Date.distantPast
   override init() {
     let c = CXProviderConfiguration()
     c.supportsVideo = false
@@ -74,6 +114,17 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     super.init()
     provider.setDelegate(self, queue: .main)
     reloadStatus()
+    if FileManager.default.fileExists(atPath: historyURL.path) {
+      do {
+        let file = try FileHandle(forReadingFrom: historyURL)
+        defer { try? file.close() }
+        history = try CallHistory.restore(try file.read(upToCount: 262145) ?? Data())
+        saveHistory()
+      } catch {
+        historyWritable = false
+        historyError = "本机通话记录无法读取，已停止覆盖旧文件；清除记录后可重新保存"
+      }
+    }
   }
   func startPushIfEnabled() {
     guard pushEnabled, pushRegistry == nil else { return }
@@ -222,6 +273,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
             throw PhoneError.denied
           }
           try hint.validate(principal: principal)
+          self.history.begin(id: uuid, module: hint.binding.moduleID, display: "DJOneHub", outgoing: false)
+          self.saveHistory()
         } catch {
           self.disconnect("后台来电已失效")
           return
@@ -267,22 +320,23 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     } catch { status = "无法清理本机凭据" }
   }
   func importPairing(_ url: URL) async {
-    guard !working, !online else { return }
-    working = true
-    defer {
-      working = false
-      reloadStatus()
-      syncPushRegistration()
-    }
+    guard !working, !paired, !online, callUUID == nil else { return }
     let allowed = url.startAccessingSecurityScopedResource()
     defer { if allowed { url.stopAccessingSecurityScopedResource() } }
     do {
       let file = try FileHandle(forReadingFrom: url)
       defer { try? file.close() }
-      let data = try file.read(upToCount: 8193) ?? Data()
+      await pair(data: try file.read(upToCount: 8193) ?? Data())
+    } catch { status = "无法读取配对文件" }
+  }
+  func pair(data: Data) async {
+    guard !working, !paired, !online, callUUID == nil else { return }
+    working = true
+    defer { working = false; reloadStatus(); syncPushRegistration() }
+    do {
       try await identity.pair(PairingFile.parse(data))
       status = "配对完成"
-    } catch { status = "配对失败；请检查配对文件与本机凭据状态" }
+    } catch { status = "配对失败；请检查配对有效期与本机凭据状态" }
   }
   func connect(fromPush: Bool = false) async {
     guard !working, socket == nil else { return }
@@ -308,76 +362,207 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       guard let tokens = credentials.tokens else { throw PhoneError.invalidData }
       if let wake { try wake.validate(principal: tokens.principal) }
       let c = try SignalSocket(identity: credentials)
-      connectionID = UUID()
-      let id = connectionID
-      socket = c
-      status = "正在连接"
-      c.onFailure = { [weak self] in self?.disconnect("信令发送失败") }
-      coordinator = PhoneCall(principal: tokens.principal) { [weak self] effect in
-        self?.handle(effect)
-      }
-      expiry = Date().addingTimeInterval(5)  // welcome deadline
-      watchdog = Task { [weak self] in
-        while !Task.isCancelled {
-          try? await Task.sleep(for: .seconds(1))
-          guard let self, self.connectionID == id, !Task.isCancelled else { return }
-          self.checkHealth(id)
-        }
-      }
-      reader = Task { [weak self] in
-        guard let self else { return }
-        do {
-          let welcome = try await c.receive()
-          guard self.connectionID == id else { return }
-          let exp = try welcome.welcomeExpiry(principal: tokens.principal)
-          self.expiry = exp
-          self.signalingEpoch = welcome.hub_epoch!
-          self.online = true
-          self.status = "在线，等待来电"
-          Task { [weak self] in
-            guard let origin = try? Wire.origin(credentials.relay) else { return }
-            let supported = await RelayHTTP().supportsDialing(origin: origin)
-            guard let self, self.connectionID == id else { return }
-            self.dialingSupported = supported
-          }
-          while !Task.isCancelled {
-            let message = try await c.receive()
-            guard self.connectionID == id else { return }
-            if message.type == "reauthenticated" {
-              guard let requestID = self.renewRequest else { throw PhoneError.invalidData }
-              let exp = try message.renewalExpiry(requestID: requestID)
-              self.expiry = exp
-              self.renewRequest = nil
-              self.renewalStarted = nil
-            } else {
-              if message.type != "ice" && message.type != "invite" {
-                let known = ["offer", "state", "result", "error", "peer_closed", "dial_accepted"]
-                  .contains(
-                    message.type)
-                self.recordDiagnostic(known ? "received_" + message.type : "received_unknown")
-              }
-              if message.type == "invite", let wake = self.wake, !wake.matches(message) {
-                self.disconnect("推送来电已失效")
-                return
-              }
-              self.coordinator?.receive(message)
-            }
-          }
-        } catch {
-          if self.connectionID == id {
-            self.recordDiagnostic("signaling_receive_" + phoneFailureCode(error))
-            self.disconnect("连接已断开，请重新连接")
-          }
-        }
-      }
+      coordinator = PhoneCall(principal: tokens.principal) { [weak self] effect in self?.handle(effect) }
+      installSocket(c, credentials: credentials, recovering: false)
+
     } catch {
       if fromPush { disconnect("后台来电连接失败") } else { status = "连接失败；请检查 Relay 和配对状态" }
     }
   }
+  private func installSocket(_ c: SignalSocket, credentials: StoredIdentity,
+    recovering: Bool, readyWelcome: Signal? = nil) {
+    guard let tokens = credentials.tokens else { c.close(); disconnect("凭据无效"); return }
+    reader?.cancel()
+    watchdog?.cancel()
+    renewRequest = nil
+    renewalStarted = nil
+    pingStarted = nil
+    lastPing = .distantPast
+    connectionID = UUID()
+    let id = connectionID
+    socket = c
+    status = recovering ? "正在恢复通话连接" : "正在连接"
+    c.onFailure = { [weak self] in
+      guard let self, self.connectionID == id else { return }
+      self.recoverSignal("信令发送失败")
+    }
+    expiry = Date().addingTimeInterval(5)  // welcome deadline
+    watchdog = Task { [weak self] in
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(1))
+        guard let self, self.connectionID == id, !Task.isCancelled else { return }
+        self.checkHealth(id)
+      }
+    }
+    reader = Task { [weak self] in
+      guard let self else { return }
+      do {
+        let welcome: Signal
+        if let readyWelcome { welcome = readyWelcome } else { welcome = try await c.receive() }
+        guard self.connectionID == id else { return }
+        let exp = try welcome.welcomeExpiry(principal: tokens.principal)
+        guard (welcome.payload["resumed"]?.bool == true) == recovering else { throw PhoneError.invalidData }
+        if recovering { guard welcome.hub_epoch == self.signalingEpoch else { throw PhoneError.invalidData } }
+        self.relayRecovery = welcome.payload["recovery"]?.bool == true
+        self.expiry = exp
+        self.signalingEpoch = welcome.hub_epoch!
+        self.online = true
+        self.status = recovering ? "正在核对通话状态" : "在线，等待来电"
+        Task { [weak self] in
+          guard let origin = try? Wire.origin(credentials.relay) else { return }
+          let supported = await RelayHTTP().supportsDialing(origin: origin)
+          guard let self, self.connectionID == id else { return }
+          self.dialingSupported = supported
+        }
+        while !Task.isCancelled {
+          let message = try await c.receive()
+          guard self.connectionID == id else { return }
+          if message.type == "reauthenticated" {
+            guard let requestID = self.renewRequest else { throw PhoneError.invalidData }
+            let exp = try message.renewalExpiry(requestID: requestID)
+            self.expiry = exp
+            self.renewRequest = nil
+            self.renewalStarted = nil
+          } else {
+            if message.type != "ice" && message.type != "invite" {
+              let known = ["offer", "restart_offer", "state", "result", "error", "peer_closed", "peer_reconnecting", "peer_resumed", "dial_accepted"]
+                .contains(
+                  message.type)
+              self.recordDiagnostic(known ? "received_" + message.type : "received_unknown")
+            }
+            if message.type == "invite", let wake = self.wake, !wake.matches(message) {
+              self.disconnect("推送来电已失效")
+              return
+            }
+            try self.receiveCallSignal(message, principal: tokens.principal)
+          }
+        }
+      } catch {
+        if self.connectionID == id {
+          self.recordDiagnostic("signaling_receive_" + phoneFailureCode(error))
+          if let failure = error as? PhoneError, case .invalidData = failure {
+            self.disconnect("信令数据无效")
+          } else { self.recoverSignal("连接已断开，请重新连接") }
+        }
+      }
+    }
+  }
+  private func watchCallNetwork() {
+    guard callRecovery, networkMonitor == nil else { return }
+    let monitor = NWPathMonitor()
+    networkMonitor = monitor
+    networkPath = nil
+    monitor.pathUpdateHandler = { [weak self, weak monitor] path in
+      guard let monitor else { return }
+      let signature = "\(path.status)-\(path.usesInterfaceType(.wifi))-\(path.usesInterfaceType(.cellular))-\(path.usesInterfaceType(.wiredEthernet))"
+      Task { @MainActor [weak self] in
+        guard let self, self.networkMonitor === monitor, self.connectedAt != nil else { return }
+        let previous = self.networkPath
+        self.networkPath = signature
+        if let previous, previous != signature { self.recoverSignal("通话网络已变化") }
+      }
+    }
+    monitor.start(queue: DispatchQueue(label: "org.djonehub.phone.network"))
+  }
+  private func beginRecovery() throws {
+    guard relayRecovery, callRecovery, connectedAt != nil, let binding = coordinator?.binding else {
+      throw PhoneError.unavailable
+    }
+    try signalRecovery.begin(binding)
+    status = "正在恢复通话连接"
+    if let command = recoveryCommand { media?.sendControl(command) }
+    if recoveryTimeout == nil {
+      recoveryTimeout = Task { [weak self] in
+        for _ in 0..<10 {
+          try? await Task.sleep(for: .seconds(1))
+          guard !Task.isCancelled, let self, self.signalRecovery.binding == binding else { return }
+          if Date().timeIntervalSince(self.lastControlSync) >= 2 {
+            self.lastControlSync = Date()
+            self.media?.sendControl(Signal(type: "sync", binding: binding, payload: [:]))
+          }
+        }
+        guard !Task.isCancelled, let self, self.signalRecovery.binding == binding else { return }
+        self.disconnect("通话连接恢复超时")
+      }
+    }
+  }
+  private func recoverSignal(_ reason: String) {
+    do { try beginRecovery() } catch { disconnect(reason); return }
+    guard reconnectTask == nil, let binding = signalRecovery.binding else { return }
+    recordDiagnostic("signal_reconnecting")
+    connectionID = UUID()
+    let id = connectionID
+    reader?.cancel()
+    watchdog?.cancel()
+    socket?.close()
+    socket = nil
+    online = false
+    reconnectTask = Task { [weak self] in
+      guard let self else { return }
+      defer { if self.coordinator?.binding == binding { self.reconnectTask = nil } }
+      while !Task.isCancelled, self.connectionID == id, self.coordinator?.binding == binding {
+        var candidate: SignalSocket?
+        do {
+          try await Task.sleep(for: .milliseconds(250))
+          let credentials = try await self.identity.credentials()
+          guard !Task.isCancelled, self.connectionID == id,
+            self.coordinator?.binding == binding, let tokens = credentials.tokens else { return }
+          let c = try SignalSocket(identity: credentials, resume: binding)
+          candidate = c
+          // A task cancellation must also cancel URLSession's outstanding receive.
+          let welcome = try await withTaskCancellationHandler {
+            try await c.receive()
+          } onCancel: { Task { @MainActor in c.close() } }
+          _ = try welcome.welcomeExpiry(principal: tokens.principal)
+          guard !Task.isCancelled, self.connectionID == id, self.coordinator?.binding == binding else { c.close(); return }
+          guard welcome.payload["recovery"]?.bool == true,
+            welcome.payload["resumed"]?.bool == true, welcome.hub_epoch == self.signalingEpoch else {
+            c.close(); self.disconnect("服务器未确认通话恢复"); return
+          }
+          self.installSocket(c, credentials: credentials, recovering: true, readyWelcome: welcome)
+          return
+        } catch {
+          candidate?.close()
+          if Task.isCancelled { return }
+        }
+      }
+    }
+  }
+  private func receiveCallSignal(_ message: Signal, principal: Principal) throws {
+    try message.validateIncoming(principal: principal)
+    guard message.binding == coordinator?.binding || message.type == "invite" || message.type == "dial_accepted" else { return }
+    if message.type == "offer" { callRecovery = message.payload["signal_recovery"]?.bool == true }
+    if message.type == "peer_reconnecting" ||
+      (message.type == "error" && message.payload["code"]?.string == "peer_reconnecting") {
+      try beginRecovery()
+      return
+    }
+    if message.type == "peer_resumed" {
+      try beginRecovery()
+      socket?.send(try signalRecovery.synchronize())
+      recordDiagnostic("signal_resumed_syncing")
+      return
+    }
+    if try signalRecovery.accept(message, revision: coordinator?.revision ?? 0) {
+      recoveryTimeout?.cancel()
+      recoveryTimeout = nil
+      recordDiagnostic("signal_state_reconciled")
+      if message.payload["state"]?.string == "connected" {
+        status = latestAudioState?.payload["active"]?.bool == false ? "系统音频暂时中断，等待恢复" : "通话中"
+        if let command = recoveryCommand { socket?.send(command) }
+        if let audio = latestAudioState, audio.binding == coordinator?.binding { socket?.send(audio) }
+        if let mute = latestMuteState, mute.binding == coordinator?.binding { socket?.send(mute) }
+      }
+      recoveryCommand = nil
+    }
+    if message.type == "result", message.request_id == recoveryCommand?.request_id,
+      message.payload["accepted"]?.bool == true { recoveryCommand = nil }
+    coordinator?.receive(message)
+  }
   private func checkHealth(_ id: UUID) {
     let now = Date()
     coordinator?.tick(now: now)
-    if let turnExpiry, now >= turnExpiry.addingTimeInterval(-30) {
+    if let turnExpiry = media?.turnExpiry ?? turnExpiry, now >= turnExpiry.addingTimeInterval(-30) {
       disconnect("本通中继凭据即将到期")
       return
     }
@@ -386,7 +571,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       || pingStarted.map({ now.timeIntervalSince($0) > 5 }) == true
       || socket.pendingWriteSince.map({ now.timeIntervalSince($0) > 5 }) == true
     {
-      disconnect("连接超时")
+      if now >= expiry || renewalStarted != nil { disconnect("连接或授权超时") }
+      else { recoverSignal("连接超时") }
       return
     }
     guard online else { return }
@@ -397,7 +583,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
         do {
           try await socket.ping()
           if self?.connectionID == id { self?.pingStarted = nil }
-        } catch { if self?.connectionID == id { self?.disconnect("连接心跳失败") } }
+        } catch { if self?.connectionID == id { self?.recoverSignal("连接心跳失败") } }
       }
     }
     if expiry.timeIntervalSince(now) <= 60, renewalStarted == nil {
@@ -426,9 +612,27 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
         with: UUID(uuidString: wake.binding.callUUID)!, endedAt: Date(), reason: .failed)
     }
     clearWake()
+    reconnectTask?.cancel()
+    reconnectTask = nil
+    recoveryTimeout?.cancel()
+    recoveryTimeout = nil
+    signalRecovery = SignalRecoveryWindow()
+    recoveryCommand = nil
+    latestAudioState = nil
+    latestMuteState = nil
+    callControlsSupported = false
+    dtmfAction?.action.fail()
+    dtmfAction = nil
+    dtmfPending = false
+    networkMonitor?.cancel()
+    networkMonitor = nil
+    networkPath = nil
+    relayRecovery = false
+    callRecovery = false
     connectionID = UUID()
     online = false
     dialingSupported = false
+    finishHistory(message)
     let old = coordinator
     coordinator = nil
     old?.finish()
@@ -468,6 +672,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     let uuid = UUID()
     pendingDial = (uuid, selectedModule, number)
     callUUID = uuid
+    history.begin(id: uuid, module: selectedModule, display: number, outgoing: true)
+    saveHistory()
     callDisplay = number
     callModule = selectedModule
     callPhase = "dialing"
@@ -486,6 +692,11 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   func endCall() {
     guard callPhase != "ending", let uuid = callUUID else { return }
     request(CXEndCallAction(call: uuid))
+  }
+  func sendDTMF(_ digit: String) {
+    guard let uuid = callUUID, callControlsSupported, !dtmfPending,
+      callPhase == "connected", signalRecovery.binding == nil else { return }
+    request(CXPlayDTMFCallAction(call: uuid, digits: digit, type: .singleTone))
   }
   func toggleMuted() {
     guard coordinator?.answered == true, let uuid = callUUID else { return }
@@ -515,6 +726,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
           self.recordDiagnostic("callkit_transaction_" + phoneFailureCode(error))
           self.lastCallResult = "系统通话操作失败，请重试"
           if action is CXStartCallAction, self.coordinator?.binding == nil {
+            self.finishHistory("拨号启动失败")
             self.pendingDial = nil
             self.callUUID = nil
             self.callPhase = ""
@@ -534,6 +746,11 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     case .reportIncoming(let b, let display):
       outgoing = false
       callUUID = UUID(uuidString: b.callUUID)
+      if let id = callUUID {
+        history.begin(id: id, module: b.moduleID, display: display.isEmpty ? "DJOneHub" : display, outgoing: false)
+        history.identify(id: id, module: b.moduleID, display: display.isEmpty ? "DJOneHub" : display)
+        saveHistory()
+      }
       callDisplay = display.isEmpty ? "DJOneHub" : display
       callModule = b.moduleID
       muted = false
@@ -575,7 +792,11 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
         }
       }
       status = "来电"
-    case .acceptOffer(let b, let sdp):
+    case .acceptOffer(let b, let sdp, let recovery):
+      callControlsSupported = coordinator?.callControls == true
+      let controlsUpdate = CXCallUpdate()
+      controlsUpdate.supportsDTMF = callControlsSupported
+      provider.reportCall(with: UUID(uuidString: b.callUUID)!, updated: controlsUpdate)
       Task { [weak self] in
         guard let self else { return }
         var phase = "ice_fetch"
@@ -585,7 +806,17 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
           guard self.coordinator?.binding == b else { return }
           self.recordDiagnostic("ice_config_validated")
           phase = "media_config"
-          let peer = try PhoneMedia(binding: b, ice: ice)
+          let peer = try PhoneMedia(binding: b, ice: ice, recoveryEnabled: recovery, controlEnabled: self.callRecovery)
+          peer.onControl = { [weak self] data in
+            guard let self, self.coordinator?.binding == b else { return }
+            do {
+              let message = try Signal.decode(data)
+              guard message.binding == b, ["state", "result"].contains(message.type) else { throw PhoneError.invalidData }
+              // A DC heartbeat can report call state, but cannot reset WSS's
+              // authorization/reconnect deadline or confirm a new connection.
+              self.coordinator?.receive(message)
+            } catch { self.disconnect("备用控制通道数据无效") }
+          }
           peer.onDiagnostic = { [weak self] code in
             guard self?.coordinator?.binding == b else { return }
             self?.recordDiagnostic(code)
@@ -631,6 +862,24 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
           }
         }
       }
+    case .acceptRestartOffer(let b, let sdp, let id):
+      guard let peer = media, peer.binding == b else { disconnect("音频恢复状态无效"); return }
+      recordDiagnostic("ice_restart_started")
+      Task { [weak self] in
+        guard let self else { return }
+        do {
+          let answer = try await peer.answerRestart(sdp, id: id, refreshICE: { [weak self] in
+            guard let self, self.coordinator?.binding == b else { throw PhoneError.unavailable }
+            return try await self.identity.ice(module: b.moduleID)
+          })
+          guard self.coordinator?.binding == b, self.media === peer else { return }
+          self.socket?.send(Signal(type: "restart_answer", binding: b,
+            payload: ["negotiation_id": .uint(id), "sdp": .string(answer)]))
+          self.recordDiagnostic("ice_restart_answer_sent")
+        } catch {
+          if self.coordinator?.binding == b { self.disconnect("音频网络恢复失败") }
+        }
+      }
     case .candidate(let b, let payload):
       if let media, media.binding == b {
         media.candidate(payload)
@@ -639,7 +888,23 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       } else {
         disconnect("音频候选过多")
       }
-    case .send(let message): socket?.send(message)
+    case .send(let message):
+      if message.type == "audio_active" { latestAudioState = message }
+      if message.type == "mute" { latestMuteState = message }
+      if message.type == "command", message.payload["action"]?.string == "hangup" {
+        recoveryCommand = message // retain one request until acknowledged, including uncertain writes
+      }
+      if signalRecovery.binding == nil { socket?.send(message) }
+      else if message.type == "command", message.payload["action"]?.string == "hangup" { media?.sendControl(message) }
+    case .controlCompleted(let b, let id, let accepted):
+      guard coordinator?.binding == b else { return }
+      if let pending = dtmfAction, pending.id == id {
+        if accepted { pending.action.fulfill() } else { pending.action.fail(); status = "按键发送未确认，请按需重试" }
+        dtmfAction = nil
+        dtmfPending = false
+      } else if latestMuteState?.request_id == id, !accepted {
+        status = "静音同步未确认，请重试"
+      }
     case .answerCompleted(let b):
       if coordinator?.outgoing == true {
         if activeAudioBinding?.callUUID == b.callUUID, let session = activatedSession {
@@ -663,21 +928,40 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       case "incoming": status = "来电"
       case "answering": status = outgoing ? "正在拨号，等待对方接听" : "正在接听"
       case "awaiting_audio": status = "正在启动通话音频"
+      case "audio_interrupted": status = "系统音频暂时中断，等待恢复"
       case "connected":
         status = "通话中"
         if connectedAt == nil {
           connectedAt = Date()
+          if let id = callUUID { history.connected(id: id, now: connectedAt!); saveHistory() }
           if outgoing {
             provider.reportOutgoingCall(
               with: UUID(uuidString: b.callUUID)!, connectedAt: connectedAt)
           }
         }
+        watchCallNetwork()
       case "dialing": status = "正在准备拨号"
       case "ending": status = "正在挂断"
       default: break
       }
     case .audio(let b, let active): if media?.binding == b { media?.setAudio(active) }
     case .ended(let b):
+      guard callUUID == UUID(uuidString: b.callUUID) else { return }
+      networkMonitor?.cancel()
+      networkMonitor = nil
+      networkPath = nil
+      reconnectTask?.cancel()
+      recoveryTimeout?.cancel()
+      recoveryTimeout = nil
+      signalRecovery = SignalRecoveryWindow()
+      recoveryCommand = nil
+      latestAudioState = nil
+      latestMuteState = nil
+      callControlsSupported = false
+      dtmfAction?.action.fail()
+      dtmfAction = nil
+      dtmfPending = false
+      callRecovery = false
       guard callUUID == UUID(uuidString: b.callUUID) else { return }
       let reason =
         coordinator?.endReason == "cleanup_failed"
@@ -687,6 +971,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
             ? "dial_cancelled" : connectedAt == nil ? "rejected" : "remote_hangup")
           : coordinator?.endReason ?? "ended"
       lastCallResult = Self.endMessage(reason, connected: connectedAt != nil)
+      finishHistory(lastCallResult)
       let endReason: CXCallEndedReason =
         ["remote_hangup", "rejected"].contains(reason)
         ? .remoteEnded
@@ -763,6 +1048,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       action.fulfill()
     } catch {
       action.fail()
+      finishHistory("拨号启动失败")
       pendingDial = nil
       callUUID = nil
       callPhase = ""
@@ -816,6 +1102,13 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     coordinator?.requestEnd(b)
     action.fulfill()
   }
+  func provider(_ provider: CXProvider, perform action: CXPlayDTMFCallAction) {
+    guard action.type == .singleTone, dtmfAction == nil, signalRecovery.binding == nil,
+      let b = coordinator?.binding, b.callUUID == action.callUUID.uuidString.lowercased(),
+      let id = coordinator?.requestDTMF(b, digit: action.digits) else { action.fail(); return }
+    dtmfAction = (id, action)
+    dtmfPending = true
+  }
   func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
     guard media?.binding.callUUID == action.callUUID.uuidString.lowercased() else {
       action.fail()
@@ -823,9 +1116,15 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     }
     media?.setMuted(action.isMuted)
     muted = action.isMuted
+    if let b = coordinator?.binding { coordinator?.setMuted(b, muted: action.isMuted) }
     action.fulfill()
   }
   func provider(_ provider: CXProvider, timedOutPerforming action: CXAction) {
+    if let dtmf = action as? CXPlayDTMFCallAction {
+      dtmf.fail()
+      if dtmfAction?.action.uuid == dtmf.uuid { dtmfAction = nil; dtmfPending = false }
+      return
+    }
     if let action = action as? CXCallAction,
       wake?.binding.callUUID == action.callUUID.uuidString.lowercased()
     {

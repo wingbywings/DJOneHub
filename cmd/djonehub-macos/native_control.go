@@ -97,7 +97,11 @@ func (a *app) nativeRemoteHost() *remoteNativeHost {
 	return handle.native
 }
 
-func nativeControlHandler(token string, resolve func(string) (*app, bool)) http.Handler {
+func nativeControlHandler(token string, resolve func(string) (*app, bool), sources ...*nativeEvents) http.Handler {
+	events := &nativeEvents{}
+	if len(sources) > 0 && sources[0] != nil {
+		events = sources[0]
+	}
 	mux := http.NewServeMux()
 	lookup := func(w http.ResponseWriter, r *http.Request) *app {
 		a, ok := resolve(r.URL.Query().Get("device_id"))
@@ -116,6 +120,7 @@ func nativeControlHandler(token string, resolve func(string) (*app, bool)) http.
 			next(w, r)
 		}
 	}
+	mux.HandleFunc("GET /events", auth(events.serve))
 	mux.HandleFunc("GET /config", auth(func(w http.ResponseWriter, r *http.Request) {
 		a := lookup(w, r)
 		if a == nil {
@@ -210,7 +215,7 @@ func nativeControlHandler(token string, resolve func(string) (*app, bool)) http.
 
 // Bootstrap is written atomically in a private directory. No token is passed
 // in argv, URL, public config or logs. Restart rotates both port and token.
-func startNativeControl(path string, resolve func(string) (*app, bool)) (func(), error) {
+func startNativeControl(path string, resolve func(string) (*app, bool), sources ...*nativeEvents) (func(), error) {
 	if path == "" {
 		return func() {}, nil
 	}
@@ -291,12 +296,17 @@ func startNativeControl(path string, resolve func(string) (*app, bool)) (func(),
 		listener.Close()
 		return nil, err
 	}
-	server := &http.Server{Handler: nativeControlHandler(bootstrap.Token, resolve), ReadHeaderTimeout: time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
+	events := &nativeEvents{}
+	if len(sources) > 0 && sources[0] != nil {
+		events = sources[0]
+	}
+	server := &http.Server{Handler: nativeControlHandler(bootstrap.Token, resolve, events), ReadHeaderTimeout: time.Second, ReadTimeout: 2 * time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
 	go func() { _ = server.Serve(listener) }()
 	locked = true
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			events.close()
 			_ = server.Close()
 			// Do not delete a newer process's rotated bootstrap.
 			if current, err := os.ReadFile(path); err == nil && string(current) == string(data) {

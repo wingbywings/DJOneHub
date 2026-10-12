@@ -53,3 +53,55 @@ final class NativeControlTests: XCTestCase {
         }
     }
 }
+
+extension NativeControlTests {
+    func testEventShapeAndRevisionBounds() throws {
+        XCTAssertEqual(try NativeChangeEvent.decode(Data(#"{"type":"changed","revision":0}"#.utf8)), 0)
+        XCTAssertEqual(try NativeChangeEvent.decode(Data(#"{"type":"changed","revision":18446744073709551615}"#.utf8)), UInt64.max)
+        for text in [#"{"type":"command","revision":1}"#, #"{"type":"changed","revision":true}"#,
+                     #"{"type":"changed","revision":-1}"#, #"{"type":"changed","revision":1,"token":"secret"}"#,
+                     #"{"type":"changed"}"#, String(repeating: "x", count: 1025)] {
+            XCTAssertThrowsError(try NativeChangeEvent.decode(Data(text.utf8)))
+        }
+    }
+    func testRefreshPolicyKeepsLegacyLeaseAndTransitionBudget() {
+        XCTAssertEqual(NativeRefreshPolicy.interval(eventsOnline: true, remoteRunning: true, transitioning: false), 5)
+        XCTAssertLessThan(NativeRefreshPolicy.interval(eventsOnline: true, remoteRunning: false, transitioning: false), 5)
+        XCTAssertEqual(NativeRefreshPolicy.interval(eventsOnline: false, remoteRunning: true, transitioning: false), 0.5)
+        XCTAssertEqual(NativeRefreshPolicy.interval(eventsOnline: true, remoteRunning: false, transitioning: true), 0.5)
+    }
+}
+
+extension NativeControlTests {
+    func testLiveNativeEventsAndCancellation() async throws {
+        guard let path = ProcessInfo.processInfo.environment["DJONEHUB_TEST_NATIVE_BOOTSTRAP"] else {
+            throw XCTSkip("requires the Go native event fixture")
+        }
+        let client = NativeControlClient(path: path)
+        let (stream, continuation) = AsyncStream<UInt64>.makeStream(bufferingPolicy: .bufferingNewest(8))
+        let subscription = Task {
+            defer { continuation.finish() }
+            try await client.events { revision in continuation.yield(revision) }
+        }
+        defer { subscription.cancel(); continuation.finish() }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                var previous: UInt64?
+                var received = 0
+                for await revision in stream {
+                    if let previous { XCTAssertGreaterThan(revision, previous) }
+                    previous = revision
+                    received += 1
+                    if received == 3 { return }
+                }
+                throw NativeControlError.invalidResponse
+            }
+            group.addTask { try await Task.sleep(for: .seconds(5)); throw NativeControlError.invalidResponse }
+            _ = try await group.next()
+            group.cancelAll()
+        }
+        subscription.cancel()
+        // Await cancellation: the receive operation must not leave a live socket.
+        _ = await subscription.result
+    }
+}

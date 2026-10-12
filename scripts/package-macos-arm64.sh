@@ -16,6 +16,16 @@ LIBUSB_ARCHIVE="${BUILD_ROOT}/libusb-${LIBUSB_VERSION}.tar.bz2"
 LIBUSB_SOURCE="${BUILD_ROOT}/libusb-source"
 LIBUSB_PREFIX="${BUILD_ROOT}/libusb-prefix"
 LIBUSB_OBJECTS="${BUILD_ROOT}/libusb-objects"
+OPUS_VERSION=1.6.1
+# Pinned against https://downloads.xiph.org/releases/opus/SHA256SUMS.txt
+OPUS_SHA256=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+OPUS_ARCHIVE="${BUILD_ROOT}/opus-${OPUS_VERSION}.tar.gz"
+OPUS_SOURCE="${BUILD_ROOT}/opus-source"
+OPUS_PREFIX="${BUILD_ROOT}/opus-prefix"
+
+case "${VERSION}" in
+  ""|*[!A-Za-z0-9._-]*) echo "Version must contain only letters, digits, dots, underscores or hyphens." >&2; exit 1 ;;
+esac
 
 if [ "$(uname -m)" != "arm64" ]; then
   echo "This packaging script currently requires an Apple Silicon Mac." >&2
@@ -92,14 +102,34 @@ clang -arch arm64 -mmacosx-version-min=13.0 -dynamiclib \
 ln -s libusb-1.0.0.dylib "${LIBUSB_PREFIX}/lib/libusb-1.0.dylib"
 cp "${LIBUSB_SOURCE}/libusb/libusb.h" "${LIBUSB_PREFIX}/include/libusb-1.0/libusb.h"
 
+if [ ! -f "${OPUS_ARCHIVE}" ]; then
+  curl -fL "https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz" -o "${OPUS_ARCHIVE}"
+fi
+if [ "$(shasum -a 256 "${OPUS_ARCHIVE}" | awk '{print $1}')" != "${OPUS_SHA256}" ]; then
+  echo "Opus source checksum mismatch." >&2
+  exit 1
+fi
+rm -rf "${OPUS_SOURCE}" "${OPUS_PREFIX}"
+mkdir -p "${OPUS_SOURCE}"
+tar -xzf "${OPUS_ARCHIVE}" -C "${OPUS_SOURCE}" --strip-components=1
+(
+  cd "${OPUS_SOURCE}"
+  # Static linking keeps the package independent of Homebrew and its ABI.
+  MACOSX_DEPLOYMENT_TARGET=13.0 CFLAGS="-O2 -arch arm64 -mmacosx-version-min=13.0" \
+    ./configure --prefix="${OPUS_PREFIX}" --disable-shared --enable-static \
+      --disable-doc --disable-extra-programs >/dev/null
+  make -j 2 >/dev/null
+  make install >/dev/null
+)
+
 cd "${ROOT_DIR}"
 GOCACHE="${BUILD_ROOT}/go-cache"
 rm -rf "${GOCACHE}"
 mkdir -p "${GOCACHE}"
 export GOCACHE
-PKG_CONFIG_PATH="${LIBUSB_SOURCE}" \
+PKG_CONFIG_LIBDIR="${LIBUSB_SOURCE}:${OPUS_PREFIX}/lib/pkgconfig" PKG_CONFIG_PATH="" \
 MACOSX_DEPLOYMENT_TARGET=13.0 CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build \
-  -p 2 \
+  -p 2 -tags remoteopus \
   -trimpath -buildvcs=false -ldflags="-s -w" \
   -o "${STAGE_DIR}/bin/djonehub-macos" ./cmd/djonehub-macos
 
@@ -112,6 +142,12 @@ swift build \
   --scratch-path "${SWIFT_BUILD_DIR}" \
   -c release
 cp "${SWIFT_BUILD_DIR}/release/DJOneHubAudioHost" "${STAGE_DIR}/bin/djonehub-audio-host"
+CLANG_MODULE_CACHE_PATH="${BUILD_ROOT}/clang-module-cache" \
+SWIFTPM_MODULECACHE_OVERRIDE="${BUILD_ROOT}/swift-module-cache" \
+swift build --package-path "${ROOT_DIR}/macos/DJOneHubRemote" \
+  --scratch-path "${BUILD_ROOT}/swift-remote" -c release
+cp "${BUILD_ROOT}/swift-remote/release/DJOneHubRemote" "${STAGE_DIR}/bin/djonehub-remote"
+
 
 cp "${LIBUSB_PREFIX}/lib/libusb-1.0.0.dylib" "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 cp "${ROOT_DIR}/packaging/djonehub" "${STAGE_DIR}/djonehub"
@@ -119,12 +155,15 @@ cp "${ROOT_DIR}/packaging/install" "${STAGE_DIR}/install"
 cp "${ROOT_DIR}/packaging/README.md" "${STAGE_DIR}/README.md"
 cp "${ROOT_DIR}/LICENSE" "${STAGE_DIR}/LICENSE"
 cp "${LIBUSB_SOURCE}/COPYING" "${STAGE_DIR}/licenses/libusb-COPYING"
+cp "${OPUS_SOURCE}/COPYING" "${STAGE_DIR}/licenses/opus-COPYING"
 cp "${ROOT_DIR}/packaging/THIRD_PARTY_NOTICES.md" "${STAGE_DIR}/THIRD_PARTY_NOTICES.md"
 
 chmod 755 "${STAGE_DIR}/djonehub" "${STAGE_DIR}/install" "${STAGE_DIR}/bin/djonehub-macos" "${STAGE_DIR}/bin/djonehub-audio-host" "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 codesign --force --sign - "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 codesign --force --sign - "${STAGE_DIR}/bin/djonehub-macos"
 codesign --force --sign - "${STAGE_DIR}/bin/djonehub-audio-host"
+chmod 755 "${STAGE_DIR}/bin/djonehub-remote"
+codesign --force --sign - "${STAGE_DIR}/bin/djonehub-remote"
 
 if otool -L "${STAGE_DIR}/bin/djonehub-macos" | grep -q '/opt/homebrew\|/usr/local\|/Cellar/'; then
   echo "Release binary still contains a package-manager dependency." >&2

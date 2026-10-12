@@ -18,10 +18,17 @@ import (
 )
 
 var remoteOnlineProfile string
+var remoteICERestart bool
+var remoteSignalResume bool
+var remoteTURNRenew bool
+var remoteAudioRecovery bool
+var remoteCallControls bool
 
 type remoteHubService struct {
 	*remotehub.Manager
-	ice func(context.Context, string) (turncred.Credentials, error)
+	resume  func(context.Context, callsignal.Message) (*callsignal.Client, error)
+	refresh func(context.Context) (string, error)
+	ice     func(context.Context, string) (turncred.Credentials, error)
 }
 
 // An explicit integration entry point until background-call device validation is complete.
@@ -47,6 +54,7 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 		return nil, errors.New("remote profile requires operator recovery")
 	}
 	manager := remotehub.Start(ctx, remotehub.Config{
+		RecoverCalls: remoteSignalResume,
 		Connect: func(ctx context.Context) (remotehub.Connection, error) {
 			readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			config, err := store.ConnectionConfig(readCtx, profile)
@@ -57,6 +65,7 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 			if config.Kind != "hub" {
 				return nil, callsignal.ErrProtocol
 			}
+			config.Resumption = remoteSignalResume
 			// Dial's handshake is bounded; the socket inherits the manager lifetime.
 			client, err := callsignal.Dial(ctx, config)
 			if err != nil {
@@ -67,9 +76,18 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 		Refresh:  func(ctx context.Context) (string, error) { return store.RefreshAccess(ctx, profile) },
 		Incoming: incoming,
 	})
-	return &remoteHubService{Manager: manager, ice: func(ctx context.Context, module string) (turncred.Credentials, error) {
-		return store.ICE(ctx, profile, module)
-	}}, nil
+	return &remoteHubService{Manager: manager,
+		resume: func(ctx context.Context, binding callsignal.Message) (*callsignal.Client, error) {
+			config, err := store.ConnectionConfig(ctx, profile)
+			if err != nil {
+				return nil, err
+			}
+			config.Resumption, config.Resume = true, &binding
+			return callsignal.Dial(ctx, config)
+		},
+		refresh: func(ctx context.Context) (string, error) { return store.RefreshAccess(ctx, profile) }, ice: func(ctx context.Context, module string) (turncred.Credentials, error) {
+			return store.ICE(ctx, profile, module)
+		}}, nil
 }
 
 // Called after publishing a poll. The immutable route, not the current AI
@@ -147,7 +165,8 @@ func (h *usbDeviceHub) runRemoteCall(ctx context.Context, a *app, call callRecor
 	}
 	// One attempt per UUID, so generation 1 is never reused for a retry.
 	// Manager owns authorization throughout both idle and active phases.
-	media := remotemedia.PeerConfig{CallUUID: call.UUID, Generation: 1}
+	media := remotemedia.PeerConfig{Control: remoteSignalResume, CallUUID: call.UUID, Generation: 1}
+	var iceExpiry time.Time
 	if manager.ice != nil {
 		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		credentials, err := manager.ice(fetchCtx, a.deviceID)
@@ -165,11 +184,22 @@ func (h *usbDeviceHub) runRemoteCall(ctx context.Context, a *app, call callRecor
 			media.ICEServers = append(media.ICEServers, webrtc.ICEServer{URLs: server.URLs, Username: server.Username, Credential: server.Credential})
 		}
 		if credentials.ExpiresAt != nil {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithDeadline(ctx, credentials.ExpiresAt.Add(-30*time.Second))
-			defer cancel()
+			iceExpiry = *credentials.ExpiresAt
+			if !remoteTURNRenew {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, credentials.ExpiresAt.Add(-30*time.Second))
+				defer cancel()
+			}
 		}
 	}
-	snapshot, err := a.runRemoteSignaling(ctx, client, media, nil)
+	snapshot, err := a.runRemoteSignaling(ctx, client, media, nil, func(config *remotecall.SignalCall) {
+		if remoteSignalResume {
+			config.Reconnect, config.ResumeRefresh = manager.resume, manager.refresh
+		}
+		if remoteTURNRenew && !iceExpiry.IsZero() {
+			config.ICEExpiresAt = iceExpiry
+			config.RefreshICE = func(ctx context.Context) (turncred.Credentials, error) { return manager.ice(ctx, a.deviceID) }
+		}
+	})
 	log.Printf("remote online call finished (module %s, call %s, state %s, reason %s, error %s, cleanup_failed %t)", a.deviceID, call.UUID, snapshot.State, snapshot.EndReason, remoteErrorCode(err), snapshot.CleanupError != "")
 }

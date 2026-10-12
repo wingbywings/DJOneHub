@@ -18,6 +18,7 @@ DATA_DIR="${HOME}/Library/Application Support/DJOneHub"
 LOG_DIR="${HOME}/Library/Logs/DJOneHub"
 PID_FILE="${DATA_DIR}/djonehub.pid"
 LOG_FILE="${LOG_DIR}/djonehub.log"
+NATIVE_CONTROL_FILE="${DATA_DIR}/native-control/bootstrap.json"
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,9 @@ DJOneHub for macOS
 用法：
   djonehub start          启动并自动打开管理网页
   djonehub start --demo   启动无硬件演示模式
+  djonehub start --remote-profile NAME  使用已配对的钥匙串配置启动远程接听
+  djonehub remote-ui      打开本机远程配对管理窗口
+  djonehub remote ...     管理远程配对配置（remote help 查看说明）
   djonehub stop           停止正在运行的程序
   djonehub status         查看运行状态
   djonehub logs           查看实时日志（Ctrl+C 退出日志）
@@ -67,6 +71,7 @@ open_page() {
 
 start_service() {
   mode=${1:-}
+  profile=${2:-}
   if [ ! -x "${BINARY}" ]; then
     printf '启动失败：缺少可执行文件 %s\n' "${BINARY}" >&2
     exit 1
@@ -92,11 +97,18 @@ start_service() {
     exit 1
   fi
 
-  if [ "${mode}" = "--demo" ]; then
-    "${BINARY}" -demo >>"${LOG_FILE}" 2>&1 &
-  else
-    "${BINARY}" >>"${LOG_FILE}" 2>&1 &
-  fi
+  set -- --listen 127.0.0.1:7575
+  case "${mode}" in
+    --demo) set -- "$@" --demo ;;
+    --remote-profile)
+      if [ ! -x "${AUDIO_HOST}" ]; then
+        printf '启动失败：远程接听需要音频宿主 %s\n' "${AUDIO_HOST}" >&2
+        exit 1
+      fi
+      set -- "$@" --remote-online-profile "${profile}" --native-control-file "${NATIVE_CONTROL_FILE}"
+      ;;
+  esac
+  "${BINARY}" "$@" >>"${LOG_FILE}" 2>&1 &
   child=$!
   audio_child=""
   printf '%s\n' "${child}" >"${PID_FILE}"
@@ -117,11 +129,11 @@ start_service() {
 
   ready=0
   attempts=0
-  while [ "${attempts}" -lt 50 ]; do
+  while [ "${attempts}" -lt 300 ]; do
     if ! kill -0 "${child}" 2>/dev/null; then
       break
     fi
-    if /usr/bin/curl -fsS --max-time 1 "${URL}/" >/dev/null 2>&1; then
+    if /usr/bin/curl --noproxy '*' -fsS --max-time 1 "${URL}/" >/dev/null 2>&1; then
       ready=1
       break
     fi
@@ -131,7 +143,11 @@ start_service() {
 
   if [ "${ready}" -eq 1 ]; then
     if [ "${mode}" != "--demo" ] && [ -x "${AUDIO_HOST}" ]; then
-      "${AUDIO_HOST}" --base-url "${URL}" >>"${LOG_FILE}" 2>&1 &
+      set -- --base-url "${URL}"
+      if [ "${mode}" = "--remote-profile" ]; then
+        set -- "$@" --native-control-file "${NATIVE_CONTROL_FILE}"
+      fi
+      "${AUDIO_HOST}" "$@" >>"${LOG_FILE}" 2>&1 &
       audio_child=$!
     fi
     printf 'DJOneHub 已启动：%s\n' "${URL}"
@@ -140,10 +156,25 @@ start_service() {
     open_page
   else
     printf 'DJOneHub 未能正常启动，请查看日志：%s\n' "${LOG_FILE}" >&2
+    stop_child
+    # A Keychain C call may not return on SIGTERM. Bound shutdown of this
+    # launcher-owned child so a timed-out start cannot remain stuck forever.
+    attempts=0
+    while kill -0 "${child}" 2>/dev/null && [ "${attempts}" -lt 25 ]; do
+      attempts=$((attempts + 1))
+      sleep 0.2
+    done
+    parent=$(ps -p "${child}" -o ppid= 2>/dev/null | tr -d ' ')
+    if [ "${parent}" = "$$" ]; then
+      kill -KILL "${child}" 2>/dev/null || true
+    fi
   fi
 
   wait "${child}"
   status=$?
+  if [ "${ready}" -eq 0 ]; then
+    status=1
+  fi
   if [ -n "${audio_child}" ]; then
     kill -TERM "${audio_child}" 2>/dev/null || true
     wait "${audio_child}" 2>/dev/null || true
@@ -191,10 +222,17 @@ show_status() {
 case "${1:-}" in
   start)
     case "${2:-}" in
-      ""|--demo) start_service "${2:-}" ;;
+      "") [ "$#" -eq 1 ] || { usage; exit 2; }; start_service ;;
+      --demo) [ "$#" -eq 2 ] || { usage; exit 2; }; start_service --demo ;;
+      --remote-profile)
+        [ "$#" -eq 3 ] && [ -n "$3" ] || { usage; exit 2; }
+        start_service --remote-profile "$3"
+        ;;
       *) usage; exit 2 ;;
     esac
     ;;
+  remote-ui) exec "${ROOT_DIR}/bin/djonehub-remote" ;;
+  remote) shift; exec "${BINARY}" remote "$@" ;;
   stop) stop_service ;;
   status) show_status ;;
   logs)
