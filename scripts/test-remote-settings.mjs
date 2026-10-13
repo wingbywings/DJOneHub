@@ -8,13 +8,15 @@ const nodes = new Map();
 function makeNode() { return { value: '', disabled: false, children: [], append(child) { this.children.push(child); }, replaceChildren(...items) { this.children = items; }, addEventListener(event, fn) { this[event] = fn; } }; }
 function $(id) { if (!nodes.has(id)) nodes.set(id, makeNode()); return nodes.get(id); }
 const reads = [], writes = [], notices = [];
-let authenticated = true, rejectSave;
+let authenticated = true, localNoPassword = false, rejectSave;
+const bootstraps = [];
 const tick = () => new Promise(setImmediate);
 const phones = ['A','B','C'].map(id => ({ id: 'phone_' + id, hub_id: 'hub_active', modules: [id], name: '同名手机', revoked: false }));
 const reply = data => ({ ok: true, async json() { return data; } });
 const context = vm.createContext({ $, activeDeviceID: 'A', Date, setTimeout, document: { createElement: makeNode }, notice(text) { notices.push(text); },
-  api(path) {
-    if (path === '/api/remote-management/session/status') return Promise.resolve({ authenticated, csrf: 'fixture-csrf' });
+  api(path, options) {
+    if (path === '/api/remote-management/session/status') return Promise.resolve({ authenticated, local_no_password: localNoPassword, csrf: 'fixture-csrf' });
+    if (path === '/api/remote-management/session/local') { bootstraps.push(options); authenticated = true; return Promise.resolve({authenticated:true,csrf:'fixture-csrf'}); }
     if (path === '/api/remote-management/profiles') return Promise.resolve({ active_profile: 'fixture', profiles: [{ profile: 'fixture', status: { principal: { id: 'hub_active' } } }] });
     return new Promise((resolve, reject) => reads.push({ path, resolve, reject }));
   },
@@ -39,5 +41,8 @@ rejectSave(new Error('late B failure')); await save;
 assert.equal($('#remote-installation').value, 'phone_C'); assert.equal($('#remote-fields').disabled, false);
 const before = writes.length; $('#remote-installation').value = 'phone_B'; await $('#remote-form').submit({ preventDefault() {} }); assert.equal(writes.length, before); assert.match(notices.at(-1), /有效授权/);
 authenticated = false; const locked = context.loadRemoteSettings(); reads[3].resolve(state('phone_C')); await locked;
-assert.equal($('#remote-fields').disabled, true); assert.match($('#remote-status').textContent, /登录本机管理/);
-console.log('Remote settings: authenticated module selection, stale reads, bound writes and login guard passed');
+assert.equal($('#remote-fields').disabled, true); assert.match($('#remote-status').textContent, /会话不可用/);
+localNoPassword = true; const local = context.loadRemoteSettings(); reads[4].resolve(state('phone_C')); await local;
+assert.equal(bootstraps.length, 1); assert.equal(bootstraps[0].method, 'POST');
+assert.equal($('#remote-fields').disabled, false); assert.equal($('#remote-installation').value, 'phone_C');
+console.log('Remote settings: authorized module selection, stale reads, bound writes and passwordless local bootstrap passed');

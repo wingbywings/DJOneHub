@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DJOneHub Relay 授权管理</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
+<head><meta charset="utf-8"><meta name="djonehub-admin-base" content="/admin/"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DJOneHub Relay 授权管理</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
 <body>
 <header><div><h1>Relay 授权管理</h1><p>Mac 注册申请、授权文件和已配对设备</p></div><button id="logout" hidden>退出登录</button></header>
 <main>
@@ -13,8 +13,8 @@
 <div id="management" hidden>
 <section><div class="section-head"><h2>服务与权限</h2><button id="refresh">刷新</button></div><p id="overview"></p><div id="runtime-health" aria-live="polite"></div><p>运行状态每五秒刷新。TURN 签发成功不代表媒体连通，APNs 接受请求不代表手机已收到；未观测的端到端能力保持未知。</p><p>模块候选由 Mac 的设备清单提交。请核对申请编号、公钥指纹及设备范围后批准。</p>
 <label class="file-label">导入 Mac 注册申请<input id="import-request" type="file" accept="application/json,.json"></label></section>
-<section><h2>注册申请与授权文件</h2><p>先批准所选模块，再签发下载。重新签发会使旧的未消费授权失效；授权文件通常有效 10 分钟。</p><div id="requests"></div></section>
-<section><h2>已注册 Mac 与已配对 iPhone</h2><p>撤销 Mac 将使其所属手机授权一并失效；此操作可能中断活动通话。</p><div class="table-scroll"><table><thead><tr><th>设备 / 身份</th><th>所属 Hub</th><th>模块范围</th><th>状态</th><th>操作</th></tr></thead><tbody id="identities"></tbody></table></div></section>
-<section><h2>管理操作记录</h2><p>pending 表示操作结果尚未完整记录，请刷新对象状态核对。</p><div id="audit"></div></section>
+<section><h2>注册申请与授权文件</h2><p>先批准所选模块，再签发下载。重新签发会使旧的未消费授权失效；授权文件通常有效 10 分钟。可单独删除最新授权，或删除申请及全部授权；已注册设备不受影响，本地下载文件需自行清理。</p><div id="requests"></div></section>
+<section><h2>已注册 Mac 与已配对 iPhone</h2><p>撤销 Mac 将使其所属手机授权一并失效；此操作可能中断活动通话。已撤销条目可删除；删除 Mac 时一并清理所属已失效 iPhone，审批历史和审计记录保留。</p><div class="table-scroll"><table><thead><tr><th>设备 / 身份</th><th>所属 Hub</th><th>模块范围</th><th>状态</th><th>操作</th></tr></thead><tbody id="identities"></tbody></table></div></section>
+<section><div class="section-head"><h2>管理操作记录</h2><button id="clear-audit" class="danger">清除已完成记录</button></div><p>pending 表示操作结果尚未完整记录，请刷新对象状态核对。清除操作保留待核对记录和本次清除记录；不改变设备、申请或授权。</p><div id="audit"></div></section>
 </div>
 </main></body></html>

@@ -122,6 +122,7 @@ extension IdentityHTTP {
   private let vault: IdentityVault
   private let http: IdentityHTTP
   private var busy = false
+  public var operationInProgress: Bool { busy }
   public init(vault: IdentityVault, http: IdentityHTTP) {
     self.vault = vault
     self.http = http
@@ -204,6 +205,19 @@ extension IdentityHTTP {
     try vault.replace(Wire.encoder().encode(r))
     return r
   }
+  public func moduleNames() async throws -> [String: String] {
+    // A read must never rotate credentials or write a refresh-pending marker.
+    guard let record = try status(), record.phase == "ready", let tokens = record.tokens else {
+      throw PhoneError.unavailable
+    }
+    try tokens.validate()
+    let data = try await http.post(
+      origin: Wire.origin(record.relay), path: "/v1/module-names", body: Data("{}".utf8),
+      accessToken: tokens.access_token)
+    guard data.count <= 32768 else { throw PhoneError.invalidData }
+    return try Wire.decoder().decode(ModuleNames.self, from: data).validated(principal: tokens.principal)
+  }
+
   public func ice(module: String) async throws -> ICECredentials {
     let record = try await credentials()
     guard let tokens = record.tokens, tokens.principal.modules.contains(module) else {

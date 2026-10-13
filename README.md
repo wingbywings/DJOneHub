@@ -420,6 +420,8 @@ dist/release/
 
 发行脚本会同时构建 Go 主程序和 Swift 音频宿主。更完整的依赖检查、两进程调试和常见编译错误见 [`BUILD_AND_RUN_CN.md`](BUILD_AND_RUN_CN.md)。
 
+远程 iPhone 接听的三端编译、Relay/Web 管理部署、iPhone 签名和配对见[统一部署指南](docs/DEPLOYMENT_GUIDE.md)。
+
 ## 常见问题
 
 ### 模块连接后没有反应

@@ -63,7 +63,7 @@ func remoteWebOrigin(listen string) (string, error) {
 	return "http://127.0.0.1:" + port, nil
 }
 func newRemoteWebManager(parent context.Context, hub *usbDeviceHub, dir, origin, nativeFile string, factory func() (*relayprofile.Store, error)) (*remoteWebManager, error) {
-	auth, err := webadmin.Open(webadmin.Options{Directory: dir, Origin: origin, Tenant: "local", CookieName: "djonehub_mac_management", LoopbackOnly: true, LocalTickets: true})
+	auth, err := webadmin.Open(webadmin.Options{Directory: dir, Origin: origin, Tenant: "local", CookieName: "djonehub_mac_management", LoopbackOnly: true, LocalTickets: true, LocalNoPassword: true})
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +75,7 @@ func newRemoteWebManager(parent context.Context, hub *usbDeviceHub, dir, origin,
 	ctx, cancel := context.WithCancel(parent)
 	m := &remoteWebManager{auth: auth, catalog: catalog, hub: hub, ctx: ctx, cancel: cancel, factory: factory, nativeFile: nativeFile, jobs: map[string]*remoteWebJob{}}
 	m.connect = func(ctx context.Context, id string, store *relayprofile.Store) (*remoteHubService, error) {
-		return startRemoteHubWithStore(ctx, id, nativeFile, store, hub.remoteDial)
+		return startRemoteHubWithStore(ctx, id, nativeFile, store, hub.remoteDial, hub.remoteModuleNames)
 	}
 	return m, nil
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/iniwex5/vohive/internal/relay"
 	"github.com/iniwex5/vohive/internal/relay/identity"
+	"github.com/iniwex5/vohive/internal/relayadmin"
 	"github.com/iniwex5/vohive/internal/relaystatus"
 	"github.com/iniwex5/vohive/internal/turncred"
 	"github.com/iniwex5/vohive/internal/voippush"
@@ -62,6 +63,9 @@ func run(args []string) error {
 	id := flags.String("id", "", "identity ID to revoke locally")
 	pushFile := flags.String("apns-config", "", "private JSON APNs provider configuration file")
 	turnFile := flags.String("turn-config", "", "private JSON coturn REST configuration file")
+	adminDir := flags.String("admin-state-dir", "", "enable integrated Web administration using this private directory")
+	adminTenant := flags.String("admin-tenant", "", "tenant managed by integrated Web administration")
+	adminPath := flags.String("admin-path", "/relay-admin", "integrated administration URL path prefix")
 	fingerprint := flags.String("key-fingerprint", "", "SHA-256 public key fingerprint for offline recovery lookup")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -72,8 +76,8 @@ func run(args []string) error {
 	if args[0] != "serve" && args[0] != "provision" && args[0] != "revoke" && args[0] != "lookup" {
 		return errors.New("unknown relay command")
 	}
-	if (*turnFile != "" || *pushFile != "" || *publicOrigin != "") && args[0] != "serve" {
-		return errors.New("--turn-config, --apns-config and --public-origin apply only to serve")
+	if (*turnFile != "" || *pushFile != "" || *publicOrigin != "" || *adminDir != "" || *adminTenant != "") && args[0] != "serve" {
+		return errors.New("TURN, APNs, public origin and administration options apply only to serve")
 	}
 	if args[0] == "serve" {
 		if err := validateTransport(*listen, *cert, *key, *insecure); err != nil {
@@ -82,6 +86,17 @@ func run(args []string) error {
 	}
 	if *publicOrigin != "" && !identity.HTTPSOrigin(*publicOrigin) {
 		return errors.New("--public-origin requires an HTTPS origin")
+	}
+	if (*adminDir == "") != (*adminTenant == "") {
+		return errors.New("--admin-state-dir and --admin-tenant must be supplied together")
+	}
+	if *adminDir != "" && (!filepath.IsAbs(*adminDir) || !separateAdminDirectory(*directory, *adminDir) || !identity.HTTPSOrigin(*publicOrigin)) {
+		return errors.New("integrated administration requires a separate absolute directory and --public-origin")
+	}
+	if *adminDir != "" {
+		if _, err := relayadmin.NormalizeBasePath(*adminPath); err != nil {
+			return err
+		}
 	}
 	store, err := identity.Open(*directory)
 	if err != nil {
@@ -133,7 +148,7 @@ func run(args []string) error {
 			return err
 		}
 	}
-	options := []relay.Option{relay.WithTURN(issuer), relay.WithEnrollmentOrigin(*publicOrigin), relay.WithBuild("web-management-v2")}
+	options := []relay.Option{relay.WithTURN(issuer), relay.WithEnrollmentOrigin(*publicOrigin), relay.WithBuild("web-management-v3")}
 	if *pushFile != "" {
 		sender, err := voippush.ReadConfig(*pushFile)
 		if err != nil {
@@ -143,7 +158,19 @@ func run(args []string) error {
 	}
 	handler := relay.NewServer(store, options...)
 	defer handler.Close()
-	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
+	var httpHandler http.Handler = handler
+	readTimeout, writeTimeout := 5*time.Second, 5*time.Second
+	if *adminDir != "" {
+		combined, closeAdmin, err := mountAdministration(handler, store, *adminDir, *publicOrigin, *adminTenant, *adminPath)
+		if err != nil {
+			return err
+		}
+		defer closeAdmin()
+		httpHandler = combined
+		readTimeout, writeTimeout = 10*time.Second, 15*time.Second
+		log.Printf("Relay integrated administration enabled at %s; private initialization file: %s", *adminPath, filepath.Join(*adminDir, "setup.json"))
+	}
+	server := &http.Server{Addr: *listen, Handler: httpHandler, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: readTimeout, WriteTimeout: writeTimeout, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	stopStatus, err := relaystatus.Start(ctx, filepath.Join(*directory, relaystatus.Filename), handler.RuntimeSnapshot, func() { log.Print("Relay runtime status write failed; administration will show unknown") })

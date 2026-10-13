@@ -65,7 +65,7 @@ func requestWebTicket(ctx context.Context, bootstrap nativeBootstrap) (string, e
 		return "", relayprofile.ErrInvalid
 	}
 	u, err := url.Parse(body.URL)
-	if err != nil || u.Path != "/remote/" || !strings.HasPrefix(u.Fragment, "remote-ticket=") || len(strings.TrimPrefix(u.Fragment, "remote-ticket=")) != 43 {
+	if err != nil || u.Path != "/remote/" || u.Fragment != "" && (!strings.HasPrefix(u.Fragment, "remote-ticket=") || len(strings.TrimPrefix(u.Fragment, "remote-ticket=")) != 43) {
 		return "", relayprofile.ErrInvalid
 	}
 	u.Path, u.Fragment = "", ""

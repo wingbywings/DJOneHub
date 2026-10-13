@@ -3,6 +3,21 @@ import DJOneHubPhoneCore
 import Foundation
 import Security
 
+func incomingCallUpdate(display: String?, moduleName: String? = nil) -> CXCallUpdate {
+  let caller = IncomingCaller(display: display)
+  let update = CXCallUpdate()
+  update.remoteHandle = CXHandle(
+    type: caller.phoneNumber == nil ? .generic : .phoneNumber,
+    value: caller.phoneNumber ?? caller.display)
+  update.localizedCallerName = caller.localizedName(moduleName: moduleName)
+  update.hasVideo = false
+  update.supportsHolding = false
+  update.supportsGrouping = false
+  update.supportsUngrouping = false
+  update.supportsDTMF = false
+  return update
+}
+
 @MainActor final class KeychainVault: IdentityVault {
   private var query: [String: Any] {
     [

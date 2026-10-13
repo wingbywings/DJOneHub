@@ -26,6 +26,7 @@ def validate_command(value):
         raise ValueError("Existing service differs from the supported installer layout")
     trailing = command[len(base):]
     origin = None
+    admin = {}
     seen = set()
     while trailing:
         if len(trailing) < 2:
@@ -44,8 +45,26 @@ def validate_command(value):
                 raise ValueError("Invalid managed enrollment origin")
             origin = value
             continue
+        if option == "--admin-state-dir":
+            if not re.fullmatch(r"/[A-Za-z0-9_./-]+", value) or Path(value).as_posix() != os.path.normpath(value):
+                raise ValueError("Invalid managed administration directory")
+            admin[option] = value
+            continue
+        if option == "--admin-tenant":
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+                raise ValueError("Invalid managed administration tenant")
+            admin[option] = value
+            continue
+        if option == "--admin-path":
+            if not re.fullmatch(r"/[a-z][a-z0-9-]{0,31}", value) or value in ("/v1", "/healthz"):
+                raise ValueError("Invalid managed administration path")
+            admin[option] = value
+            continue
         raise ValueError("Unknown managed option; preserve it and migrate manually")
+    if admin and (not origin or "--admin-state-dir" not in admin or "--admin-tenant" not in admin):
+        raise ValueError("Incomplete integrated administration configuration")
     suffix = " --public-origin " + origin if origin else ""
+    suffix += "".join(" " + option + " " + admin[option] for option in ("--admin-state-dir", "--admin-tenant", "--admin-path") if option in admin)
     return "# Managed by DJOneHub APNs upgrade.\n[Service]\nExecStart=\nExecStart=" + BASE + APNS + suffix + "\n"
 
 

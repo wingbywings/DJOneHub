@@ -1,0 +1,4 @@
+# Current installer layout. Preserve actual custom native parameters if different.
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/djonehub-relay serve --state-dir /var/lib/djonehub-relay --listen 127.0.0.1:18443 --insecure-loopback --turn-config /etc/djonehub/turn-issuer.json --apns-config /etc/djonehub/apns.json --public-origin https://oops.work --admin-state-dir /var/lib/djonehub-relay-admin --admin-tenant home --admin-path /relay-admin

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- 背景：蜜桃 → 粉樱 → 薰衣草（165deg，同 --bg-grad） -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="42.3%" y2="96.6%">
+      <stop offset="0%"  stop-color="#FFEAD3"/>
+      <stop offset="46%" stop-color="#FFD9E3"/>
+      <stop offset="100%" stop-color="#E3D7FB"/>
+    </linearGradient>
+    <!-- 主 CTA：珊瑚橙渐变（135deg，同 --cta-grad） -->
+    <linearGradient id="cta" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"  stop-color="#FF9A5A"/>
+      <stop offset="100%" stop-color="#FF5C74"/>
+    </linearGradient>
+    <!-- 品牌紫渐变（信号弧） -->
+    <linearGradient id="violet" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"  stop-color="#8B6FF0"/>
+      <stop offset="100%" stop-color="#B565F0"/>
+    </linearGradient>
+    <!-- 顶部柔光 -->
+    <radialGradient id="glow" cx="30%" cy="18%" r="75%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity=".55"/>
+      <stop offset="55%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 珊瑚按钮投影（同 --cta-shadow 色调） -->
+    <filter id="ctaShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="42" stdDeviation="48" flood-color="#FF696E" flood-opacity=".38"/>
+    </filter>
+    <filter id="softShadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="14" stdDeviation="20" flood-color="#5D3F82" flood-opacity=".16"/>
+    </filter>
+    <!-- 听筒内部高光 -->
+    <linearGradient id="shine" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity=".28"/>
+      <stop offset="45%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 底板：三段柔和渐变 -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+
+  <!-- 右上角品牌紫信号弧（Hub 连接意象） -->
+  <g fill="none" stroke-linecap="round" opacity=".9">
+    <path d="M712 232 A150 150 0 0 1 862 382" stroke="url(#violet)" stroke-width="26" opacity=".55"/>
+    <path d="M712 152 A230 230 0 0 1 942 382" stroke="url(#violet)" stroke-width="26" opacity=".3"/>
+  </g>
+  <circle cx="712" cy="382" r="17" fill="#8B6FF0" opacity=".8" filter="url(#softShadow)"/>
+
+  <!-- 主按钮：珊瑚橙圆形 CTA（对应拨号页「呼叫」键） -->
+  <circle cx="512" cy="542" r="286" fill="url(#cta)" filter="url(#ctaShadow)"/>
+  <circle cx="512" cy="542" r="286" fill="url(#shine)"/>
+  <!-- 玻璃描边 -->
+  <circle cx="512" cy="542" r="283" fill="none" stroke="#FFFFFF" stroke-opacity=".5" stroke-width="5"/>
+
+  <!-- 白色听筒（Feather phone 几何，居中于 CTA 圆） -->
+  <g transform="translate(512,542) scale(11.5) translate(-12,-12)">
+    <path fill="#FFFFFF" d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07
+      19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72
+      c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1
+      2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/>
+  </g>
+</svg>

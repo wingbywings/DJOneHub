@@ -1,11 +1,12 @@
+function managementLink(value) { const u = new URL(value); u.pathname = u.pathname === '/' ? '/admin/' : u.pathname.replace(/\/$/, '') + '/'; return u.href; }
 const $ = selector => document.querySelector(selector);
 const base = '/api/remote-management';
-let csrf = '', authenticated = false, configured = false, busy = false;
+let csrf = '', authenticated = false, busy = false, localSessionPromise = null;
 let snapshot = { profiles: [], modules: [], active_profile: '' };
 let presenceLoading = false;
 let phones = [], phonesProfile = '', delivery = null, deliveryProfile = '', pairedIdentity = '', invitationState = '';
 const signatures = new Map();
-const messages = { management_login_required: '请重新登录本机管理', csrf_required: '管理会话已变化，请重新登录', activation_denied: '启动器票据已过期或使用过，请重新从启动器打开', management_busy: '另一项管理操作仍在进行，请刷新核对', call_or_recovery_active: '存在来电、通话或未完成恢复，请结束或处理后重试', scope_denied: '模块或手机不在当前有效授权范围内，请重新读取并选择', profile_not_found: '本机未找到此配置', profile_exists: '此钥匙串配置已经存在，不会覆盖', credential_recovery_required: '凭据事务结果不确定，请刷新核对；不要重新导入旧授权，需用新申请重新登记', keychain_unavailable: '钥匙串访问被拒绝或暂不可用，请允许当前程序访问后重新读取状态', platform_unsupported: '此操作需要 macOS 的钥匙串或远程音频发行版', invalid_management_state: '文件、配置或当前状态不符合操作要求', relay_request_failed: 'Relay 请求未成功；请核对服务版本、网络、授权和提交接口是否启用', management_storage_failed: '本机管理数据写入失败，请核对存储状态', operation_interrupted_check_state: '操作被中断，远端可能已消费授权，请先刷新核对结果', login_denied: '账号或密码不正确', setup_denied: '初始化凭据已过期或使用过', login_rate_limited: '尝试过于频繁，请稍后再试', same_origin_json_required: '请从本机的 127.0.0.1 管理地址打开页面', invalid_management_host: '请使用本机 127.0.0.1 的管理地址', job_not_found: '任务记录已过期，请刷新对象状态核对' };
+const messages = { management_login_required: '本机管理会话不可用，请重新连接页面', local_session_unavailable: '本机服务暂不可用，请核对服务已启动后重试', csrf_required: '本机管理会话已变化，请重新连接页面', activation_denied: '启动器票据已过期或使用过，请重新从启动器打开', management_busy: '另一项管理操作仍在进行，请刷新核对', call_or_recovery_active: '存在来电、通话或未完成恢复，请结束或处理后重试', scope_denied: '模块或手机不在当前有效授权范围内，请重新读取并选择', profile_not_found: '本机未找到此配置', profile_exists: '此钥匙串配置已经存在，不会覆盖', credential_recovery_required: '凭据事务结果不确定，请刷新核对；不要重新导入旧授权，需用新申请重新登记', keychain_unavailable: '钥匙串访问被拒绝或暂不可用，请允许当前程序访问后重新读取状态', platform_unsupported: '此操作需要 macOS 的钥匙串或远程音频发行版', invalid_management_state: '文件、配置或当前状态不符合操作要求', relay_request_failed: 'Relay 请求未成功；请核对服务版本、网络、授权和提交接口是否启用', management_storage_failed: '本机管理数据写入失败，请核对存储状态', operation_interrupted_check_state: '操作被中断，远端可能已消费授权，请先刷新核对结果', login_denied: '账号或密码不正确', setup_denied: '初始化凭据已过期或使用过', login_rate_limited: '尝试过于频繁，请稍后再试', same_origin_json_required: '请从本机的 127.0.0.1 管理地址打开页面', invalid_management_host: '请使用本机 127.0.0.1 的管理地址', job_not_found: '任务记录已过期，请刷新对象状态核对' };
 const phases = { creating: '创建结果待核对', request_pending: '等待审批与授权导入', enrolling: '登记事务待恢复', ready: '已登记', refresh_pending: '凭据刷新结果待恢复' };
 function notice(value) { $('#notice').textContent = value; }
 function node(tag, text, className) { const n = document.createElement(tag); if (text !== undefined) n.textContent = text; if (className) n.className = className; return n; }
@@ -15,8 +16,31 @@ function entry(id) { return snapshot.profiles.find(item => item.profile === id);
 function moduleLabel(id) { const item = snapshot.modules.find(module => module.id === id); return `${item?.alias || '历史授权模块'} · ${id}${item?.state !== 'ready' ? '（离线或不可用）' : ''}`; }
 function changed(key, value) { const data = JSON.stringify(value); if (signatures.get(key) === data) return false; signatures.set(key, data); return true; }
 function clearDelivery() { delivery = null; pairedIdentity = ''; invitationState = ''; $('#pairing-qr').removeAttribute('src'); $('#pairing-qr').hidden = true; $('#pairing-delivery').hidden = true; }
-function showLogin() { authenticated = false; csrf = ''; phones = []; phonesProfile = ''; clearDelivery(); $('#management').hidden = true; $('#login-panel').hidden = false; $('#logout').hidden = true; $('#setup-field').hidden = configured; $('#login-title').textContent = configured ? '本机管理登录' : '初始化本机管理'; $('#login-button').textContent = configured ? '登录' : '创建管理账户'; }
-async function api(path, body) { const options = { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': csrf } }; if (body !== undefined) { options.method = 'POST'; options.body = JSON.stringify(body); } const response = await fetch(base + path, options); const data = await response.json().catch(() => ({})); if (!response.ok) { if (response.status === 401) showLogin(); throw new Error(error(data.error)); } return data; }
+function showUnavailable() { authenticated = false; csrf = ''; phones = []; phonesProfile = ''; clearDelivery(); $('#management').hidden = true; $('#session-panel').hidden = false; }
+function showManagement() { $('#session-panel').hidden = true; $('#management').hidden = false; }
+async function ensureLocalSession() {
+  if (localSessionPromise) return localSessionPromise;
+  localSessionPromise = (async () => {
+    const response = await fetch(base + '/session/local', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.authenticated || !data.csrf) throw new Error(error(data.error || 'local_session_unavailable'));
+    csrf = data.csrf; authenticated = true; showManagement(); return data;
+  })();
+  try { return await localSessionPromise; } finally { localSessionPromise = null; }
+}
+async function api(path, body) {
+  const options = { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': csrf } };
+  if (body !== undefined) { options.method = 'POST'; options.body = JSON.stringify(body); }
+  let response = await fetch(base + path, options), data = await response.json().catch(() => ({}));
+  // These failures occur before the handler runs, so one retry cannot repeat a
+  // successful mutation. Never retry uncertain network or business failures.
+  if (response.status === 401 || response.status === 403 && data.error === 'csrf_required') {
+    await ensureLocalSession(); options.headers['X-DJOneHub-CSRF'] = csrf;
+    response = await fetch(base + path, options); data = await response.json().catch(() => ({}));
+  }
+  if (!response.ok) { if (response.status === 401) showUnavailable(); throw new Error(error(data.error)); }
+  return data;
+}
 async function waitJob(id, silent = false) { const deadline = Date.now() + 125000; while (authenticated && Date.now() < deadline) { const j = await api('/jobs/' + encodeURIComponent(id)); if (j.state !== 'running') { if (j.state === 'failed') throw new Error(error(j.error)); if (!silent) notice('操作已完成，请核对对应状态。'); return j.result; } if (!silent) notice(`操作处理中（${Math.floor((Date.now() - new Date(j.started_at).getTime()) / 1000)} 秒）。页面可刷新核对，请勿重复导入授权。`); await new Promise(resolve => setTimeout(resolve, 450)); } throw new Error('操作仍可能在服务端处理，请刷新核对状态；不要重复导入旧授权。'); }
 async function job(path, body, silent = false) { const j = await api(path, body); return waitJob(j.id, silent); }
 async function action(button, work) { if (busy) return; busy = true; button.disabled = true; try { await work(); } catch (e) { notice(e.message); } finally { busy = false; if (button.isConnected) button.disabled = button.id === 'pairing-cancel' && invitationState !== 'pending'; if (authenticated) await refresh().catch(e => notice(e.message)); } }
@@ -44,8 +68,8 @@ function renderProfiles() {
     if (hubID) { p.append(node('p', 'Hub ID：' + hubID, 'mono')); controls.append(copyButton('复制 Hub ID', hubID)); }
     controls.append(copyButton('复制公钥指纹', item.status.public_key_fingerprint || ''));
     if (item.request) controls.append(copyButton('复制申请编号', item.request.id));
-    if (item.admin_url) controls.append(link('打开 Relay 授权管理', item.admin_url.replace(/\/$/, '') + '/admin/', true));
-    const adminLabel = node('label', 'Relay 管理地址（可选）'), adminInput = node('input'); adminInput.type = 'url'; adminInput.value = item.admin_url || ''; adminInput.placeholder = 'https://relay-admin.example.com'; adminLabel.append(adminInput); p.append(adminLabel);
+    if (item.admin_url) controls.append(link('打开 Relay 授权管理', managementLink(item.admin_url), true));
+    const adminLabel = node('label', 'Relay 管理地址（可选）'), adminInput = node('input'); adminInput.type = 'url'; adminInput.value = item.admin_url || ''; adminInput.placeholder = 'https://oops.work/relay-admin/'; adminLabel.append(adminInput); p.append(adminLabel);
     controls.append(button('保存管理地址', async () => { await job(`/profiles/${encodeURIComponent(item.profile)}/actions`, { action: 'admin_url', admin_url: adminInput.value.trim() }); notice('管理地址已保存'); }));
     controls.append(button('重新读取状态', async () => { await job(`/profiles/${encodeURIComponent(item.profile)}/actions`, { action: 'refresh' }); notice('本机登记状态已更新；登记不等于信令在线。'); }));
     const label = node('label', '显示备注'), input = node('input'); input.value = item.label; input.maxLength = 128; label.append(input); p.append(label);
@@ -68,10 +92,7 @@ async function readRoutes() { const profile = snapshot.active_profile; if (!prof
 function renderDelivery(value, profile) { clearDelivery(); delivery = value; deliveryProfile = profile; invitationState = 'pending'; $('#pairing-delivery').hidden = false; $('#pairing-state').textContent = `邀请：${value.grant.id}，等待该邀请的手机登记结果`; $('#pairing-qr').hidden = !value.qr_image; if (value.qr_image) $('#pairing-qr').src = value.qr_image; else $('#pairing-state').textContent += '。二维码暂不可用，请减少此次模块数，或下载文件导入手机。'; $('#pairing-download').disabled = false; $('#pairing-cancel').disabled = false; $('#pairing-apply').hidden = true; updateExpiry(); }
 function updateExpiry() { if (!delivery) return; const remaining = Math.max(0, Math.ceil((new Date(delivery.grant.expires_at).getTime() - Date.now()) / 1000)); $('#pairing-expiry').textContent = `有效期至 ${date(delivery.grant.expires_at)} · 剩余 ${remaining} 秒`; if (!remaining && invitationState === 'pending') { invitationState = 'expired'; $('#pairing-state').textContent = '邀请已过期，请重新生成。'; $('#pairing-qr').removeAttribute('src'); $('#pairing-qr').hidden = true; delivery.grant.secret = ''; $('#pairing-download').disabled = true; $('#pairing-cancel').disabled = true; } }
 async function checkPairing(silent = false) { if (!delivery) throw new Error('没有可查询的邀请'); const id = delivery.grant.id, profile = deliveryProfile; const state = await job(`/pairings/${encodeURIComponent(id)}/actions`, { profile, action: 'status' }, silent); if (!delivery || delivery.grant.id !== id) return; invitationState = state.state; const labels = { pending: '等待扫码确认', consumed: '配对完成', revoked: '已撤销', expired: '已过期' }; $('#pairing-state').textContent = `${labels[state.state] || state.state}${state.identity_id ? ' · 本次实际登记：' + state.identity_id : ''}`; if (state.state !== 'pending') { $('#pairing-qr').removeAttribute('src'); $('#pairing-qr').hidden = true; delivery.grant.secret = ''; $('#pairing-download').disabled = true; $('#pairing-cancel').disabled = true; } if (state.state === 'consumed' && state.identity_id) { pairedIdentity = state.identity_id; $('#pairing-apply').hidden = false; } }
-$('#login-form').addEventListener('submit', event => { event.preventDefault(); action($('#login-button'), async () => { const body = { username: $('#username').value, password: $('#password').value }; if (!configured) body.token = $('#setup-token').value; const session = await api(configured ? '/session/login' : '/session/setup', body); csrf = session.csrf; authenticated = true; configured = true; $('#password').value = ''; $('#setup-token').value = ''; loggedIn(); notice('已登录本机管理'); }); });
-function loggedIn() { $('#login-panel').hidden = true; $('#management').hidden = false; $('#logout').hidden = false; $('#password-panel').hidden = configured; }
-$('#password-form').addEventListener('submit', event => { event.preventDefault(); action(event.submitter, async () => { const session = await api('/session/setup', { username: $('#new-username').value, password: $('#new-password').value }); csrf = session.csrf; configured = true; $('#new-password').value = ''; $('#password-panel').hidden = true; notice('管理账户已设置。'); }); });
-$('#logout').addEventListener('click', () => action($('#logout'), async () => { await api('/session/logout', {}); showLogin(); notice('已退出管理'); }));
+$('#session-retry').addEventListener('click', () => action($('#session-retry'), async () => { await ensureLocalSession(); await refresh(); notice('已连接本机管理'); }));
 $('#refresh').addEventListener('click', () => action($('#refresh'), async () => { await refresh(); notice('管理状态已刷新'); }));
 $('#registration-form').addEventListener('submit', event => { event.preventDefault(); action(event.submitter, async () => { const modules = selectedModules('#registration-modules'); if (!modules.length) throw new Error('请至少勾选一个本机可用模块'); await job('/enrollment-requests', { name: $('#registration-name').value, relay_url: $('#relay-url').value, modules, admin_url: $('#relay-admin-url').value.trim() }); notice('签名申请已保存在本机。请在配置列表提交到 Relay，或下载公有申请文件供管理员审核。'); }); });
 $('#legacy-form').addEventListener('submit', event => { event.preventDefault(); action(event.submitter, async () => { await job('/profiles/import', { profile: $('#legacy-profile').value, name: $('#legacy-name').value }); notice('旧配置已加入管理列表，身份未被重新登记。'); }); });
@@ -86,7 +107,7 @@ $('#pairing-apply').addEventListener('click', () => action($('#pairing-apply'), 
 $('#phones-refresh').addEventListener('click', () => action($('#phones-refresh'), readPhones));
 $('#routes-refresh').addEventListener('click', () => action($('#routes-refresh'), readRoutes));
 setInterval(() => { updateExpiry(); if (authenticated && !busy && !document.hidden) { if (delivery && invitationState === 'pending') void action($('#pairing-check'), () => checkPairing(true)); else void refresh().catch(e => notice(e.message)); } }, 5000);
-(async () => { const hash = new URLSearchParams(location.hash.slice(1)), ticket = hash.get('remote-ticket'); if (location.hash) history.replaceState(null, '', location.pathname); try { if (ticket) await api('/session/activate', { ticket }); const session = await api('/session/status'); configured = session.configured; authenticated = session.authenticated; csrf = session.csrf || ''; if (authenticated) { loggedIn(); await refresh(); } else showLogin(); } catch (e) { showLogin(); notice(e.message); } })();
+(async () => { if (location.hash) history.replaceState(null, '', location.pathname); try { await ensureLocalSession(); await refresh(); } catch (e) { showUnavailable(); notice(e.message); } })();
 
 async function readInvitations() { const profile = $('#pairing-profile').value; if (!profile) throw new Error('请选择已登记的 Mac 配置'); const result = await job('/pairings/query', { profile }); if (profile !== $('#pairing-profile').value) return; const box = $('#invitations'); box.replaceChildren(); for (const item of result.pairings) { const row = node('div', undefined, 'phone'); const labels = { pending: '待扫码', consumed: '已消费', revoked: '已撤销', expired: '已过期' }; row.append(node('strong', `${item.name || '未命名邀请'} · ${labels[item.state] || item.state}`), node('p', item.id, 'mono'), node('p', `创建：${date(item.created_at)} · 到期：${date(item.expires_at)}`)); for (const module of item.modules) row.append(node('small', moduleLabel(module))); if (item.identity_id) row.append(node('p', '此邀请实际登记：' + item.identity_id, 'mono')); if (item.state === 'pending') row.append(button('撤销这个邀请', async () => { if (!await confirmAction(`撤销邀请 ${item.id}？对应的二维码和文件会失效。`)) return; await job(`/pairings/${encodeURIComponent(item.id)}/actions`, { profile, action: 'revoke' }); await readInvitations(); notice('邀请已撤销'); }, true)); box.append(row); } if (!result.pairings.length) box.append(node('p', '暂无已签发邀请')); }
 $('#invitations-refresh').addEventListener('click', () => action($('#invitations-refresh'), readInvitations));

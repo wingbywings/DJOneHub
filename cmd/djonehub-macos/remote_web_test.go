@@ -129,11 +129,7 @@ func newWebFixtureAt(t *testing.T, origin string) *webFixture {
 		return &remoteHubService{Manager: manager}, nil
 	}
 	f.handler = f.hub.routes(webAssets)
-	ticket, err := m.auth.IssueTicket()
-	if err != nil {
-		t.Fatal(err)
-	}
-	response := f.request("POST", remoteWebAPI+"/session/activate", map[string]string{"ticket": strings.Split(ticket, "remote-ticket=")[1]}, false)
+	response := f.request("POST", remoteWebAPI+"/session/local", map[string]string{}, false)
 	if response.Code != 200 {
 		t.Fatal(response.Body.String())
 	}
@@ -475,7 +471,7 @@ func TestRemoteWebNativeTicketAndAssets(t *testing.T) {
 	native := httptest.NewServer(nativeControlHandler(strings.Repeat("a", 64), func(string) (*app, bool) { return nil, false }, events))
 	defer native.Close()
 	link, err := requestWebTicket(context.Background(), nativeBootstrap{1, native.URL, strings.Repeat("a", 64)})
-	if err != nil || !strings.HasPrefix(link, f.origin+"/remote/#remote-ticket=") {
+	if err != nil || link != f.origin+"/remote/" {
 		t.Fatal("native activation")
 	}
 	_, err = requestWebTicket(context.Background(), nativeBootstrap{1, native.URL, strings.Repeat("b", 64)})
@@ -535,10 +531,6 @@ func TestRemoteWebBrowserPreview(t *testing.T) {
 	f.ready("home-demo", []string{"module_a", "module_b"})
 	f.work("/connection", map[string]any{"profile": "home-demo", "auto_start": true})
 	_, _ = f.phone("home-demo", []string{"module_a"})
-	account := f.request("POST", remoteWebAPI+"/session/setup", map[string]string{"username": "preview", "password": "preview-test-password"}, true)
-	if account.Code != 200 {
-		t.Fatal(account.Code)
-	}
 	server := &http.Server{Handler: f.handler, ReadHeaderTimeout: 3 * time.Second}
 	go server.Serve(listener)
 	defer server.Close()
@@ -637,10 +629,6 @@ func TestRemoteWebDualBrowserPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer phoneSignal.Close()
-	account := f.request("POST", remoteWebAPI+"/session/setup", map[string]string{"username": "preview", "password": "preview-test-password"}, true)
-	if account.Code != 200 {
-		t.Fatal(account.Code)
-	}
 	directory := t.TempDir()
 	adminOrigin := "http://" + adminListener.Addr().String()
 	auth, err := webadmin.Open(webadmin.Options{Directory: filepath.Join(directory, "admin"), Origin: adminOrigin, Tenant: "tenant", CookieName: "fixture_dual_admin", LoopbackOnly: true})

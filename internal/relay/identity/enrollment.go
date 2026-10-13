@@ -172,7 +172,12 @@ func (s *Store) AdminEnrollmentRequests(ctx context.Context, tenant string) ([]E
 	if !validID(tenant) {
 		return nil, ErrInvalid
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT id FROM enrollment_requests WHERE tenant='' OR tenant=? ORDER BY rowid DESC LIMIT 256", tenant)
+	tx, err := s.transaction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, "SELECT id FROM enrollment_requests WHERE tenant='' OR tenant=? ORDER BY rowid DESC LIMIT 256", tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -192,13 +197,13 @@ func (s *Store) AdminEnrollmentRequests(ctx context.Context, tenant string) ([]E
 	}
 	result := []EnrollmentRequestStatus{}
 	for _, id := range ids {
-		r, err := requestStatus(ctx, s.db, id, s.now())
+		r, err := requestStatus(ctx, tx, id, s.now())
 		if err != nil {
 			return nil, err
 		}
 		result = append(result, r)
 	}
-	return result, nil
+	return result, tx.Commit()
 }
 func (s *Store) AdminApproveEnrollment(ctx context.Context, tenant, id string, modules []string) error {
 	if !validID(tenant) || !validID(id) {
@@ -305,6 +310,75 @@ func (s *Store) AdminRejectEnrollment(ctx context.Context, tenant, id string) er
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE grant_metadata SET revoked=1 WHERE request_id=?", id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AdminDeleteEnrollment removes the request and every associated authorization.
+// Registered identities are independent of these records and remain valid.
+func (s *Store) AdminDeleteEnrollment(ctx context.Context, tenant, id string) (int64, error) {
+	if !validID(tenant) || !validID(id) {
+		return 0, ErrInvalid
+	}
+	tx, err := s.transaction(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	r, err := requestStatus(ctx, tx, id, s.now())
+	if err != nil {
+		return 0, err
+	}
+	if r.Tenant != "" && r.Tenant != tenant {
+		return 0, ErrUnauthorized
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM grants WHERE id IN (SELECT id FROM grant_metadata WHERE request_id=?)", id); err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM grant_metadata WHERE request_id=?", id)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM enrollment_requests WHERE id=?", id); err != nil {
+		return 0, err
+	}
+	return count, tx.Commit()
+}
+
+// AdminDeleteEnrollmentAuthorization deletes one file's server-side grant;
+// possession of a previously downloaded copy no longer permits enrollment.
+func (s *Store) AdminDeleteEnrollmentAuthorization(ctx context.Context, tenant, id, grantID string) error {
+	if !validID(tenant) || !validID(id) || !validID(grantID) {
+		return ErrInvalid
+	}
+	tx, err := s.transaction(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	r, err := requestStatus(ctx, tx, id, s.now())
+	if err != nil {
+		return err
+	}
+	if r.Tenant != tenant {
+		return ErrUnauthorized
+	}
+	var count int
+	if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM grant_metadata WHERE id=? AND request_id=? AND tenant=? AND kind='enrollment'", grantID, id, tenant).Scan(&count); err != nil {
+		return err
+	}
+	if count != 1 {
+		return ErrUnauthorized
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM grants WHERE id=?", grantID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, "DELETE FROM grant_metadata WHERE id=?", grantID); err != nil {
 		return err
 	}
 	return tx.Commit()

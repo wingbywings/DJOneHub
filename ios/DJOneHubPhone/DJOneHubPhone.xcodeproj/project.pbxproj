@@ -7,17 +7,25 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		01CABBB38A0AA6B811983984 /* PhoneRecentsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B94D550A2529FCA9BAB754F /* PhoneRecentsView.swift */; };
+		0E1E4F8B4062A01A239E80F5 /* PhoneTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD7771AF9D9B1A1DDDE6A70B /* PhoneTheme.swift */; };
 		18858716DE2D02D5918AEBAA /* PhoneRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = 150FB4D0737B5CA057C34C3C /* PhoneRuntime.swift */; };
+		1A88F81019D59774E7FA9FFE /* PhoneSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A4EB10DF3BD19EB3F67F1 /* PhoneSettingsView.swift */; };
 		32766E9F353B49A04735FB22 /* PhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */; };
 		42E67618ACE4A84676F0199D /* PhoneMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */; };
+		48C873F64E7257BF9993F168 /* PhoneCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 413207D3AF16D412DE40968F /* PhoneCallView.swift */; };
 		832755465506D5E3BEF76CB1 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 7936BDEAAC3A0CDE110DE896 /* WebRTC */; };
 		89FBAFC337F14D81F6D68230 /* Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65FC78B3625FC45CEB39F5DE /* Services.swift */; };
+		A44418CC949C0C23763112F8 /* PhoneContacts.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2F6476DBD07ABBAAF64800E /* PhoneContacts.swift */; };
 		A4CA541523A8697FF94B30BD /* PairingScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CB16526F65A51DBC8D1CE2D /* PairingScanner.swift */; };
 		A7A19E1E3515AA75F8600B4A /* WebRTC-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3A607F5461A58A445092533F /* WebRTC-LICENSE.txt */; };
 		B4B018FFB3739CBF98A731BA /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 78CD26B5898C04868DC0E051 /* WebRTC */; };
+		BCAD571C6409EB5AD16B1186 /* PhoneHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D47B976D981AA146C968B5FF /* PhoneHomeView.swift */; };
 		BD846D8715BDE3416D9FF53F /* PhoneMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */; };
 		C204A2A74B32C71C2C3EFC30 /* DJOneHubPhoneCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5EE66CA1217CD52901D0DAE2 /* DJOneHubPhoneCore */; };
+		CE3C286BDD31295CC0526366 /* PhonePresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C6153C2CED7B462832F0357 /* PhonePresentationTests.swift */; };
 		E6485DD3419F77FEA7DCBFB9 /* DJOneHubPhoneCore in Frameworks */ = {isa = PBXBuildFile; productRef = 8D7BB9ED4D3C26764209DD7D /* DJOneHubPhoneCore */; };
+		FCA4F595A404A2484A70D142 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4631392821970D824EC86ED /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -35,12 +43,20 @@
 		34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneApp.swift; sourceTree = "<group>"; };
 		37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMediaTests.swift; sourceTree = "<group>"; };
 		3A607F5461A58A445092533F /* WebRTC-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "WebRTC-LICENSE.txt"; sourceTree = "<group>"; };
+		3B94D550A2529FCA9BAB754F /* PhoneRecentsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneRecentsView.swift; sourceTree = "<group>"; };
 		3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMedia.swift; sourceTree = "<group>"; };
+		413207D3AF16D412DE40968F /* PhoneCallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneCallView.swift; sourceTree = "<group>"; };
+		496A4EB10DF3BD19EB3F67F1 /* PhoneSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSettingsView.swift; sourceTree = "<group>"; };
 		4CB16526F65A51DBC8D1CE2D /* PairingScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScanner.swift; sourceTree = "<group>"; };
 		65FC78B3625FC45CEB39F5DE /* Services.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services.swift; sourceTree = "<group>"; };
 		95FEF65866ED052FD351E7C4 /* DJOneHubPhoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DJOneHubPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9B5A7B562C2DE8B64C83ACDE /* DJOneHubPhoneCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DJOneHubPhoneCore; path = ../../shared/DJOneHubPhoneCore; sourceTree = SOURCE_ROOT; };
-		AEE37E045423FBAFE9E531E5 /* DJOneHubPhone.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = DJOneHubPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		9C6153C2CED7B462832F0357 /* PhonePresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePresentationTests.swift; sourceTree = "<group>"; };
+		AEE37E045423FBAFE9E531E5 /* DJOneHubPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DJOneHubPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D47B976D981AA146C968B5FF /* PhoneHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneHomeView.swift; sourceTree = "<group>"; };
+		DD7771AF9D9B1A1DDDE6A70B /* PhoneTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneTheme.swift; sourceTree = "<group>"; };
+		F2F6476DBD07ABBAAF64800E /* PhoneContacts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneContacts.swift; sourceTree = "<group>"; };
+		E4631392821970D824EC86ED /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -68,6 +84,7 @@
 		38BF3A26E942D751339F56BA /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				E4631392821970D824EC86ED /* Assets.xcassets */,
 				3A607F5461A58A445092533F /* WebRTC-LICENSE.txt */,
 			);
 			path = Resources;
@@ -77,6 +94,7 @@
 			isa = PBXGroup;
 			children = (
 				37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */,
+				9C6153C2CED7B462832F0357 /* PhonePresentationTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -95,8 +113,14 @@
 			children = (
 				4CB16526F65A51DBC8D1CE2D /* PairingScanner.swift */,
 				34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */,
+				413207D3AF16D412DE40968F /* PhoneCallView.swift */,
+				F2F6476DBD07ABBAAF64800E /* PhoneContacts.swift */,
+				D47B976D981AA146C968B5FF /* PhoneHomeView.swift */,
 				3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */,
+				3B94D550A2529FCA9BAB754F /* PhoneRecentsView.swift */,
 				150FB4D0737B5CA057C34C3C /* PhoneRuntime.swift */,
+				496A4EB10DF3BD19EB3F67F1 /* PhoneSettingsView.swift */,
+				DD7771AF9D9B1A1DDDE6A70B /* PhoneTheme.swift */,
 				65FC78B3625FC45CEB39F5DE /* Services.swift */,
 			);
 			path = Sources;
@@ -213,6 +237,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FCA4F595A404A2484A70D142 /* Assets.xcassets in Resources */,
 				A7A19E1E3515AA75F8600B4A /* WebRTC-LICENSE.txt in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -225,6 +250,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BD846D8715BDE3416D9FF53F /* PhoneMediaTests.swift in Sources */,
+				CE3C286BDD31295CC0526366 /* PhonePresentationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -234,8 +260,14 @@
 			files = (
 				A4CA541523A8697FF94B30BD /* PairingScanner.swift in Sources */,
 				32766E9F353B49A04735FB22 /* PhoneApp.swift in Sources */,
+				48C873F64E7257BF9993F168 /* PhoneCallView.swift in Sources */,
+				A44418CC949C0C23763112F8 /* PhoneContacts.swift in Sources */,
+				BCAD571C6409EB5AD16B1186 /* PhoneHomeView.swift in Sources */,
 				42E67618ACE4A84676F0199D /* PhoneMedia.swift in Sources */,
+				01CABBB38A0AA6B811983984 /* PhoneRecentsView.swift in Sources */,
 				18858716DE2D02D5918AEBAA /* PhoneRuntime.swift in Sources */,
+				1A88F81019D59774E7FA9FFE /* PhoneSettingsView.swift in Sources */,
+				0E1E4F8B4062A01A239E80F5 /* PhoneTheme.swift in Sources */,
 				89FBAFC337F14D81F6D68230 /* Services.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -314,13 +346,15 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = DJOneHubPhone.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8AHAFH9VTZ;
 				DJONEHUB_APNS_ENTITLEMENT = development;
 				DJONEHUB_APNS_ENVIRONMENT = sandbox;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = DJOneHub;
+				INFOPLIST_KEY_CFBundleDisplayName = "DJ电话通";
 				INFOPLIST_KEY_NSCameraUsageDescription = "扫描 Mac 上的 DJOneHub 配对二维码。";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "与同一网络中的 DJOneHub 建立通话音频连接。";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "接听 DJOneHub 转接的电话时需要使用麦克风。";
@@ -330,6 +364,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.oops.djonehub;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -372,13 +407,15 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = NO;
 				CODE_SIGN_ENTITLEMENTS = DJOneHubPhone.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 8AHAFH9VTZ;
 				DJONEHUB_APNS_ENTITLEMENT = production;
 				DJONEHUB_APNS_ENVIRONMENT = production;
 				INFOPLIST_FILE = Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = DJOneHub;
+				INFOPLIST_KEY_CFBundleDisplayName = "DJ电话通";
 				INFOPLIST_KEY_NSCameraUsageDescription = "扫描 Mac 上的 DJOneHub 配对二维码。";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "与同一网络中的 DJOneHub 建立通话音频连接。";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "接听 DJOneHub 转接的电话时需要使用麦克风。";
@@ -388,6 +425,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.oops.djonehub;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;

@@ -54,4 +54,20 @@ func TestManagementAddressRequiresHTTPSOriginAndSurvivesRefresh(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"admin_url":"https://admin.test"`) {
 		t.Fatal("management address lost on refresh")
 	}
+	for _, address := range []string{"https://oops.work/relay-admin/", "https://oops.work/relay-admin", "https://admin.test/admin/", "https://admin.test/"} {
+		j = f.work("/profiles/owner/actions", map[string]string{"action": "admin_url", "admin_url": address})
+		if j.State != "completed" {
+			t.Fatal("supported management path rejected", address, j.Error)
+		}
+		f.work("/profiles/owner/actions", map[string]string{"action": "refresh"})
+		w = f.request("GET", remoteWebAPI+"/profiles", nil, true)
+		if !strings.Contains(w.Body.String(), `"admin_url":"`+address+`"`) {
+			t.Fatal("path lost on refresh")
+		}
+	}
+	for _, address := range []string{"https://oops.work/relay-admin/?token=1", "https://oops.work/relay-admin/#secret", "https://oops.work/%72elay-admin/", "https://oops.work/relay-admin/../v1/", "https://user@oops.work/relay-admin/"} {
+		if remoteAdminAddress(address) {
+			t.Fatal("unsafe management path accepted", address)
+		}
+	}
 }

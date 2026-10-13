@@ -7,7 +7,15 @@ import tarfile
 root = Path(__file__).resolve().parent.parent
 output = root / "dist/djonehub-relay-apns-source.tar.gz"
 entries = ["go.mod", "go.sum", "cmd/djonehub-relay", "cmd/djonehub-relay-admin", "internal", "pkg", "third_party",
-           "deploy/remote-call", "scripts/upgrade-relay-apns.sh",
+           "deploy/remote-call", "scripts/upgrade-relay-apns.sh", "scripts/install-relay-centos8.sh", "scripts/refresh-relay-turn-cert.sh",
+           "docs/DEPLOYMENT_GUIDE.md",
+           "docs/RELAY_INTEGRATED_ADMIN_DEPLOY.md", "docs/remote-relay-integrated-batch.md",
+           "docs/remote-relay-delete-revoked-batch.md",
+           "docs/remote-relay-management-cleanup-batch.md",
+           "docs/remote-web-local-no-password-batch.md",
+           "docs/remote-module-names-batch.md",
+           "docs/remote-callkit-module-name-display.md",
+           "docs/remote-iphone-auto-connect.md",
            "docs/REMOTE_APNS_UPGRADE.md", "docs/REMOTE_RELAY_WEB_ADMIN_DEPLOY.md", "docs/REMOTE_OPERATIONS_GUIDE.md",
            "docs/REMOTE_WEB_PAIRING_PLAN.md", "docs/REMOTE_WEB_OPERATIONS_GUIDE.md", "docs/remote-web-first-batch.md", "docs/remote-web-second-batch.md", "docs/remote-web-browser-acceptance.md", "docs/remote-web-display-batch.md", "docs/remote-calls-thirteenth-batch.md"]
 files = []

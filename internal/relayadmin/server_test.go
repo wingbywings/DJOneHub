@@ -136,6 +136,18 @@ func TestBrowserApprovalDownloadRegistrationAndManagement(t *testing.T) {
 	if _, err = f.store.Authenticate(context.Background(), tokens.AccessToken); err == nil {
 		t.Fatal("revoked access valid")
 	}
+	w = f.request("POST", "/admin/api/identities/"+tokens.Principal.ID+"/delete", []byte(`{}`), true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	requests, err := f.store.AdminEnrollmentRequests(context.Background(), "home")
+	if err != nil || len(requests) != 1 || requests[0].State != "completed" {
+		t.Fatal("completed enrollment history lost", requests, err)
+	}
+	w = f.request("POST", "/admin/api/requests/"+r.ID+"/authorization", []byte(`{}`), true)
+	if w.Code != 400 {
+		t.Fatal("deletion reopened a consumed authorization", w.Code)
+	}
 }
 func TestManagementAuthorizationAndNativeOriginStaySeparate(t *testing.T) {
 	f := adminFixture(t)
@@ -162,6 +174,78 @@ func TestManagementAuthorizationAndNativeOriginStaySeparate(t *testing.T) {
 	native.ServeHTTP(w, request)
 	if w.Code != 403 {
 		t.Fatal("browser gained native access", w.Code)
+	}
+}
+
+func TestDeleteRevokedIdentityRequiresScopeSessionAndAudit(t *testing.T) {
+	f := adminFixture(t)
+	ctx := context.Background()
+	g, err := f.store.ProvisionEnrollment(ctx, "home", []string{"module-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, key, _ := ed25519.GenerateKey(nil)
+	proof := identity.GrantProof{ID: g.ID, Secret: g.Secret, PublicKey: pub}
+	proof.Signature = ed25519.Sign(key, identity.GrantMessage("enrollment", proof))
+	tokens, err := f.store.Enroll(ctx, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/admin/api/identities/" + tokens.Principal.ID + "/delete"
+	if w := f.request("POST", path, []byte(`{}`), false); w.Code != 401 {
+		t.Fatal("delete without session", w.Code)
+	}
+	if w := f.request("POST", path, []byte(`{}`), true); w.Code != 400 {
+		t.Fatal("delete active identity", w.Code, w.Body.String())
+	}
+	if err = f.store.AdminRevokeTenant(ctx, "home", tokens.Principal.ID); err != nil {
+		t.Fatal(err)
+	}
+	saved := f.csrf
+	f.csrf = "wrong"
+	if w := f.request("POST", path, []byte(`{}`), true); w.Code != 403 {
+		t.Fatal("delete without CSRF", w.Code)
+	}
+	f.csrf = saved
+	w := f.request("POST", path, []byte(`{}`), true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"deleted_count":1`) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	w = f.request("GET", "/admin/api/identities", nil, true)
+	if w.Code != 200 || strings.Contains(w.Body.String(), tokens.Principal.ID) {
+		t.Fatal("deleted identity still listed", w.Code, w.Body.String())
+	}
+	w = f.request("GET", "/admin/api/audit", nil, true)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "delete_revoked_identity") || !strings.Contains(w.Body.String(), tokens.Principal.ID) {
+		t.Fatal("deletion audit missing", w.Code, w.Body.String())
+	}
+}
+
+func TestUnavailableAuditPreventsIdentityDeletion(t *testing.T) {
+	f := adminFixture(t)
+	ctx := context.Background()
+	g, err := f.store.ProvisionEnrollment(ctx, "home", []string{"module-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, key, _ := ed25519.GenerateKey(nil)
+	proof := identity.GrantProof{ID: g.ID, Secret: g.Secret, PublicKey: pub}
+	proof.Signature = ed25519.Sign(key, identity.GrantMessage("enrollment", proof))
+	tokens, err := f.store.Enroll(ctx, proof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.store.AdminRevokeTenant(ctx, "home", tokens.Principal.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.server.audit.db.Close()
+	w := f.request("POST", "/admin/api/identities/"+tokens.Principal.ID+"/delete", []byte(`{}`), true)
+	if w.Code != 503 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	items, err := f.store.AdminIdentities(ctx, "home")
+	if err != nil || len(items) != 1 {
+		t.Fatal("delete proceeded without audit", items, err)
 	}
 }
 func TestFailedAuditDoesNotApprove(t *testing.T) {

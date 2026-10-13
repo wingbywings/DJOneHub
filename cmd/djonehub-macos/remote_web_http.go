@@ -12,11 +12,26 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"slices"
 	"time"
 )
 
 const remoteWebAPI = "/api/remote-management"
+
+// Keep legacy origin-only values while permitting the two supported UI paths.
+// No arbitrary redirect target, userinfo, query, fragment or encoded path.
+func remoteAdminAddress(value string) bool {
+	u, err := url.Parse(value)
+	if err != nil || u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return false
+	}
+	if u.Path != "" && u.Path != "/" && u.Path != "/admin" && u.Path != "/admin/" && u.Path != "/relay-admin" && u.Path != "/relay-admin/" {
+		return false
+	}
+	u.Path = ""
+	return identity.HTTPSOrigin(u.String())
+}
 
 func webRead(w http.ResponseWriter, r *http.Request, out any) bool {
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16384))
@@ -105,7 +120,7 @@ func (m *remoteWebManager) register(mux *http.ServeMux) {
 		if !webRead(w, r, &body) {
 			return
 		}
-		if body.AdminURL != "" && !identity.HTTPSOrigin(body.AdminURL) {
+		if body.AdminURL != "" && !remoteAdminAddress(body.AdminURL) {
 			writeJSON(w, 400, map[string]string{"error": "invalid_management_state"})
 			return
 		}
@@ -149,7 +164,7 @@ func (m *remoteWebManager) register(mux *http.ServeMux) {
 			}
 			switch body.Action {
 			case "admin_url":
-				if body.AdminURL != "" && !identity.HTTPSOrigin(body.AdminURL) {
+				if body.AdminURL != "" && !remoteAdminAddress(body.AdminURL) {
 					return nil, relayprofile.ErrInvalid
 				}
 				entry.AdminURL = body.AdminURL

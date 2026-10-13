@@ -54,8 +54,8 @@ func (a *auditStore) finish(parent context.Context, id int64, result string) err
 	_, err := a.db.ExecContext(ctx, "UPDATE events SET result=? WHERE id=?", result, id)
 	return err
 }
-func (a *auditStore) list(ctx context.Context) ([]auditEvent, error) {
-	rows, err := a.db.QueryContext(ctx, "SELECT id,at,username,tenant,action,object_id,result FROM events ORDER BY id DESC LIMIT 256")
+func (a *auditStore) list(ctx context.Context, tenant string) ([]auditEvent, error) {
+	rows, err := a.db.QueryContext(ctx, "SELECT id,at,username,tenant,action,object_id,result FROM events WHERE tenant=? ORDER BY id DESC LIMIT 256", tenant)
 	if err != nil {
 		return nil, err
 	}
@@ -71,4 +71,23 @@ func (a *auditStore) list(ctx context.Context) ([]auditEvent, error) {
 		result = append(result, event)
 	}
 	return result, rows.Err()
+}
+
+// Preserve pending intents: another request may still need to finish them, or
+// they may represent an operation whose result needs manual reconciliation.
+func (a *auditStore) clearCompleted(ctx context.Context, tenant string) (int64, error) {
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "DELETE FROM events WHERE tenant=? AND result IN ('success','failed')", tenant)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return count, tx.Commit()
 }

@@ -73,3 +73,16 @@ func (c *Client) NameManaged(ctx context.Context, access, kind, id, name string)
 	}
 	return nil
 }
+
+func (c *Client) PublishModuleNames(ctx context.Context, access string, modules []identity.ModuleChoice) error {
+	var result struct {
+		Updated bool `json:"updated"`
+	}
+	if err := c.request(ctx, http.MethodPut, "/v1/module-names", access, map[string]any{"modules": modules}, &result); err != nil {
+		return err
+	}
+	if !result.Updated {
+		return ErrRequest
+	}
+	return nil
+}

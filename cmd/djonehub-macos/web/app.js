@@ -742,7 +742,7 @@ let remoteValidPhones = [];
 async function managementJob(path, body) {
   const response = await fetch('/api/remote-management' + path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': remoteManagementCSRF }, body: JSON.stringify(body) });
   const initial = await response.json();
-  if (!response.ok) throw new Error(initial.error === 'management_busy' ? '另一项远程管理操作仍在进行，请稍后重读' : '请打开远程接听与配对页登录并核对授权');
+  if (!response.ok) throw new Error(initial.error === 'management_busy' ? '另一项远程管理操作仍在进行，请稍后重读' : '请在远程接听与配对页核对本机会话和授权');
   const deadline = Date.now() + 125000;
   while (Date.now() < deadline) {
     const reply = await fetch('/api/remote-management/jobs/' + encodeURIComponent(initial.id), { credentials: 'same-origin' });
@@ -776,9 +776,13 @@ async function loadRemoteSettings() {
     renderRemotePhones([], config.target_installation_id);
     $("#remote-timeout").value = config.ring_timeout_seconds;
     $("#remote-display").value = config.caller_display;
-    const session = await api('/api/remote-management/session/status');
+    let session = await api('/api/remote-management/session/status');
     if (device !== activeDeviceID || attempt !== remoteLoadID) return;
-    if (!session.authenticated) { $('#remote-status').textContent = '请先打开远程接听与配对页登录本机管理'; return; }
+    if (!session.authenticated && session.local_no_password) {
+      session = await api('/api/remote-management/session/local', { method: 'POST', body: '{}' });
+      if (device !== activeDeviceID || attempt !== remoteLoadID) return;
+    }
+    if (!session.authenticated) { $('#remote-status').textContent = '本机管理会话不可用，请打开远程接听与配对页重试'; return; }
     remoteManagementCSRF = session.csrf;
     const profiles = await api('/api/remote-management/profiles');
     if (device !== activeDeviceID || attempt !== remoteLoadID) return;

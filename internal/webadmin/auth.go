@@ -31,12 +31,13 @@ const iterations = 600000
 const lifetime = 30 * time.Minute
 
 type Options struct {
-	Directory    string
-	Origin       string
-	Tenant       string
-	CookieName   string
-	LoopbackOnly bool
-	LocalTickets bool // launcher-owned native control may issue short-lived tickets
+	Directory       string
+	Origin          string
+	Tenant          string
+	CookieName      string
+	LoopbackOnly    bool
+	LocalTickets    bool // launcher-owned native control may issue short-lived tickets
+	LocalNoPassword bool // explicit Mac-only loopback mode; never valid for HTTPS/proxied admin
 }
 type passwordRecord struct {
 	Version    int    `json:"version"`
@@ -90,6 +91,9 @@ func Open(options Options) (*Auth, error) {
 		return nil, ErrConfig
 	}
 	secure := origin.Scheme == "https"
+	if options.LocalNoPassword && (!options.LoopbackOnly || origin.Scheme != "http" || net.ParseIP(origin.Hostname()) == nil || !net.ParseIP(origin.Hostname()).IsLoopback()) {
+		return nil, ErrConfig
+	}
 	if options.LocalTickets && (!options.LoopbackOnly || origin.Scheme != "http" || net.ParseIP(origin.Hostname()) == nil || !net.ParseIP(origin.Hostname()).IsLoopback()) {
 		return nil, ErrConfig
 	}
@@ -111,6 +115,11 @@ func Open(options Options) (*Auth, error) {
 		}
 	}()
 	var record passwordRecord
+	if options.LocalNoPassword {
+		// Old password/setup files are no longer used, but remain untouched.
+		success = true
+		return a, nil
+	}
 	err = relayprofile.ReadPrivateJSON(filepath.Join(options.Directory, "account.json"), &record)
 	if err == nil {
 		if record.Version != 1 || record.Tenant != options.Tenant || !validID(record.Username) || len(record.Salt) != 32 || len(record.Hash) != 32 || record.Iterations != iterations {
@@ -162,10 +171,14 @@ func (a *Auth) Close() {
 }
 func (a *Auth) Register(mux *http.ServeMux, prefix string) {
 	mux.HandleFunc("GET "+prefix+"/status", a.status)
-	mux.HandleFunc("POST "+prefix+"/setup", a.setupAccount)
-	mux.HandleFunc("POST "+prefix+"/login", a.login)
+	if a.options.LocalNoPassword {
+		mux.HandleFunc("POST "+prefix+"/local", a.localSession)
+	} else {
+		mux.HandleFunc("POST "+prefix+"/setup", a.setupAccount)
+		mux.HandleFunc("POST "+prefix+"/login", a.login)
+	}
 	mux.Handle("POST "+prefix+"/logout", a.Require(http.HandlerFunc(a.logout)))
-	if a.options.LocalTickets {
+	if a.options.LocalTickets && !a.options.LocalNoPassword {
 		mux.HandleFunc("POST "+prefix+"/activate", a.activate)
 	}
 }
@@ -233,7 +246,7 @@ func (a *Auth) status(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s, ok := a.lookup(r)
-	body := map[string]any{"configured": a.account != nil, "authenticated": ok}
+	body := map[string]any{"configured": a.account != nil, "authenticated": ok, "local_no_password": a.options.LocalNoPassword}
 	if ok {
 		body["csrf"] = s.csrf
 		body["expires_at"] = s.expires
@@ -243,6 +256,28 @@ func (a *Auth) status(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	respond(w, http.StatusOK, body)
+}
+
+// Guard has already verified the literal loopback Host/peer and exact Origin
+// with a JSON POST. This creates browser-local session/CSRF, not Relay access.
+func (a *Auth) localSession(w http.ResponseWriter, r *http.Request) {
+	var body struct{}
+	if !decode(w, r, &body) {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || !a.options.LocalNoPassword {
+		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "local_session_unavailable"})
+		return
+	}
+	if s, ok := a.lookup(r); ok {
+		// Reuse the browser cookie so opening another tab does not invalidate
+		// the CSRF token held by existing pages.
+		respond(w, http.StatusOK, map[string]any{"authenticated": true, "csrf": s.csrf, "expires_at": s.expires})
+		return
+	}
+	a.establish(w)
 }
 func decode(w http.ResponseWriter, r *http.Request, value any) bool {
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
@@ -385,6 +420,9 @@ func (a *Auth) IssueTicket() (string, error) {
 	defer a.mu.Unlock()
 	if a.closed || !a.options.LocalTickets {
 		return "", ErrConfig
+	}
+	if a.options.LocalNoPassword {
+		return a.options.Origin + "/remote/", nil
 	}
 	for key, expiry := range a.tickets {
 		if !expiry.After(a.now()) {

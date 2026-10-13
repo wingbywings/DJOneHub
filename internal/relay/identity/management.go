@@ -266,6 +266,76 @@ func (s *Store) AdminRevokeTenant(ctx context.Context, tenant, id string) error 
 	s.notifyRevocation()
 	return nil
 }
+
+// AdminDeleteRevokedTenant removes revoked identities and their credentials.
+// A revoked Hub includes its descendants; enrollment/grant metadata is retained
+// as historical evidence, so deletion cannot make a consumed grant reusable.
+func (s *Store) AdminDeleteRevokedTenant(ctx context.Context, tenant, id string) (int64, error) {
+	if !validID(tenant) || !validID(id) {
+		return 0, ErrInvalid
+	}
+	tx, err := s.transaction(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var kind string
+	var revoked, hubRevoked bool
+	err = tx.QueryRowContext(ctx, `SELECT i.kind,i.revoked,h.revoked FROM identities i JOIN identities h ON h.id=i.hub_id WHERE i.id=? AND i.tenant=?`, id, tenant).Scan(&kind, &revoked, &hubRevoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrUnauthorized
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !revoked && !hubRevoked {
+		return 0, ErrInvalid
+	}
+	// Reject inconsistent cross-tenant descendants rather than orphan them.
+	if kind == "hub" {
+		var foreign int
+		if err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM identities WHERE hub_id=? AND tenant<>?", id, tenant).Scan(&foreign); err != nil {
+			return 0, err
+		}
+		if foreign != 0 {
+			return 0, ErrInvalid
+		}
+	}
+	where := `WHERE tenant=? AND (id=? OR (?='hub' AND hub_id=?))`
+	targets := "SELECT id FROM identities " + where
+	args := []any{tenant, id, kind, id}
+	if _, err = tx.ExecContext(ctx, "UPDATE grant_metadata SET revoked=1 WHERE consumed=0 AND hub_id IN ("+targets+")", args...); err != nil {
+		return 0, err
+	}
+	grantArgs := append(append([]any{}, args...), args...)
+	if _, err = tx.ExecContext(ctx, "DELETE FROM grants WHERE hub_id IN ("+targets+") OR id IN (SELECT id FROM grant_metadata WHERE identity_id IN ("+targets+"))", grantArgs...); err != nil {
+		return 0, err
+	}
+	// These are fixed internal table names; all user input remains bound values.
+	for _, table := range []string{"access_tokens", "refresh_used", "challenges", "push_endpoints", "identity_metadata"} {
+		column := "identity_id"
+		if table == "identity_metadata" {
+			column = "id"
+		}
+		if _, err = tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE "+column+" IN ("+targets+")", args...); err != nil {
+			return 0, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, "DELETE FROM identities "+where, args...)
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	s.notifyRevocation()
+	return count, nil
+}
+
 func (s *Store) revokeIdentities(ctx context.Context, tx *sql.Tx, id string) error {
 	if _, err := tx.ExecContext(ctx, "UPDATE identity_metadata SET revoked_at=? WHERE id IN (SELECT id FROM identities WHERE (id=? OR hub_id=?) AND revoked=0)", s.now().Unix(), id, id); err != nil {
 		return err

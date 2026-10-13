@@ -22,6 +22,53 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   private var wakeTimeout: Task<Void, Never>?
   @Published var status = "未连接"
   @Published var paired = false
+  @Published private(set) var identityReady = false
+  @Published private(set) var foregroundPaused = false
+  private var foregroundIntent = ForegroundConnectionIntent()
+  private var foregroundConnectTask: Task<Void, Never>?
+  private var connecting = false
+  var microphoneGranted: Bool { AVAudioApplication.shared.recordPermission == .granted }
+  var microphoneDenied: Bool { AVAudioApplication.shared.recordPermission == .denied }
+  var canChangeForegroundConnection: Bool {
+    identityReady && !working && callUUID == nil && (online || (pushTask == nil && !identity.operationInProgress))
+  }
+  private var foregroundConnectionBusy: Bool {
+    working || identity.operationInProgress || pushTask != nil || socket != nil || callUUID != nil || wake != nil || reconnectTask != nil
+  }
+  func foregrounded() {
+    foregroundIntent.activate()
+    requestForegroundConnection()
+  }
+  private func requestForegroundConnection() {
+    guard foregroundConnectTask == nil,
+      foregroundIntent.eligible(ready: identityReady, microphoneGranted: microphoneGranted, busy: foregroundConnectionBusy)
+    else { return }
+    let generation = foregroundIntent.generation
+    foregroundConnectTask = Task { [weak self] in
+      // Let launch-time PushKit delivery reserve its call before an idle connection.
+      try? await Task.sleep(for: .milliseconds(200))
+      guard let self else { return }
+      defer {
+        self.foregroundConnectTask = nil
+        if self.foregroundIntent.generation != generation { self.requestForegroundConnection() }
+      }
+      guard self.foregroundIntent.claim(generation: generation, ready: self.identityReady,
+        microphoneGranted: self.microphoneGranted, busy: self.foregroundConnectionBusy) else { return }
+      await self.connect()
+    }
+  }
+  func pauseForegroundConnection() {
+    guard !working, callUUID == nil else { return }
+    foregroundIntent.pause()
+    foregroundPaused = true
+    disconnect("前台连接已暂停；后台来电按开关设置接收")
+  }
+  func retryForegroundConnection() async {
+    guard canChangeForegroundConnection else { return }
+    foregroundIntent.resume()
+    foregroundPaused = false
+    await connect()
+  }
   @Published var online = false
   @Published var working = false
   @Published var installation = ""
@@ -32,6 +79,38 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   @Published var fingerprint = ""
   @Published private(set) var dialingSupported = false
   @Published private(set) var modules: [String] = []
+  @Published private(set) var moduleNames: [String: String] = [:]
+  private var moduleNamesTask: Task<Void, Never>?
+  private static let moduleNamesCacheKey = "moduleNamesCache"
+  func moduleName(for id: String) -> String {
+    ModuleLineDisplay.name(for: id, names: moduleNames, modules: modules)
+  }
+  private func restoreModuleNames(_ record: StoredIdentity?) {
+    guard let record, let principal = record.tokens?.principal,
+      let data = UserDefaults.standard.data(forKey: Self.moduleNamesCacheKey),
+      let names = try? ModuleNameCache.restore(data, relay: record.relay, principal: principal)
+    else { moduleNames = [:]; return }
+    moduleNames = names
+  }
+  private func syncModuleNames(connection id: UUID, credentials: StoredIdentity) {
+    moduleNamesTask?.cancel()
+    moduleNamesTask = Task { [weak self] in
+      while !Task.isCancelled {
+        guard let self, self.connectionID == id else { return }
+        do {
+          let names = try await self.identity.moduleNames()
+          guard !Task.isCancelled, self.connectionID == id, let principal = credentials.tokens?.principal else { return }
+          self.moduleNames = names
+          self.refreshIncomingCallerName()
+          let cache = ModuleNameCache(relay: credentials.relay, principal: principal, names: names)
+          if let data = try? JSONEncoder().encode(cache) {
+            UserDefaults.standard.set(data, forKey: Self.moduleNamesCacheKey)
+          }
+        } catch { /* Old or temporarily unavailable Relays keep the last known names. */ }
+        do { try await Task.sleep(for: .seconds(15)) } catch { return }
+      }
+    }
+  }
   @Published var selectedModule = ""
   @Published var dialNumber = ""
   @Published private(set) var outgoing = false
@@ -39,6 +118,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   private var signalingEpoch = ""
   private var activatedSession: AVAudioSession?
   @Published private(set) var callUUID: UUID?
+  private var incomingReportedUUID: UUID?
   @Published private(set) var callDisplay = ""
   @Published private(set) var callModule = ""
   @Published private(set) var callPhase = ""
@@ -144,6 +224,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     UserDefaults.standard.set(true, forKey: "voipPushEnabled")
     startPushIfEnabled()
     syncPushRegistration()
+    requestForegroundConnection()
   }
   func disablePush() async {
     guard !working, callUUID == nil else { return }
@@ -151,7 +232,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     pushTask?.cancel()
     if let task = pushTask { await task.value }
     pushTask = nil
-    defer { working = false }
+    defer { working = false; requestForegroundConnection() }
     do {
       try await identity.registerPush(environment: pushEnvironment, token: "")
       pushEnabled = false
@@ -171,6 +252,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       guard let self else { return }
       defer {
         self.pushTask = nil
+        self.requestForegroundConnection()
         if self.pushToken != token { self.syncPushRegistration() }
       }
       for attempt in 0..<3 {
@@ -207,12 +289,22 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     wakeReported = nil
     wakeRejected = false
   }
+  private func refreshIncomingCallerName() {
+    guard !outgoing, let uuid = callUUID, uuid == incomingReportedUUID,
+      callPhase != "ending", !callModule.isEmpty else { return }
+    let update = CXCallUpdate()
+    update.localizedCallerName = IncomingCaller(display: callDisplay)
+      .localizedName(moduleName: moduleName(for: callModule))
+    // Only change presentation; preserve the handle and negotiated controls.
+    provider.reportCall(with: uuid, updated: update)
+  }
   private func completeWakeHandoff() {
     guard let wake, coordinator?.binding == wake.binding, let reported = wakeReported else {
       return
     }
     let binding = wake.binding
     let rejected = wakeRejected
+    if reported && !rejected { refreshIncomingCallerName() }
     clearWake()
     if rejected {
       coordinator?.requestEnd(binding)
@@ -231,26 +323,21 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     }
     let hint = (try? JSONSerialization.data(withJSONObject: payload.dictionaryPayload))
       .flatMap { try? PushInvite.decode($0) }
+    let caller = IncomingCaller(display: hint?.signal.payload["display"]?.string)
     let uuid = hint.flatMap { UUID(uuidString: $0.binding.callUUID) } ?? UUID()
     let duplicate =
       hint.map { coordinator?.binding == $0.binding || wake?.binding == $0.binding } ?? false
-    let canStart = !duplicate && wake == nil && coordinator?.binding == nil && !working
+    let canStart = !duplicate && wake == nil && coordinator?.binding == nil && (!working || connecting)
     if canStart, let hint {
       wake = hint
       wakeReported = nil
       callUUID = uuid
-      callDisplay = "DJOneHub"
+      callDisplay = caller.display
       callModule = hint.binding.moduleID
       callPhase = "incoming"
     }
-    let update = CXCallUpdate()
-    update.remoteHandle = CXHandle(type: .generic, value: "DJOneHub")
-    update.localizedCallerName = "DJOneHub"
-    update.hasVideo = false
-    update.supportsHolding = false
-    update.supportsGrouping = false
-    update.supportsUngrouping = false
-    update.supportsDTMF = false
+    let update = incomingCallUpdate(display: caller.display,
+      moduleName: hint.map { moduleName(for: $0.binding.moduleID) })
     // Report synchronously in the PushKit callback, before Keychain, HTTP, WSS,
     // or stale-call checks. Even malformed/expired hints must be reported then ended.
     provider.reportNewIncomingCall(with: uuid, update: update) { [weak self] error in
@@ -273,7 +360,11 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
             throw PhoneError.denied
           }
           try hint.validate(principal: principal)
-          self.history.begin(id: uuid, module: hint.binding.moduleID, display: "DJOneHub", outgoing: false)
+          if error == nil {
+            self.incomingReportedUUID = uuid
+            self.refreshIncomingCallerName()
+          }
+          self.history.begin(id: uuid, module: hint.binding.moduleID, display: caller.display, outgoing: false)
           self.saveHistory()
         } catch {
           self.disconnect("后台来电已失效")
@@ -297,12 +388,14 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     do {
       let record = try identity.status()
       paired = record != nil
+      identityReady = record?.phase == "ready" && record?.tokens != nil
       installation = record?.tokens?.principal.id ?? ""
       modules = record?.tokens?.principal.modules ?? []
+      restoreModuleNames(record)
       if !modules.contains(selectedModule) { selectedModule = modules.first ?? "" }
       fingerprint = try identity.fingerprint() ?? ""
       if let r = record, r.phase != "ready" { status = "配对或凭据更新未完成，请先在 Hub 撤销此安装身份，再清理本机凭据重新配对。" }
-    } catch { status = "无法读取本机凭据" }
+    } catch { identityReady = false; status = "无法读取本机凭据" }
   }
   func forgetLocalIdentity() {
     guard !working, socket == nil else { return }
@@ -315,6 +408,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       pushToken = nil
       UserDefaults.standard.set(false, forKey: "voipPushEnabled")
       try vault.remove()
+      UserDefaults.standard.removeObject(forKey: Self.moduleNamesCacheKey)
       reloadStatus()
       status = "本机凭据已清理，可重新导入配对文件"
     } catch { status = "无法清理本机凭据" }
@@ -332,7 +426,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   func pair(data: Data) async {
     guard !working, !paired, !online, callUUID == nil else { return }
     working = true
-    defer { working = false; reloadStatus(); syncPushRegistration() }
+    defer { working = false; reloadStatus(); syncPushRegistration(); requestForegroundConnection() }
     do {
       try await identity.pair(PairingFile.parse(data))
       status = "配对完成"
@@ -341,18 +435,22 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   func connect(fromPush: Bool = false) async {
     guard !working, socket == nil else { return }
     working = true
+    connecting = true
+    if !fromPush { foregroundIntent.manualAttempt() }
     let attempt = connectionID
     let wakeBinding = wake?.binding
     defer {
+      connecting = false
       working = false
       syncPushRegistration()
+      requestForegroundConnection()
     }
     let permitted =
       fromPush
       ? AVAudioApplication.shared.recordPermission == .granted
       : await AVAudioApplication.requestRecordPermission()
     guard permitted else {
-      if fromPush { disconnect("后台接听需要先在前台授予麦克风权限") }
+      if fromPush || wake != nil { disconnect("后台接听需要先在前台授予麦克风权限") }
       status = "需要麦克风权限才能接听"
       return
     }
@@ -366,7 +464,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       installSocket(c, credentials: credentials, recovering: false)
 
     } catch {
-      if fromPush { disconnect("后台来电连接失败") } else { status = "连接失败；请检查 Relay 和配对状态" }
+      reloadStatus()
+      if fromPush || wake != nil { disconnect("后台来电连接失败") }
+      else if identityReady { status = "连接失败；可点击重新连接，或检查 Relay 和配对状态" }
     }
   }
   private func installSocket(_ c: SignalSocket, credentials: StoredIdentity,
@@ -374,6 +474,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     guard let tokens = credentials.tokens else { c.close(); disconnect("凭据无效"); return }
     reader?.cancel()
     watchdog?.cancel()
+    moduleNamesTask?.cancel()
+    moduleNamesTask = nil
     renewRequest = nil
     renewalStarted = nil
     pingStarted = nil
@@ -407,6 +509,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
         self.expiry = exp
         self.signalingEpoch = welcome.hub_epoch!
         self.online = true
+        self.syncModuleNames(connection: id, credentials: credentials)
         self.status = recovering ? "正在核对通话状态" : "在线，等待来电"
         Task { [weak self] in
           guard let origin = try? Wire.origin(credentials.relay) else { return }
@@ -590,6 +693,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       renewalStarted = now
       Task { [weak self] in
         guard let self else { return }
+        defer { self.requestForegroundConnection() }
         do {
           let record = try await self.identity.credentials(forceRefresh: true)
           guard self.connectionID == id, let tokens = record.tokens else { return }
@@ -601,8 +705,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     }
   }
   func backgrounded() {
+    foregroundIntent.deactivate()
     if coordinator?.binding == nil && wake == nil {
-      disconnect(pushEnabled ? "后台等待来电推送" : "已停止前台等待；再次打开后请连接")
+      disconnect(pushEnabled ? "后台等待来电推送" : "已停止前台连接；打开 App 后自动连接")
     }
   }
   func disconnect(_ message: String = "已断开") {
@@ -639,6 +744,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     if let uuid = callUUID { provider.reportCall(with: uuid, endedAt: Date(), reason: .failed) }
     pendingDial = nil
     callUUID = nil
+    incomingReportedUUID = nil
     callPhase = ""
     outgoing = false
     callControlPending = false
@@ -656,6 +762,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     reader = nil
     watchdog?.cancel()
     watchdog = nil
+    moduleNamesTask?.cancel()
+    moduleNamesTask = nil
     renewRequest = nil
     renewalStarted = nil
     pingStarted = nil
@@ -729,6 +837,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
             self.finishHistory("拨号启动失败")
             self.pendingDial = nil
             self.callUUID = nil
+            self.incomingReportedUUID = nil
             self.callPhase = ""
             self.outgoing = false
           }
@@ -744,14 +853,15 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   private func handle(_ effect: CallEffect) {
     switch effect {
     case .reportIncoming(let b, let display):
+      let caller = IncomingCaller(display: display)
       outgoing = false
       callUUID = UUID(uuidString: b.callUUID)
       if let id = callUUID {
-        history.begin(id: id, module: b.moduleID, display: display.isEmpty ? "DJOneHub" : display, outgoing: false)
-        history.identify(id: id, module: b.moduleID, display: display.isEmpty ? "DJOneHub" : display)
+        history.begin(id: id, module: b.moduleID, display: caller.display, outgoing: false)
+        history.identify(id: id, module: b.moduleID, display: caller.display)
         saveHistory()
       }
-      callDisplay = display.isEmpty ? "DJOneHub" : display
+      callDisplay = caller.display
       callModule = b.moduleID
       muted = false
       speaker = false
@@ -759,14 +869,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       lastCallResult = ""
       callDiagnostics.removeAll()
       recordDiagnostic("invite_received call=" + b.callUUID)
-      let update = CXCallUpdate()
-      update.remoteHandle = CXHandle(type: .generic, value: display.isEmpty ? "DJOneHub" : display)
-      update.localizedCallerName = display
-      update.hasVideo = false
-      update.supportsHolding = false
-      update.supportsGrouping = false
-      update.supportsUngrouping = false
-      update.supportsDTMF = false
+      let update = incomingCallUpdate(display: caller.display, moduleName: moduleName(for: b.moduleID))
       if wake?.binding == b {
         completeWakeHandoff()
         status = coordinator?.ending == true ? "正在挂断" : "来电"
@@ -787,6 +890,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
             self.recordDiagnostic("report_failed_" + phoneFailureCode(error))
           } else {
             self.recordDiagnostic("callkit_reported")
+            self.incomingReportedUUID = UUID(uuidString: b.callUUID)
+            self.refreshIncomingCallerName()
           }
           self.coordinator?.reported(b, success: error == nil)
         }
@@ -985,6 +1090,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       outgoing = false
       activatedSession = nil
       callUUID = nil
+      incomingReportedUUID = nil
       callPhase = ""
       callControlPending = false
       connectedAt = nil
@@ -1003,10 +1109,10 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       // After a background call ends, do not leave an idle WSS socket that iOS
       // may suspend while the Relay still mistakes it for an available phone.
       Task { [weak self] in
-        guard let self, UIApplication.shared.applicationState == .background,
-          self.coordinator?.binding == nil, self.wake == nil
+        guard let self, self.callUUID == nil, self.coordinator?.binding == nil, self.wake == nil
         else { return }
-        self.backgrounded()
+        if UIApplication.shared.applicationState == .background { self.backgrounded() }
+        else if self.foregroundPaused { self.disconnect("前台连接已暂停；后台来电按开关设置接收") }
       }
     case .disconnect(let reason):
       recordDiagnostic(reason.rawValue)
@@ -1051,6 +1157,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       finishHistory("拨号启动失败")
       pendingDial = nil
       callUUID = nil
+      incomingReportedUUID = nil
       callPhase = ""
       outgoing = false
       lastCallResult = "拨号启动失败"

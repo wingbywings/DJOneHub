@@ -9,6 +9,7 @@ import (
 
 	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/callsignal"
+	"github.com/iniwex5/vohive/internal/relay/identity"
 	"github.com/iniwex5/vohive/internal/relayclient"
 	"github.com/iniwex5/vohive/internal/relayprofile"
 	"github.com/iniwex5/vohive/internal/remotecall"
@@ -54,7 +55,7 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 	}
 	return service, err
 }
-func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, store *relayprofile.Store, incoming func(context.Context, remotehub.Connection, callsignal.Message)) (*remoteHubService, error) {
+func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, store *relayprofile.Store, incoming func(context.Context, remotehub.Connection, callsignal.Message), moduleNames ...func([]string) []identity.ModuleChoice) (*remoteHubService, error) {
 	if profile == "" || nativeFile == "" || !opus.Available() {
 		return nil, relayprofile.ErrInvalid
 	}
@@ -69,6 +70,27 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 	}
 	ready := make(chan struct{})
 	var once sync.Once
+	var accessMu sync.RWMutex
+	var access string
+	setAccess := func(value string) { accessMu.Lock(); access = value; accessMu.Unlock() }
+	refreshAccess := func(ctx context.Context) (string, error) {
+		token, err := store.RefreshAccess(ctx, profile)
+		if err == nil {
+			setAccess(token)
+		}
+		return token, err
+	}
+	startNames := func(config callsignal.ClientConfig, client *callsignal.Client) {
+		setAccess(config.AccessToken)
+		if len(moduleNames) == 0 || moduleNames[0] == nil {
+			return
+		}
+		// Use the service lifetime even when the socket resumes an active call.
+		go publishRemoteModuleNames(ctx, client.Done(), status.RelayURL,
+			relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig},
+			func() string { accessMu.RLock(); defer accessMu.RUnlock(); return access },
+			func() []identity.ModuleChoice { return moduleNames[0](status.Principal.Modules) })
+	}
 	manager := remotehub.Start(ctx, remotehub.Config{
 		RecoverCalls: remoteSignalResume,
 		Connect: func(ctx context.Context) (remotehub.Connection, error) {
@@ -92,9 +114,10 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 			if err != nil {
 				return nil, err
 			}
+			startNames(config, client)
 			return client, nil
 		},
-		Refresh:  func(ctx context.Context) (string, error) { return store.RefreshAccess(ctx, profile) },
+		Refresh:  refreshAccess,
 		Incoming: incoming,
 	})
 	return &remoteHubService{Manager: manager, activate: func() { once.Do(func() { close(ready) }) },
@@ -104,9 +127,13 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 				return nil, err
 			}
 			config.Resumption, config.Resume = true, &binding
-			return callsignal.Dial(ctx, config)
+			client, err := callsignal.Dial(ctx, config)
+			if err == nil {
+				startNames(config, client)
+			}
+			return client, err
 		},
-		refresh: func(ctx context.Context) (string, error) { return store.RefreshAccess(ctx, profile) }, ice: func(ctx context.Context, module string) (turncred.Credentials, error) {
+		refresh: refreshAccess, ice: func(ctx context.Context, module string) (turncred.Credentials, error) {
 			return store.ICE(ctx, profile, module)
 		}}, nil
 }

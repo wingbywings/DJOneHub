@@ -9,6 +9,20 @@ from upgrade_apns import BASE, APNS, backup_database, health, validate_command
 
 
 class UpgradeAPNsTests(unittest.TestCase):
+    def test_integrated_administration_flags_survive_upgrade(self):
+        options = " --public-origin https://oops.work --admin-state-dir /var/lib/djonehub-relay-admin --admin-tenant home --admin-path /relay-admin"
+        unit = validate_command("{ path=/usr/local/bin/djonehub-relay ; argv[]=" + BASE + APNS + options + " ; pid=12 }")
+        self.assertIn(options, unit)
+        for invalid in (
+            " --admin-tenant home",
+            " --public-origin https://oops.work --admin-state-dir relative --admin-tenant home",
+            " --public-origin https://oops.work --admin-state-dir /var/lib/admin --admin-tenant home --admin-path /v1",
+            " --public-origin https://oops.work --admin-state-dir /var/lib/admin --admin-tenant 'home%bad'",
+            " --public-origin https://oops.work --admin-state-dir /var/lib/../admin --admin-tenant home",
+        ):
+            with self.assertRaises(ValueError):
+                validate_command("{ path=/usr/local/bin/djonehub-relay ; argv[]=" + BASE + APNS + invalid + " ; pid=12 }")
+
     def test_existing_service_must_match_without_losing_flags(self):
         for command in (BASE, BASE + APNS, BASE + APNS + " --public-origin https://oops.work"):
             status = "{ path=/usr/local/bin/djonehub-relay ; argv[]=" + command + " ; ignore_errors=no ; pid=12 ; status=0/0 }"

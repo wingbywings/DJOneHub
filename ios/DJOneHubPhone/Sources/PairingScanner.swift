@@ -13,32 +13,41 @@ struct PairingScanner: View {
   @State private var preview: PairingFile?
   var body: some View {
     NavigationStack {
-      VStack(spacing: 16) {
-        if let preview, let data {
-          Text("确认配对服务器").font(.headline)
-          Text(preview.relay_url).textSelection(.enabled)
-          Text("授权模块：" + preview.grant.modules.joined(separator: ", "))
-          Text("有效期至：" + preview.grant.expires_at.formatted()).font(.caption)
-          Text("请与 Mac 上的服务器和模块核对后再配对。")
-          Button("确认配对") {
-            Task { await runtime.pair(data: data); dismiss() }
-          }.buttonStyle(.borderedProminent).disabled(runtime.working || runtime.paired)
-          Button("重新扫描") { self.data = nil; self.preview = nil }.disabled(runtime.working)
-        } else if permitted && phase == .active {
-          QRReader { value in
-            guard self.preview == nil, value.utf8.count <= 8192 else { return }
-            let candidate = Data(value.utf8)
-            do {
-              preview = try PairingFile.parse(candidate)
-              data = candidate
-            } catch { message = "二维码无效或已过期，请在 Mac 重新生成" }
-          } onFailure: { message = "相机不可用，请使用配对文件导入" }
-          Text(message).font(.caption)
-        } else { Text(message) }
+      ZStack {
+        AppBackground()
+        VStack(spacing: 16) {
+          if let preview, let data {
+            Image(systemName: "checkmark.shield").font(.system(size: 42)).foregroundStyle(PhoneTheme.violet)
+            Text("确认配对服务器").font(.headline)
+            Text(preview.relay_url).textSelection(.enabled)
+            Text("授权模块：" + preview.grant.modules.joined(separator: ", "))
+            Text("有效期至：" + preview.grant.expires_at.formatted()).font(.caption)
+            Text("请与 Mac 上的服务器和模块核对后再配对。")
+            Button("确认配对") {
+              Task { await runtime.pair(data: data); dismiss() }
+            }.buttonStyle(.borderedProminent).disabled(runtime.working || runtime.paired)
+            Button("重新扫描") { self.data = nil; self.preview = nil }.disabled(runtime.working)
+          } else if permitted && phase == .active {
+            QRReader { value in
+              guard self.preview == nil, value.utf8.count <= 8192 else { return }
+              let candidate = Data(value.utf8)
+              do {
+                preview = try PairingFile.parse(candidate)
+                data = candidate
+              } catch { message = "二维码无效或已过期，请在 Mac 重新生成" }
+            } onFailure: { message = "相机不可用，请使用配对文件导入" }
+              .frame(maxHeight: 400).clipShape(RoundedRectangle(cornerRadius: 28))
+            Text(message).font(.caption).foregroundStyle(PhoneTheme.secondary)
+          } else {
+            EmptyPhoneState(icon: "qrcode.viewfinder", title: "扫描 Hub 配对码", message: message)
+          }
+        }.padding(22)
       }
-      .padding().navigationTitle("扫描 Hub 配对码")
+      .foregroundStyle(PhoneTheme.ink).tint(PhoneTheme.violet).fontDesign(.rounded)
+      .navigationTitle("扫描 Hub 配对码").navigationBarTitleDisplayMode(.inline)
       .toolbar { Button("取消") { dismiss() }.disabled(runtime.working) }
     }
+    .preferredColorScheme(.light)
     .interactiveDismissDisabled(runtime.working)
     .task {
       guard DataScannerViewController.isSupported else {

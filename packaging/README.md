@@ -109,17 +109,22 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 
 ## 远程 iPhone 接听与 Web 配对
 
+Mac、Relay 和 iPhone 的源码编译、部署、签名与重启见 [三端部署指南](DEPLOYMENT_GUIDE.md)。
+
+当前推荐管理入口为 `https://oops.work/relay-admin/`，复用主站证书、与 Relay/APNs 同进程；服务器迁移见 [统一服务指南](RELAY_INTEGRATED_ADMIN_DEPLOY.md)。Mac 配置中可保存完整管理地址，既有手机配对不受管理路径变更影响。
+
 2026-10-13 / Web 配对版：完整步骤见发行包内的 [Web 操作指南](REMOTE_WEB_OPERATIONS_GUIDE.md)。
 新包已包含 WebRTC/静态 Opus，普通 `djonehub start` 同时启动 Hub 和 AudioHost，并打开
 `http://127.0.0.1:7575/remote/`。注册、授权文件导入、二维码、已配对手机与各模块目标均在 Web 操作。
 
 旧 profile 可在网页导入一次，例如 `home-xiaomi`；不覆盖 Keychain、不重新登记手机。
 选择已登记配置并保存重启选择后，后续 `djonehub start` 自动连接该配置。通话/恢复未完成时拒绝切换。
-`djonehub open` 可重新登录本机管理；直接访问页面可用自行设置的管理密码。
+`djonehub open` 重新打开本机管理；直接访问页面也无需账号密码。页面自动建立短时本机会话，写操作仍带 CSRF 与来源校验。Relay 管理保持密码登录。
 
-新增 Relay 管理站点需要独立部署。先升级 native Relay 到 schema 3，再启动管理服务；
-部署说明随包提供为 `REMOTE_RELAY_WEB_ADMIN_DEPLOY.md`。公网原生 Relay、TURN、APNs 与 iOS App
-沿用原有配置。本包不包含个人凭据，也不会自动安装或清理 iPhone App。
+推荐使用与 Relay 同进程的管理服务，配置步骤见发行包内 `RELAY_INTEGRATED_ADMIN_DEPLOY.md`。
+本包不包含个人凭据，也不会自动安装或清理 iPhone App。
+
+线路备注版需要同时升级 Relay、Mac Hub 和 iPhone App：手机连接后显示 Mac 的模块备注，改名通常约 30 秒内更新，既有配对保留。没有备注时显示 ID，同名线路附带 ID。详见 `remote-module-names-batch.md`。
 
 `djonehub start --remote-profile home-xiaomi` 保留兼容：读取旧身份、加入 Web 列表并保存重启选择。
 `remote-ui` 现在打开 Web 页，独立 Mac 配对窗口已迁出主要发行包；CLI `remote help/status/pair/revoke`
@@ -129,7 +134,7 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 macOS 更新后二进制访问原 Keychain 可能需要系统授权；后台管理任务显示进度和明确结果，超时需先核对，
 不能反复消费同一授权。iPhone 扫码/文件确认和本机最近 100 条记录保持现有行为。
 
-代码与自动化验证已完成，浏览器全流程、真实安装和通话验收仍待核对。恢复、续租和 DTMF 开关默认关闭；
+代码与自动化验证已完成，临时身份浏览器配对与管理展示验收已通过；真实安装和新版通话验收仍待核对。恢复、续租和 DTMF 开关默认关闭；
 R06 并行迁移、R07 AudioHost 故障恢复及完整弱网/真机矩阵仍未完成。
 
 ## 当前限制

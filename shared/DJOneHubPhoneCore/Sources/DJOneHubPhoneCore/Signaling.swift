@@ -247,7 +247,7 @@ public enum CallEffect {
     self.principal = principal
     self.effect = effect
   }
-  public static func dialNumber(_ raw: String) -> String? {
+  nonisolated public static func dialNumber(_ raw: String) -> String? {
     let number = raw.filter { !" -()".contains($0) }
     let digits = number.hasPrefix("+") ? String(number.dropFirst()) : number
     guard !digits.isEmpty, number.utf8.count <= 32, digits.allSatisfy({ $0 >= "0" && $0 <= "9" })

@@ -1,4 +1,5 @@
 const $ = (selector) => document.querySelector(selector);
+const adminBase = document.querySelector('meta[name="djonehub-admin-base"]').content;
 let csrf = '';
 let configured = false;
 let authenticated = false;
@@ -9,7 +10,7 @@ const selections = new Map();
 const renderSignatures = new Map();
 function changed(key, items) { const value = JSON.stringify(items); if (renderSignatures.get(key) === value) return false; renderSignatures.set(key, value); return true; }
 const errorMessages = { management_login_required: '请重新登录', login_denied: '账号或密码不正确', setup_denied: '初始化凭据无效、已过期或已使用', login_rate_limited: '尝试过于频繁，请稍后再试', username_or_password_invalid: '账号格式或密码长度不符合要求', management_scope_denied: '没有此对象的管理权限', management_state_invalid: '当前状态不允许此操作，请刷新核对', management_capacity: '待处理授权数量已达上限', management_storage_unavailable: '管理数据暂不可用，请检查服务', csrf_required: '管理会话已变化，请重新登录', enrollment_origin_mismatch: '申请的 Relay 地址与当前服务器不一致', audit_unavailable_operation_not_started: '操作记录不可用，本次操作尚未执行', operation_result_uncertain_refresh_required: '操作结果记录未完成，请刷新对象状态核对', invalid_admin_request: '申请格式无效或文件过大' };
-const actionNames = { import_request: '导入注册申请', approve_request: '批准注册申请', reject_request: '拒绝或撤销申请', issue_authorization: '签发授权文件', revoke_identity: '撤销设备身份' };
+const actionNames = { import_request: '导入注册申请', approve_request: '批准注册申请', reject_request: '拒绝或撤销申请', issue_authorization: '签发授权文件', revoke_identity: '撤销设备身份', delete_revoked_identity: '删除已撤销设备记录', delete_enrollment_request: '删除注册申请', delete_enrollment_authorization: '删除授权文件', clear_audit: '清除已完成管理记录' };
 const resultNames = { pending: '结果待核对', success: '成功', failed: '失败' };
 const states = { pending: '待审核', approved: '已批准', rejected: '已拒绝', expired: '已过期', completed: '已注册' };
 function notice(text) { $('#notice').textContent = text; }
@@ -31,7 +32,7 @@ function showLogin() {
 async function api(path, body, download = false) {
   const options = { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': csrf } };
   if (body !== undefined) { options.method = 'POST'; options.body = JSON.stringify(body); }
-  const response = await fetch('/admin/api/' + path, options);
+  const response = await fetch(adminBase + 'api/' + path, options);
   if (!response.ok) {
     if (response.status === 401) showLogin();
     const result = await response.json().catch(() => ({}));
@@ -112,7 +113,18 @@ function renderRequests(items) {
       const grant = item.authorization;
       const labels = { pending: '已签发，等待导入', consumed: '已消费', revoked: '已撤销', expired: '已过期' };
       row.append(element('p', `最新授权：${labels[grant.state] || grant.state} · 有效期至 ${date(grant.expires_at)}`));
+      actions.append(button('删除此授权', async () => {
+        if (!await confirmAction(`删除授权 ${grant.id}？未消费的下载副本将立即失效；已注册 Mac 与手机不会被撤销。这里只清理服务器记录，浏览器下载文件需自行删除。`)) return;
+        await api(`requests/${encodeURIComponent(request.id)}/authorizations/${encodeURIComponent(grant.id)}/delete`, {});
+        notice('授权记录已删除；旧文件不能再用于登记，已注册设备不受影响。');
+      }, true));
     }
+    actions.append(button('删除申请及授权', async () => {
+      if (!await confirmAction(`删除申请 ${request.name}（${request.id}）及其所有授权记录？尚未消费的下载文件将失效；已注册 Mac 与 iPhone 不受影响。操作不能恢复，管理审计保留。`)) return;
+      const result = await api(`requests/${encodeURIComponent(request.id)}/delete`, {});
+      selections.delete(request.id);
+      notice(`注册申请及 ${result.deleted_authorizations} 条授权记录已删除；已注册设备不受影响。`);
+    }, true));
     if (item.hub_id) row.append(element('p', '已登记 Hub：' + item.hub_id, 'mono'));
     row.append(actions); container.append(row);
   }
@@ -139,6 +151,11 @@ function renderIdentities(items) {
       if (!await confirmAction(`撤销 ${item.name || item.id}？${item.kind === 'hub' ? '所属 iPhone 将一起失去授权。' : ''}活动通话可能中断。`)) return;
       await api(`identities/${encodeURIComponent(item.id)}/revoke`, {}); notice('身份已撤销。请在 Mac 更新相关模块的接听目标。');
     }, true));
+    if (item.revoked) operations.append(button('删除记录', async () => {
+      if (!await confirmAction(`永久删除已撤销的 ${item.name || item.id}？${item.kind === 'hub' ? '该 Mac 及其所属已失效 iPhone 的设备记录将一并删除。' : ''}关联凭据将清理，审批历史和审计记录仍保留。此操作不能恢复；不会清理 Mac 或手机本机的配置。`)) return;
+      const result = await api(`identities/${encodeURIComponent(item.id)}/delete`, {});
+      notice(`已删除 ${result.deleted_count} 条已撤销设备记录。审批历史和审计记录已保留。`);
+    }, true));
     row.append(name, owner, scope, state, operations); container.append(row);
   }
 }
@@ -147,6 +164,11 @@ function renderAudit(items) {
   const container = $('#audit'); container.replaceChildren();
   for (const item of items) container.append(element('div', `${date(item.at)} · ${item.username} · ${actionNames[item.action] || item.action} · ${item.object_id} · ${resultNames[item.result] || item.result}`, 'audit-entry'));
   if (!items.length) container.append(element('p', '暂无管理操作'));
+}
+async function clearAudit() {
+  if (!await confirmAction('清除当前管理范围内所有已完成（成功或失败）的操作记录？不只清除当前显示的 256 条。待核对 / 正在执行的记录保留，并记录本次清除。此操作不能恢复，不改变申请、授权或设备。')) return;
+  const result = await api('audit/clear', {});
+  notice(`已清除 ${result.cleared_count} 条已完成管理记录；待核对记录和本次清除记录保留。`);
 }
 async function refresh() {
   if (!authenticated || loading) return;
@@ -173,6 +195,7 @@ $('#login-form').addEventListener('submit', async event => {
 });
 $('#logout').addEventListener('click', () => action($('#logout'), async () => { await api('session/logout', {}); showLogin(); notice('已退出'); }));
 $('#refresh').addEventListener('click', () => action($('#refresh'), async () => {}));
+$('#clear-audit').addEventListener('click', () => action($('#clear-audit'), clearAudit));
 $('#import-request').addEventListener('change', event => {
   const input = event.currentTarget;
   const file = input.files[0];

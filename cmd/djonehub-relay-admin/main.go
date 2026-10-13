@@ -20,7 +20,7 @@ import (
 	"github.com/iniwex5/vohive/internal/webadmin"
 )
 
-var buildVersion = "web-management-v2"
+var buildVersion = "web-management-v3"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -36,6 +36,7 @@ func run(args []string) error {
 	state := flags.String("state-dir", "", "existing private Relay identity state directory")
 	adminDir := flags.String("admin-state-dir", "", "separate private administration directory")
 	tenant := flags.String("tenant", "", "tenant administered by this service")
+	basePath := flags.String("base-path", "/admin", "administration URL path prefix")
 	version := flags.Bool("version", false, "print build version")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -51,6 +52,9 @@ func run(args []string) error {
 	if !identity.HTTPSOrigin(*origin) || !identity.HTTPSOrigin(*relayOrigin) {
 		return errors.New("administration and Relay HTTPS origins required")
 	}
+	if _, err := relayadmin.NormalizeBasePath(*basePath); err != nil {
+		return err
+	}
 	auth, err := webadmin.Open(webadmin.Options{Directory: *adminDir, Origin: *origin, Tenant: *tenant, CookieName: "djonehub_relay_admin", LoopbackOnly: true})
 	if err != nil {
 		return err
@@ -61,7 +65,7 @@ func run(args []string) error {
 		return err
 	}
 	defer store.Close()
-	handler, err := relayadmin.New(relayadmin.Options{Auth: auth, Identity: store, Directory: *adminDir, RelayOrigin: *relayOrigin, Build: buildVersion, RuntimeStatus: func() relaystatus.Observation {
+	handler, err := relayadmin.New(relayadmin.Options{Auth: auth, Identity: store, Directory: *adminDir, RelayOrigin: *relayOrigin, Build: buildVersion, BasePath: *basePath, RuntimeStatus: func() relaystatus.Observation {
 		return relaystatus.Read(filepath.Join(*state, relaystatus.Filename), time.Now())
 	}})
 	if err != nil {
