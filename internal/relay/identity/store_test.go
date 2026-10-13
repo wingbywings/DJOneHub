@@ -348,7 +348,7 @@ func TestExternalRevocationCancelsAuthorizationLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
-	if err := other.AdminRevoke(context.Background(), phone.Principal.ID); err != nil {
+	if err := other.AdminRevokeTenant(context.Background(), "tenant", phone.Principal.ID); err != nil {
 		t.Fatal(err)
 	}
 	select {

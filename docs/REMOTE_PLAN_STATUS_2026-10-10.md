@@ -35,7 +35,7 @@
 | R08 | 中 | **实现与自动化通过，待三端升级/真机验收**：协商式 CallKit/App 拨号键、绑定/幂等 DTMF、Hub 上行静音和单调 sequence 已实现；长静音回绕、实际 Opus 与 Relay 信令测试通过，开关默认关闭 | §7、§10；`PhoneRuntime.swift`、`callsignal/protocol.go` |
 | R09 | 中 | **实现与自动化通过，待真实故障注入**：关键阶段原子持久化、启动 CLCC 核对、未确认通话隔离及本机处理提示已接入；写盘失败不提交 ATA/ATD，只有成功空闲快照解除隔离 | §13；通话控制/会话实现与第十批身份实现 |
 | R10 | 中 | **实现与自动化通过，待宿主升级/实际负载验收**：CLCC 自适应轮询、鉴权 native 事件订阅、通知合并、断线轮询兜底已实现；稳定远程配置检查 5 秒、独立健康上报 500 ms，Go/Swift 实际互通通过 | §2、§9、§14；`calls.go`、`device_hub.go`、`HostMain.swift` |
-| R11 | 中 | **实现与自动化通过，待安装/真机验收**：Mac 原生配对管理与模块远程配置、iPhone 扫码确认和本机 100 条通话记录已接入；原生二维码实际编解码、配置跨模块隔离、Swift/iOS/Go 回归通过。首次 Hub enrollment 仍用 CLI，配对窗口由 `remote-ui` 启动 | §4、§7、§10；`DJOneHubRemote`、`PhoneApp.swift`、第二十一批 |
+| R11 | 中 | **实现与自动化通过，待安装/真机验收**：Mac 注册／配对管理已迁到 Web，模块手机下拉、邀请／身份管理、iPhone 扫码与本机记录已接入；临时配对浏览器闭环已通过。本次补齐健康、在线状态及复制／跳转，新增展示临时身份点击验证通过 | §4、§7、§10；`remote_web*`、`PhoneApp.swift`、Web 展示记录 |
 | R12 | 中 | 完整质量观测：已有候选/状态和音频计数，但缺少每秒 RTT/jitter/播放延迟/UAC 队列/码率汇总、完整事件时间线及 p95 报告；可用性状态仍带联调标记 | §15–16；媒体诊断、`remote_calls.go` |
 | R13 | 发布前 | **实现与发行包自检完成，待真实安装升级验收**：remoteopus、静态 Opus 1.6.1、profile/native-control 启动均已接入；独立包 Opus/API、库依赖、签名、许可证和 ZIP 校验通过 | §3、§17–18；发行脚本与 `packaging/djonehub` |
 | R14 | 发布前 | iOS 分发与整体发布：目前是实际 Team/Bundle 的 Debug 真机安装；production APNs、Release/分发签名及安装升级流程未见完整验收记录 | §7、§17–18；签名/推送与安装记录 |
@@ -76,3 +76,9 @@
 第二十一批实现 R11 的 Mac 配对/配置入口、iPhone 扫码和本机通话记录，见[第二十一批](remote-calls-twenty-first-batch.md)。尚未替换线上服务或安装真机；R06 并行迁移、R07 宿主恢复及部署验收继续保留。
 
 第二十一批已生成 `dist/release/DJOneHub-macOS-arm64-remote-r11-20261012.zip`，纳入当前工作区实现和新配对窗口；Opus/API、签名/依赖/许可证及 ZIP 校验通过。线上服务仍未替换，旧发行包不能代替此包做 R04–R11 升级验收。
+
+2026-10-13 开始实施用户确认的[全流程 Web 配对方案](REMOTE_WEB_PAIRING_PLAN.md)。首批完成 Relay 管理服务及身份/授权基础，见[Web 首批交付记录](remote-web-first-batch.md)。Mac 配对入口迁移、手机选择器、完整部署和验收尚未完成；此增量不关闭 R06、R07 或上述真机验收项。
+
+Web 第二批已实现 Mac 注册/授权导入、配置与连接管理、手机 QR/邀请/安装管理和模块手机下拉，更新启动器和主要发行入口，见[第二批记录](remote-web-second-batch.md)及[新版操作指南](REMOTE_WEB_OPERATIONS_GUIDE.md)。代码/自动化通过；解锁后已用临时身份完成双 Web 注册和配对管理点击验收，见[验收记录](remote-web-browser-acceptance.md)。尚未部署现有 Mac、Relay 或完成真机升级验收。旧 R11 原生窗口状态是此前版本，不再描述新发行入口。
+
+2026-10-13 补齐 Web 的 Relay 私有运行观测、WSS 在线状态和管理复制／跳转，见[展示补齐记录](remote-web-display-batch.md)。用户解锁后新增展示点击验证通过；未替换真实服务，R06/R07/R12 及正式分发状态不变。

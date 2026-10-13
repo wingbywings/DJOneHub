@@ -219,3 +219,58 @@ func TestManagerDelegatesActiveDisconnectButStillCancelsOnClose(t *testing.T) {
 	m.Close()
 	signal(t, ended)
 }
+
+func TestRetireIdleExcludesReservationsAndLateConnect(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	c := fake()
+	c.messages <- callsignal.Message{Type: "dial"}
+	var incoming atomic.Int32
+	m := Start(context.Background(), Config{Connect: func(context.Context) (Connection, error) { close(entered); <-release; return c, nil }, Refresh: refresh, Incoming: func(context.Context, Connection, callsignal.Message) { incoming.Add(1) }})
+	signal(t, entered)
+	if !m.RetireIdle() {
+		t.Fatal("connecting manager not retired")
+	}
+	if m.TryStart(context.Background(), func(context.Context, Connection) { t.Error("retired call started") }) {
+		t.Fatal("retired reservation accepted")
+	}
+	close(release)
+	m.Close()
+	if incoming.Load() != 0 || m.Snapshot().State != "stopped" {
+		t.Fatal("late dial escaped retirement")
+	}
+}
+func TestRetireIdleDoesNotCancelActiveCleanup(t *testing.T) {
+	c := fake()
+	m := Start(context.Background(), Config{Connect: func(context.Context) (Connection, error) { return c, nil }, Refresh: refresh})
+	defer m.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	running := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	state(t, m, "online")
+	if !m.TryStart(ctx, func(ctx context.Context, _ Connection) {
+		close(running)
+		select {
+		case <-ctx.Done():
+			t.Error("retirement interrupted call")
+		case <-release:
+		}
+	}) {
+		t.Fatal("reserve")
+	}
+	signal(t, running)
+	if m.RetireIdle() {
+		t.Fatal("busy retirement accepted")
+	}
+	if m.Snapshot().State != "busy" {
+		t.Fatal("call ownership lost")
+	}
+	once.Do(func() { close(release) })
+	state(t, m, "retrying")
+	if !m.RetireIdle() {
+		t.Fatal("idle cleanup complete could not retire")
+	}
+}

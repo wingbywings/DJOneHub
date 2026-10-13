@@ -63,6 +63,7 @@
       <button class="tab" data-view="esim"><span>eSIM/卡片</span><small>Profile</small></button>
       <button class="tab" data-view="network"><span>网络</span><small>4G USB</small></button>
       <button class="tab" data-view="at"><span>AT 调试</span><small>诊断</small></button>
+      <a class="tab" href="/remote/"><span>远程接听与配对</span><small>注册与手机管理</small></a>
     </nav>
 
     <section id="sms" class="view active">
@@ -166,14 +167,14 @@
         <form id="remote-form">
           <fieldset id="remote-fields" class="agent-settings-grid" disabled>
             <label class="agent-toggle"><input id="remote-enabled" type="checkbox"><span>启用此模块的远程接听</span></label>
-            <label>目标 iPhone 安装 ID<input id="remote-installation" type="text" maxlength="128" pattern="[A-Za-z0-9_-]*" autocomplete="off" placeholder="从 Mac 配对窗口或 iPhone 连接状态复制"></label>
+            <label>目标 iPhone<select id="remote-installation"><option value="">先登录远程管理并读取已配对手机</option></select></label>
             <label>响铃超时（秒）<input id="remote-timeout" type="number" min="10" max="90" required value="45"></label>
             <label>来电显示<select id="remote-display"><option value="number">电话号码</option><option value="module">仅模块</option></select></label>
             <button type="submit">保存远程接听设置</button>
           </fieldset>
         </form>
         <button id="remote-refresh" type="button" class="secondary">重新读取</button>
-        <p>在 Mac 运行 <code>djonehub remote-ui</code> 打开配对管理窗口，可生成扫码凭据、查看或撤销 iPhone 授权。此网页不接收配对密钥。</p>
+        <p>打开<a href="/remote/">远程接听与配对</a>完成 Mac 注册、手机扫码、备注和撤销。这里仅列出当前连接配置中有效且覆盖此模块的手机。</p>
       </details>
 
       <details id="voice-agent-settings-panel" class="call-submodule">

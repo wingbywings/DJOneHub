@@ -193,7 +193,7 @@ func (s *Store) initialize() error {
 	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 2 {
+	if version > 3 {
 		return errors.New("unsupported relay identity schema")
 	}
 	if version == 0 {
@@ -213,6 +213,20 @@ PRAGMA user_version=1;`)
 	}
 	if version < 2 {
 		if _, err = tx.Exec(`CREATE TABLE push_endpoints(identity_id TEXT PRIMARY KEY REFERENCES identities(id), environment TEXT NOT NULL, token TEXT NOT NULL, registration TEXT NOT NULL, updated INTEGER NOT NULL, UNIQUE(environment,token)); PRAGMA user_version=2;`); err != nil {
+			return err
+		}
+	}
+	if version < 3 {
+		if _, err = tx.Exec(`
+CREATE TABLE enrollment_requests(id TEXT PRIMARY KEY, payload TEXT NOT NULL, public_key BLOB NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','approved','rejected','completed')), tenant TEXT NOT NULL DEFAULT '', approved_modules TEXT NOT NULL DEFAULT '[]', hub_id TEXT NOT NULL DEFAULT '', expires INTEGER NOT NULL);
+CREATE TABLE grant_metadata(id TEXT PRIMARY KEY, kind TEXT NOT NULL, tenant TEXT NOT NULL, hub_id TEXT NOT NULL, modules TEXT NOT NULL, created INTEGER, expires INTEGER NOT NULL, request_id TEXT NOT NULL DEFAULT '', bound_key BLOB, revoked INTEGER NOT NULL DEFAULT 0, consumed INTEGER NOT NULL DEFAULT 0, identity_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL DEFAULT '');
+CREATE TABLE identity_metadata(id TEXT PRIMARY KEY REFERENCES identities(id), name TEXT NOT NULL DEFAULT '', created INTEGER, revoked_at INTEGER, last_authenticated INTEGER);
+INSERT INTO grant_metadata(id,kind,tenant,hub_id,modules,expires,consumed) SELECT id,kind,tenant,hub_id,modules,expires,consumed FROM grants;
+INSERT INTO identity_metadata(id) SELECT id FROM identities;
+CREATE INDEX enrollment_key ON enrollment_requests(public_key,expires);
+CREATE INDEX grant_request ON grant_metadata(request_id);
+CREATE INDEX grant_metadata_owner ON grant_metadata(hub_id,created);
+PRAGMA user_version=3;`); err != nil {
 			return err
 		}
 	}
@@ -253,7 +267,13 @@ func (s *Store) authenticate(ctx context.Context, q querier, token string) (Prin
 	return p, nil
 }
 func (s *Store) Authenticate(ctx context.Context, token string) (Principal, error) {
-	return s.authenticate(ctx, s.db, token)
+	p, err := s.authenticate(ctx, s.db, token)
+	if err == nil {
+		now := s.now().Unix()
+		// Metadata is best effort and rate-limited; it does not authorize a call.
+		_, _ = s.db.ExecContext(ctx, "UPDATE identity_metadata SET last_authenticated=? WHERE id=? AND (last_authenticated IS NULL OR last_authenticated<?)", now, p.ID, now-60)
+	}
+	return p, err
 }
 
 // ProvisionEnrollment is an offline administration operation, never an
@@ -285,7 +305,7 @@ func (s *Store) insertGrant(ctx context.Context, tx *sql.Tx, kind, tenant, hubID
 		return Grant{}, err
 	}
 	var count int
-	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM grants WHERE hub_id=? AND consumed=0", hubID).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM grants g JOIN grant_metadata m ON m.id=g.id WHERE g.hub_id=? AND g.consumed=0 AND m.revoked=0", hubID).Scan(&count); err != nil {
 		return Grant{}, err
 	}
 	if count >= 16 {
@@ -294,6 +314,9 @@ func (s *Store) insertGrant(ctx context.Context, tx *sql.Tx, kind, tenant, hubID
 	g := Grant{ID: "grant_" + randomToken(16), Secret: randomToken(32), ExpiresAt: s.now().Add(lifetime).UTC(), Modules: modules}
 	data, _ := json.Marshal(modules)
 	_, err := tx.ExecContext(ctx, "INSERT INTO grants(id,kind,tenant,hub_id,secret_hash,modules,expires) VALUES(?,?,?,?,?,?,?)", g.ID, kind, tenant, hubID, hash(g.Secret), string(data), g.ExpiresAt.Unix())
+	if err == nil {
+		_, err = tx.ExecContext(ctx, "INSERT INTO grant_metadata(id,kind,tenant,hub_id,modules,created,expires) VALUES(?,?,?,?,?,?,?)", g.ID, kind, tenant, hubID, string(data), s.now().Unix(), g.ExpiresAt.Unix())
+	}
 	return g, err
 }
 func (s *Store) CreatePairing(ctx context.Context, accessToken string, modules []string) (Grant, error) {
@@ -350,13 +373,24 @@ func (s *Store) redeem(ctx context.Context, kind string, proof GrantProof) (Toke
 		return Tokens{}, err
 	}
 	defer tx.Rollback()
-	var tenant, hubID, storedHash, modules string
-	err = tx.QueryRowContext(ctx, "SELECT tenant,hub_id,secret_hash,modules FROM grants WHERE id=? AND kind=? AND expires>? AND consumed=0", proof.ID, kind, s.now().Unix()).Scan(&tenant, &hubID, &storedHash, &modules)
+	var tenant, hubID, storedHash, modules, requestID, name string
+	var boundKey []byte
+	err = tx.QueryRowContext(ctx, "SELECT g.tenant,g.hub_id,g.secret_hash,g.modules,m.request_id,m.bound_key,m.name FROM grants g JOIN grant_metadata m ON m.id=g.id WHERE g.id=? AND g.kind=? AND g.expires>? AND g.consumed=0 AND m.revoked=0", proof.ID, kind, s.now().Unix()).Scan(&tenant, &hubID, &storedHash, &modules, &requestID, &boundKey, &name)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && !equal(storedHash, hash(proof.Secret)) {
 		return Tokens{}, ErrUnauthorized
 	}
 	if err != nil {
 		return Tokens{}, err
+	}
+	if len(boundKey) > 0 && subtle.ConstantTimeCompare(boundKey, proof.PublicKey) != 1 {
+		return Tokens{}, ErrUnauthorized
+	}
+	if requestID != "" {
+		r, err := requestStatus(ctx, tx, requestID, s.now())
+		if err != nil || r.State != "approved" || r.Tenant != tenant {
+			return Tokens{}, ErrUnauthorized
+		}
+		name = r.Request.Name
 	}
 	identityKind, prefix := "installation", "ios_"
 	if kind == "enrollment" {
@@ -395,6 +429,17 @@ func (s *Store) redeem(ctx context.Context, kind string, proof GrantProof) (Toke
 	}
 	if _, err = tx.ExecContext(ctx, "UPDATE grants SET consumed=1 WHERE id=?", proof.ID); err != nil {
 		return Tokens{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "INSERT INTO identity_metadata(id,name,created) VALUES(?,?,?)", id, name, s.now().Unix()); err != nil {
+		return Tokens{}, err
+	}
+	if _, err = tx.ExecContext(ctx, "UPDATE grant_metadata SET identity_id=?,consumed=1 WHERE id=?", id, proof.ID); err != nil {
+		return Tokens{}, err
+	}
+	if requestID != "" {
+		if _, err = tx.ExecContext(ctx, "UPDATE enrollment_requests SET state='completed',hub_id=? WHERE id=?", id, requestID); err != nil {
+			return Tokens{}, err
+		}
 	}
 	tokens, err := s.issue(ctx, tx, id, refresh, refreshExpiry)
 	if err != nil {
@@ -530,6 +575,9 @@ func (s *Store) RevokeInstallation(ctx context.Context, hubToken, installationID
 	if _, err := tx.ExecContext(ctx, "UPDATE identities SET revoked=1,version=version+1 WHERE id=? AND revoked=0", installationID); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, "UPDATE identity_metadata SET revoked_at=COALESCE(revoked_at,?) WHERE id=?", s.now().Unix(), installationID); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
@@ -589,8 +637,15 @@ func (s *Store) AdminRevoke(ctx context.Context, id string) error {
 	if !validID(id) {
 		return ErrInvalid
 	}
-	_, err := s.db.ExecContext(ctx, "UPDATE identities SET revoked=1,version=version+1 WHERE (id=? OR hub_id=?) AND revoked=0", id, id)
-	if err == nil {
+	tx, err := s.transaction(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = s.revokeIdentities(ctx, tx, id); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err == nil {
 		s.notifyRevocation()
 	}
 	return err

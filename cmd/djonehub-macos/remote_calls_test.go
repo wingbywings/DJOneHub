@@ -227,7 +227,12 @@ func TestRemoteConfigurationIsIsolatedByModule(t *testing.T) {
 	hub.devices["one"] = &managedUSBDevice{ID: "one", State: "ready", Runtime: first}
 	hub.devices["two"] = &managedUSBDevice{ID: "two", State: "ready", Runtime: second}
 	r := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(r, httptest.NewRequest(http.MethodPut, "/api/devices/one/remote-calls/config", bytes.NewBufferString(enabledRemoteBody)))
+	request := httptest.NewRequest(http.MethodPut, "/api/devices/one/remote-calls/config", bytes.NewBufferString(enabledRemoteBody))
+	request.SetPathValue("deviceID", "one")
+	request.SetPathValue("rest", "remote-calls/config")
+	// Exercise module dispatch separately from the authenticated Web boundary.
+	// Browser authentication/scope rejection is covered by remote_web_test.go.
+	hub.dispatchDeviceAPI(r, request)
 	if r.Code != http.StatusOK {
 		t.Fatal(r.Body.String())
 	}

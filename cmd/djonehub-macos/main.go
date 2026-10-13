@@ -264,6 +264,13 @@ type networkCheckResult struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "web-open" {
+		if err := runWebOpen(os.Args[2:]); err != nil {
+			log.Print("Web management activation unavailable; open the local management page and log in")
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "remote" {
 		if err := runRemoteCommand(context.Background(), os.Args[2:], os.Stdout, systemRemoteProfiles); err != nil {
 			log.Print(err)

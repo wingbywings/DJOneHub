@@ -35,13 +35,14 @@ type Vault interface {
 	Replace(string, []byte) error
 }
 type record struct {
-	Version  int             `json:"version"`
-	Name     string          `json:"name"`
-	RelayURL string          `json:"relay_url"`
-	Phase    string          `json:"phase"`
-	Seed     []byte          `json:"seed"`
-	GrantID  string          `json:"grant_id,omitempty"`
-	Tokens   identity.Tokens `json:"tokens"`
+	Request  *identity.EnrollmentRequest `json:"enrollment_request,omitempty"`
+	Version  int                         `json:"version"`
+	Name     string                      `json:"name"`
+	RelayURL string                      `json:"relay_url"`
+	Phase    string                      `json:"phase"`
+	Seed     []byte                      `json:"seed"`
+	GrantID  string                      `json:"grant_id,omitempty"`
+	Tokens   identity.Tokens             `json:"tokens"`
 }
 type Status struct {
 	Name                 string             `json:"profile"`
@@ -91,10 +92,18 @@ func (s *Store) load(name string) (record, error) {
 		return record{}, err
 	}
 	var r record
-	if len(data) > 32768 || callsignal.Decode(data, &r) != nil || r.Version != 1 || r.Name != name || len(r.Seed) != ed25519.SeedSize || (r.Phase != "ready" && r.Phase != "enrolling" && r.Phase != "refresh_pending") {
+	if len(data) > 32768 || callsignal.Decode(data, &r) != nil || r.Version != 1 || r.Name != name || len(r.Seed) != ed25519.SeedSize || (r.Phase != "ready" && r.Phase != "enrolling" && r.Phase != "refresh_pending" && r.Phase != "request_pending") {
 		return record{}, ErrInvalid
 	}
-	if r.Phase != "enrolling" && (r.Tokens.Principal.Kind != "hub" || !callsignal.ID(r.Tokens.Principal.ID) || r.Tokens.Principal.HubID != r.Tokens.Principal.ID) {
+	if r.Phase != "enrolling" && r.Phase != "request_pending" && (r.Tokens.Principal.Kind != "hub" || !callsignal.ID(r.Tokens.Principal.ID) || r.Tokens.Principal.HubID != r.Tokens.Principal.ID) {
+		return record{}, ErrInvalid
+	}
+	if r.Request != nil {
+		key := ed25519.NewKeyFromSeed(r.Seed)
+		if len(r.Request.PublicKey) != ed25519.PublicKeySize || r.Request.RelayURL != r.RelayURL || !ed25519.PublicKey(r.Request.PublicKey).Equal(key.Public()) || !ed25519.Verify(r.Request.PublicKey, identity.EnrollmentRequestMessage(*r.Request), r.Request.Signature) {
+			return record{}, ErrInvalid
+		}
+	} else if r.Phase == "request_pending" {
 		return record{}, ErrInvalid
 	}
 	api, err := relayclient.New(r.RelayURL, s.options)

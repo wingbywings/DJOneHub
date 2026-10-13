@@ -84,12 +84,15 @@ func setup(t *testing.T, wrap func(http.Handler) http.Handler) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := relay.NewServer(remote)
+	server := httptest.NewUnstartedServer(nil)
+	origin := "https://" + server.Listener.Addr().String()
+	h := relay.NewServer(remote, relay.WithEnrollmentOrigin(origin))
 	var handler http.Handler = h
 	if wrap != nil {
 		handler = wrap(h)
 	}
-	server := httptest.NewTLSServer(handler)
+	server.Config.Handler = handler
+	server.StartTLS()
 	roots := x509.NewCertPool()
 	roots.AddCert(server.Certificate())
 	options := relayclient.Options{TLSConfig: &tls.Config{RootCAs: roots}}

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/iniwex5/vohive/internal/callsignal"
 	"github.com/iniwex5/vohive/internal/relay/identity"
@@ -64,6 +65,9 @@ func (c *Client) post(ctx context.Context, path string, body, result any) error 
 	return c.request(ctx, http.MethodPost, path, "", body, result)
 }
 func (c *Client) request(ctx context.Context, method, path, token string, body, result any) error {
+	return c.requestLimit(ctx, method, path, token, body, result, 32768)
+}
+func (c *Client) requestLimit(ctx context.Context, method, path, token string, body, result any, limit int64) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return ErrRequest
@@ -84,11 +88,14 @@ func (c *Client) request(ctx context.Context, method, path, token string, body, 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return ErrRequest
 	}
-	data, err = io.ReadAll(io.LimitReader(response.Body, 32769))
-	if err != nil || len(data) > 32768 {
+	data, err = io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil || int64(len(data)) > limit {
 		return ErrRequest
 	}
-	if callsignal.Decode(data, result) != nil {
+	trimmed := bytes.TrimSpace(data)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if !utf8.Valid(data) || len(trimmed) < 2 || trimmed[0] != '{' || decoder.Decode(result) != nil || decoder.Decode(new(any)) != io.EOF {
 		return ErrRequest
 	}
 	return nil
@@ -280,4 +287,20 @@ func (c *Client) ICE(ctx context.Context, access, module string) (turncred.Crede
 		return turncred.Credentials{}, err
 	}
 	return result, nil
+}
+
+func (c *Client) SubmitEnrollmentRequest(ctx context.Context, r identity.EnrollmentRequest) (identity.EnrollmentRequestStatus, error) {
+	var result identity.EnrollmentRequestStatus
+	if r.RelayURL != c.base || r.Validate(time.Now()) != nil {
+		return result, ErrRequest
+	}
+	err := c.post(ctx, "/v1/enrollment-requests", r, &result)
+	if err == nil {
+		expected, _ := json.Marshal(r)
+		actual, _ := json.Marshal(result.Request)
+		if !bytes.Equal(expected, actual) {
+			return result, ErrRequest
+		}
+	}
+	return result, err
 }

@@ -26,6 +26,10 @@ func (keychainVault) Replace(name string, data []byte) error {
 	_, err := keychainCall(2, name, data)
 	return err
 }
+func (keychainVault) Delete(name string) error {
+	_, err := keychainCall(3, name, nil)
+	return err
+}
 func keychainCall(operation int, name string, data []byte) ([]byte, error) {
 	if !validName(name) || len(data) > 32768 {
 		return nil, ErrInvalid

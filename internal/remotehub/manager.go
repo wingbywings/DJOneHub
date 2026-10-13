@@ -42,6 +42,7 @@ type Manager struct {
 	jobs       chan job
 	done       chan struct{}
 	cancel     context.CancelFunc
+	retiring   bool
 }
 
 func Start(parent context.Context, config Config) *Manager {
@@ -79,8 +80,25 @@ func (m *Manager) TryStart(ctx context.Context, run func(context.Context, Connec
 
 func (m *Manager) Close() { m.cancel(); <-m.done }
 
+// RetireIdle atomically excludes new incoming/outgoing reservations before a
+// profile transition. A busy call keeps its existing owner and connection.
+func (m *Manager) RetireIdle() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state == "busy" {
+		return false
+	}
+	m.retiring = true
+	m.state = "stopping"
+	m.cancel()
+	return true
+}
+
 func (m *Manager) set(state string, c Connection) {
 	m.mu.Lock()
+	if m.retiring && state != "stopped" {
+		state, c = "stopping", nil
+	}
 	m.state, m.connection = state, c
 	m.mu.Unlock()
 }

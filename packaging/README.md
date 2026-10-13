@@ -107,52 +107,30 @@ curl -X PUT http://127.0.0.1:7575/api/voice-agent/config \
 `~/Library/Application Support/DJOneHub`，但不包含 API Key。OpenAI、MiniMax 和
 自定义模型/Endpoint 的完整示例请参阅源码仓库的 `docs/voice-agent-first-batch.md`。
 
-## 远程 iPhone 接听
+## 远程 iPhone 接听与 Web 配对
 
-2026-10-12 / R11：源码仓库中的[部署、重启与扫码配对指南](../docs/REMOTE_OPERATIONS_GUIDE.md)是完整操作入口。
-更新现有设备通常不需要重新配对；本 Mac 包也不会自动安装 iPhone App。手机需通过同一 Team/Bundle ID 的 Debug 签名覆盖安装，保留现有 sandbox APNs 配置。
+2026-10-13 / Web 配对版：完整步骤见发行包内的 [Web 操作指南](REMOTE_WEB_OPERATIONS_GUIDE.md)。
+新包已包含 WebRTC/静态 Opus，普通 `djonehub start` 同时启动 Hub 和 AudioHost，并打开
+`http://127.0.0.1:7575/remote/`。注册、授权文件导入、二维码、已配对手机与各模块目标均在 Web 操作。
 
-发行包已启用 WebRTC/Opus，并静态包含固定版本的 Opus；使用者不需要安装 Homebrew。
-公网 Relay、TURN、APNs 和 iOS App 仍需按远程部署文档配置。本包不包含个人凭据或 APNs 私钥。
+旧 profile 可在网页导入一次，例如 `home-xiaomi`；不覆盖 Keychain、不重新登记手机。
+选择已登记配置并保存重启选择后，后续 `djonehub start` 自动连接该配置。通话/恢复未完成时拒绝切换。
+`djonehub open` 可重新登录本机管理；直接访问页面可用自行设置的管理密码。
 
-已在本机完成 Hub enrollment 和 iPhone 配对后，使用保存的 profile 名称启动：
+新增 Relay 管理站点需要独立部署。先升级 native Relay 到 schema 3，再启动管理服务；
+部署说明随包提供为 `REMOTE_RELAY_WEB_ADMIN_DEPLOY.md`。公网原生 Relay、TURN、APNs 与 iOS App
+沿用原有配置。本包不包含个人凭据，也不会自动安装或清理 iPhone App。
 
-```sh
-djonehub start --remote-profile home-xiaomi
-```
+`djonehub start --remote-profile home-xiaomi` 保留兼容：读取旧身份、加入 Web 列表并保存重启选择。
+`remote-ui` 现在打开 Web 页，独立 Mac 配对窗口已迁出主要发行包；CLI `remote help/status/pair/revoke`
+保留故障处理用途。新 Web 的目标手机是按模块授权过滤的下拉选择，不需要粘贴安装 ID。
 
-启动器会将同一个私有 native-control 文件交给 Hub 和 AudioHost，只监听 `127.0.0.1:7575`。
-首次启动或更新二进制后，macOS 可能要求允许读取钥匙串中的 Hub 凭据；请及时处理系统提示。
-启动最多等待约一分钟，超时会停止本次进程并保留日志，处理授权后可重新启动。
+每个模块仍需完成语音初始化；启用 AI 时只走 AI，不通知远程 iPhone。网页保存远程目标不会自动关闭 AI。
+macOS 更新后二进制访问原 Keychain 可能需要系统授权；后台管理任务显示进度和明确结果，超时需先核对，
+不能反复消费同一授权。iPhone 扫码/文件确认和本机最近 100 条记录保持现有行为。
 
-配对配置管理可直接通过启动器执行：
-
-```sh
-djonehub remote help
-djonehub remote status --profile home-xiaomi
-```
-
-每个模块还需要启用远程接听并完成语音初始化；同一模块启用 AI 接听时优先走 AI，不会通知远程 iPhone。
-
-日常重启先执行 `djonehub stop`，再执行上面的远程启动命令。启动器同时启动 Hub 与 AudioHost，终端需要保持打开；旧版手工启动的两个进程要先在原终端分别 Ctrl+C，`stop` 不负责它们。配对窗口用另一个终端运行 `djonehub remote-ui`，默认 profile `default` 要改为实际的 `home-xiaomi`。
-
-恢复、续租和 DTMF 等开关默认关闭，启动器不透传这些参数。专项测试的双终端启动方法见操作指南。R06 并行迁移、R07 AudioHost 恢复及完整真机矩阵未完成，不能把本包作为全部验收通过的稳定发布。
-
-### 原生远程配对窗口
-
-完成 Hub profile 登记后，运行 `djonehub remote-ui` 打开 Mac 配对管理窗口。输入已登记的
-profile 名称（本线程为 `home-xiaomi`，不是默认 `default`），读取配置，选择授权模块，再生成一次性二维码。iPhone App 选择“扫描 Hub
-配对二维码”，核对服务器和模块后确认；不支持扫码或拒绝相机权限时，仍可导入 CLI 生成的 JSON。
-二维码短时有效，不应分享截图；切走 Mac 窗口时自动隐藏。
-
-手机配对后刷新 Mac 安装列表，复制安装 ID，在管理网页“来电”页的“iPhone 远程接听”设置
-中填写、保存。设置按模块隔离；AI 接听优先，通话中更改由服务端拒绝。Mac 窗口可撤销安装
-身份；撤销后请关闭相应模块的远程接听，或改为新的安装 ID。Hub 首次 enrollment 仍通过 CLI
-完成，不在网页传递密钥。窗口通过随包 Hub 二进制访问原有 Keychain，可能出现系统授权提示。
-
-iPhone 的通话记录只保留最近 100 条，不包含录音；保存在受系统文件保护且排除备份的本机文件，
-可清除已结束记录。App 退出时未结束的通话，下次启动显示“结束状态未确认”，不能用于自动回拨
-或恢复通话。没有收到有效推送或信令的未接来电不会凭空出现在手机记录中。
+代码与自动化验证已完成，浏览器全流程、真实安装和通话验收仍待核对。恢复、续租和 DTMF 开关默认关闭；
+R06 并行迁移、R07 AudioHost 故障恢复及完整弱网/真机矩阵仍未完成。
 
 ## 当前限制
 

@@ -6,9 +6,10 @@ import tarfile
 
 root = Path(__file__).resolve().parent.parent
 output = root / "dist/djonehub-relay-apns-source.tar.gz"
-entries = ["go.mod", "go.sum", "cmd/djonehub-relay", "internal", "pkg", "third_party",
+entries = ["go.mod", "go.sum", "cmd/djonehub-relay", "cmd/djonehub-relay-admin", "internal", "pkg", "third_party",
            "deploy/remote-call", "scripts/upgrade-relay-apns.sh",
-           "docs/REMOTE_APNS_UPGRADE.md", "docs/remote-calls-thirteenth-batch.md"]
+           "docs/REMOTE_APNS_UPGRADE.md", "docs/REMOTE_RELAY_WEB_ADMIN_DEPLOY.md", "docs/REMOTE_OPERATIONS_GUIDE.md",
+           "docs/REMOTE_WEB_PAIRING_PLAN.md", "docs/REMOTE_WEB_OPERATIONS_GUIDE.md", "docs/remote-web-first-batch.md", "docs/remote-web-second-batch.md", "docs/remote-web-browser-acceptance.md", "docs/remote-web-display-batch.md", "docs/remote-calls-thirteenth-batch.md"]
 files = []
 for entry in entries:
     path = root / entry

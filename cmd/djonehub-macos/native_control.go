@@ -121,6 +121,18 @@ func nativeControlHandler(token string, resolve func(string) (*app, bool), sourc
 		}
 	}
 	mux.HandleFunc("GET /events", auth(events.serve))
+	mux.HandleFunc("POST /web-ticket", auth(func(w http.ResponseWriter, r *http.Request) {
+		if events.webTicket == nil {
+			writeError(w, http.StatusServiceUnavailable, "Web management unavailable")
+			return
+		}
+		link, err := events.webTicket()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "Web activation unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"url": link})
+	}))
 	mux.HandleFunc("GET /config", auth(func(w http.ResponseWriter, r *http.Request) {
 		a := lookup(w, r)
 		if a == nil {

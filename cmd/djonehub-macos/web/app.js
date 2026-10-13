@@ -20,11 +20,12 @@ let liveVoiceAgentEvents = [];
 let renderedVoiceAgentCallsSignature = "";
 let currentVoiceAgentCalls = [];
 let selectedVoiceAgentCallID = "";
-let activeDeviceID = localStorage.getItem("djonehub-active-device") || "";
+let requestedDeviceID = new URLSearchParams(location.search).get("device") || "";
+let activeDeviceID = requestedDeviceID || localStorage.getItem("djonehub-active-device") || "";
 let knownDevices = [];
 
 function routedAPIPath(path) {
-  if (!activeDeviceID || path === "/api/devices" || path.startsWith("/api/devices/")) return path;
+  if (!activeDeviceID || path === "/api/devices" || path.startsWith("/api/devices/") || path.startsWith("/api/remote-management/")) return path;
   if (!path.startsWith("/api/")) return path;
   return `/api/devices/${encodeURIComponent(activeDeviceID)}${path.slice(4)}`;
 }
@@ -104,7 +105,7 @@ async function loadDevices({ refreshCurrent = false, refreshOnChange = true } = 
     const activeIsKnown = knownDevices.some((device) => device.id === activeDeviceID);
     // Preserve selection while a module briefly re-enumerates. Switching to a
     // different ready module here would make the UI appear to cross devices.
-    if (!activeIsKnown) {
+    if (!activeIsKnown && !requestedDeviceID) {
       activeDeviceID = ready[0]?.id || "";
       if (activeDeviceID) localStorage.setItem("djonehub-active-device", activeDeviceID);
       else localStorage.removeItem("djonehub-active-device");
@@ -131,6 +132,12 @@ async function loadDevices({ refreshCurrent = false, refreshOnChange = true } = 
     $("#rename-device").disabled = !activeDeviceID;
     if (refreshCurrent) await refreshActiveDevice();
   } catch (error) {
+    if (requestedDeviceID) {
+      select.replaceChildren(new Option("指定模块暂不可用", ""));
+      select.disabled = true;
+      $("#rename-device").disabled = true;
+      return;
+    }
     // Older/single-serial/demo backends do not expose the multi-device list.
     // Clear a previously saved selection so their legacy /api/* routes keep
     // working without requiring a coordinated upgrade.
@@ -730,10 +737,35 @@ function renderVoiceAgentProviders(status) {
 
 let remoteLoadID = 0;
 let remoteLoadedDevice = null;
+let remoteManagementCSRF = "";
+let remoteValidPhones = [];
+async function managementJob(path, body) {
+  const response = await fetch('/api/remote-management' + path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': remoteManagementCSRF }, body: JSON.stringify(body) });
+  const initial = await response.json();
+  if (!response.ok) throw new Error(initial.error === 'management_busy' ? '另一项远程管理操作仍在进行，请稍后重读' : '请打开远程接听与配对页登录并核对授权');
+  const deadline = Date.now() + 125000;
+  while (Date.now() < deadline) {
+    const reply = await fetch('/api/remote-management/jobs/' + encodeURIComponent(initial.id), { credentials: 'same-origin' });
+    if (!reply.ok) throw new Error('管理会话或任务已失效，请刷新核对结果');
+    const result = await reply.json();
+    if (result.state === 'failed') throw new Error(result.error === 'call_or_recovery_active' ? '模块有来电、通话或恢复未完成，请结束后重试' : '授权或配置校验失败，请重新读取手机列表和模块状态');
+    if (result.state === 'completed') return result.result;
+    await new Promise(resolve => setTimeout(resolve, 450));
+  }
+  throw new Error('管理操作仍可能处理中，请在远程管理页核对任务状态');
+}
+function renderRemotePhones(phones, current) {
+  const select = $('#remote-installation');
+  const empty = document.createElement('option'); empty.value = ''; empty.textContent = '请选择有效的 iPhone'; select.replaceChildren(empty);
+  for (const phone of phones) { const option = document.createElement('option'); option.value = phone.id; option.textContent = `${phone.name || '未命名 iPhone'} · ${phone.id}`; select.append(option); }
+  if (current && !phones.some(phone => phone.id === current)) { const invalid = document.createElement('option'); invalid.value = current; invalid.textContent = '原目标已失效 / 不属于当前配置，请重新选择'; invalid.disabled = true; select.append(invalid); }
+  select.value = current || '';
+}
 async function loadRemoteSettings() {
   const device = activeDeviceID;
   const attempt = ++remoteLoadID;
   remoteLoadedDevice = null;
+  remoteManagementCSRF = ""; remoteValidPhones = [];
   $("#remote-fields").disabled = true;
   $("#remote-status").textContent = "正在读取当前模块设置…";
   try {
@@ -741,11 +773,23 @@ async function loadRemoteSettings() {
     if (device !== activeDeviceID || attempt !== remoteLoadID) return;
     const config = state.config;
     $("#remote-enabled").checked = config.enabled;
-    $("#remote-installation").value = config.target_installation_id || "";
+    renderRemotePhones([], config.target_installation_id);
     $("#remote-timeout").value = config.ring_timeout_seconds;
     $("#remote-display").value = config.caller_display;
+    const session = await api('/api/remote-management/session/status');
+    if (device !== activeDeviceID || attempt !== remoteLoadID) return;
+    if (!session.authenticated) { $('#remote-status').textContent = '请先打开远程接听与配对页登录本机管理'; return; }
+    remoteManagementCSRF = session.csrf;
+    const profiles = await api('/api/remote-management/profiles');
+    if (device !== activeDeviceID || attempt !== remoteLoadID) return;
+    if (!profiles.active_profile) { $('#remote-status').textContent = '请先在远程管理页连接已登记的 Mac 配置'; return; }
+    const owner = profiles.profiles.find(item => item.profile === profiles.active_profile);
+    const list = await managementJob('/installations', { profile: profiles.active_profile, action: 'list' });
+    if (device !== activeDeviceID || attempt !== remoteLoadID) return;
+    remoteValidPhones = list.installations.filter(phone => !phone.revoked && phone.hub_id === owner?.status.principal.id && phone.modules.includes(device));
+    renderRemotePhones(remoteValidPhones, config.target_installation_id);
     remoteLoadedDevice = device;
-    $("#remote-fields").disabled = Boolean(state.active_route);
+    $("#remote-fields").disabled = Boolean(state.active_route) || Boolean(state.recovery?.recovery_required);
     $("#remote-status").textContent = state.recovery?.recovery_required
       ? "有待核对的模块通话，请先在本机处理"
       : state.effective_route === "agent" ? "AI 接听优先，远程接听不会触发"
@@ -765,16 +809,17 @@ $("#remote-form").addEventListener("submit", async (event) => {
   if (remoteLoadedDevice !== device || $("#remote-fields").disabled) return;
   const attempt = ++remoteLoadID;
   // Capture the module path before awaiting; switching modules cannot redirect this write.
-  const path = routedAPIPath("/api/remote-calls/config");
   const config = {
     enabled: $("#remote-enabled").checked,
     target_installation_id: $("#remote-installation").value.trim(),
     ring_timeout_seconds: Number($("#remote-timeout").value),
     caller_display: $("#remote-display").value,
   };
+  if (config.enabled && !remoteValidPhones.some(phone => phone.id === config.target_installation_id)) { notice('请选择当前模块有效授权的 iPhone'); return; }
+  if (!config.enabled && !remoteValidPhones.some(phone => phone.id === config.target_installation_id)) config.target_installation_id = '';
   $("#remote-fields").disabled = true;
   try {
-    await api(path, { method: "PUT", body: JSON.stringify(config) });
+    await managementJob('/routes', { module: device, config });
     if (device === activeDeviceID && attempt === remoteLoadID) { notice("远程接听设置已保存"); await loadRemoteSettings(); }
   } catch (error) {
     if (device === activeDeviceID && attempt === remoteLoadID) {
@@ -1828,7 +1873,7 @@ async function loadESIM() {
   }
 }
 
-document.querySelectorAll(".tab").forEach((tab) => {
+document.querySelectorAll(".tab[data-view]").forEach((tab) => {
   tab.addEventListener("click", () => {
     document.querySelectorAll(".tab, .view").forEach((el) => el.classList.remove("active"));
     tab.classList.add("active");
@@ -2121,6 +2166,7 @@ $("#reboot-module").addEventListener("click", rebootModule);
 
 $("#device-select").addEventListener("change", async (event) => {
   const next = event.currentTarget.value;
+  requestedDeviceID = "";
   if (!next || next === activeDeviceID) return;
   activeDeviceID = next;
   localStorage.setItem("djonehub-active-device", activeDeviceID);
@@ -2153,6 +2199,10 @@ $("#rename-device").addEventListener("click", async () => {
 
 async function bootstrap() {
   await loadDevices({ refreshOnChange: false });
+  if (requestedDeviceID && !knownDevices.some(device => device.id === requestedDeviceID && device.state === "ready")) {
+    notice("指定模块暂不可用，请连接设备或从模块列表手动选择。", true);
+    return;
+  }
   await refreshActiveDevice();
   setNetworkTrafficPolling(true);
 }

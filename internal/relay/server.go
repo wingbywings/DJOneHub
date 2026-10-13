@@ -7,10 +7,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/iniwex5/vohive/internal/relay/identity"
+	"github.com/iniwex5/vohive/internal/relaystatus"
 	"github.com/iniwex5/vohive/internal/turncred"
 	"github.com/iniwex5/vohive/internal/voippush"
 	"golang.org/x/time/rate"
@@ -58,7 +60,10 @@ func (l *limiter) allow(address string) bool {
 
 type Server struct {
 	http.Handler
-	signals *signalBroker
+	signals      *signalBroker
+	config       serverOptions
+	started      time.Time
+	turnActivity relaystatus.Activity
 }
 
 func (s *Server) Close()                         { s.signals.close() }
@@ -66,8 +71,16 @@ func Handler(store *identity.Store) http.Handler { return NewServer(store) }
 
 type Option func(*serverOptions)
 type serverOptions struct {
-	turn *turncred.Issuer
-	push voippush.Sender
+	enrollmentOrigin string
+	turn             *turncred.Issuer
+	push             voippush.Sender
+	build            string
+}
+
+func WithBuild(build string) Option { return func(o *serverOptions) { o.build = build } }
+
+func WithEnrollmentOrigin(origin string) Option {
+	return func(o *serverOptions) { o.enrollmentOrigin = origin }
 }
 
 func WithPush(sender voippush.Sender) Option { return func(o *serverOptions) { o.push = sender } }
@@ -81,10 +94,65 @@ func NewServer(store *identity.Store, options ...Option) *Server {
 	mux := http.NewServeMux()
 	signals := newSignalBroker(store)
 	signals.push = config.push
+	s := &Server{signals: signals, config: config, started: time.Now().UTC()}
 	mux.HandleFunc("GET /v1/signaling", signals.serve)
 	limits := &limiter{entries: make(map[string]ipLimit), global: rate.NewLimiter(50, 100)}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusOK, map[string]any{"status": "ok", "version": 1, "capabilities": map[string]bool{"identity": true, "signaling": true, "outgoing_calls": true, "voip_push": config.push != nil, "turn": config.turn != nil}})
+	})
+
+	if config.enrollmentOrigin != "" && identity.HTTPSOrigin(config.enrollmentOrigin) {
+		mux.HandleFunc("POST /v1/enrollment-requests", func(w http.ResponseWriter, r *http.Request) {
+			var body identity.EnrollmentRequest
+			if !decodeLimit(w, r, &body, 16384) {
+				return
+			}
+			if strings.TrimSuffix(body.RelayURL, "/") != strings.TrimSuffix(config.enrollmentOrigin, "/") {
+				respond(w, http.StatusBadRequest, map[string]string{"error": "enrollment_origin_mismatch"})
+				return
+			}
+			status, err := store.SubmitEnrollmentRequest(r.Context(), body)
+			result(w, http.StatusCreated, status, err)
+		})
+	}
+	mux.HandleFunc("GET /v1/management/installations", func(w http.ResponseWriter, r *http.Request) {
+		items, err := store.ManagedInstallations(r.Context(), identity.Bearer(r.Header.Get("Authorization")))
+		if err == nil {
+			s.presence().Apply(items)
+		}
+		result(w, http.StatusOK, map[string]any{"installations": items}, err)
+	})
+	mux.HandleFunc("PATCH /v1/management/installations/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if !decode(w, r, &body) {
+			return
+		}
+		err := store.NameInstallation(r.Context(), identity.Bearer(r.Header.Get("Authorization")), r.PathValue("id"), body.Name)
+		result(w, http.StatusOK, map[string]bool{"updated": true}, err)
+	})
+	mux.HandleFunc("GET /v1/management/pairings/{id}", func(w http.ResponseWriter, r *http.Request) {
+		status, err := store.PairingStatus(r.Context(), identity.Bearer(r.Header.Get("Authorization")), r.PathValue("id"))
+		result(w, http.StatusOK, status, err)
+	})
+	mux.HandleFunc("GET /v1/management/pairings", func(w http.ResponseWriter, r *http.Request) {
+		items, err := store.ManagedPairings(r.Context(), identity.Bearer(r.Header.Get("Authorization")))
+		result(w, http.StatusOK, map[string]any{"pairings": items}, err)
+	})
+	mux.HandleFunc("DELETE /v1/management/pairings/{id}", func(w http.ResponseWriter, r *http.Request) {
+		err := store.RevokePairing(r.Context(), identity.Bearer(r.Header.Get("Authorization")), r.PathValue("id"))
+		result(w, http.StatusOK, map[string]bool{"revoked": true}, err)
+	})
+	mux.HandleFunc("PATCH /v1/management/pairings/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Name string `json:"name"`
+		}
+		if !decode(w, r, &body) {
+			return
+		}
+		err := store.NamePairing(r.Context(), identity.Bearer(r.Header.Get("Authorization")), r.PathValue("id"), body.Name)
+		result(w, http.StatusOK, map[string]bool{"updated": true}, err)
 	})
 	mux.HandleFunc("POST /v1/push", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -118,6 +186,9 @@ func NewServer(store *identity.Store, options ...Option) *Server {
 			return
 		}
 		credentials, err := config.turn.Issue(time.Now())
+		if config.turn != nil {
+			s.turnActivity.Record(err == nil)
+		}
 		result(w, http.StatusOK, credentials, err)
 	})
 	mux.HandleFunc("POST /v1/hubs/enroll", func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +248,7 @@ func NewServer(store *identity.Store, options ...Option) *Server {
 		err := store.RevokeInstallation(r.Context(), identity.Bearer(r.Header.Get("Authorization")), r.PathValue("id"))
 		result(w, http.StatusOK, map[string]bool{"revoked": true}, err)
 	})
-	return &Server{signals: signals, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if r.Header.Get("Origin") != "" {
@@ -195,10 +266,14 @@ func NewServer(store *identity.Store, options ...Option) *Server {
 			return
 		}
 		mux.ServeHTTP(w, r)
-	})}
+	})
+	return s
 }
 func decode(w http.ResponseWriter, r *http.Request, body any) bool {
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	return decodeLimit(w, r, body, 8192)
+}
+func decodeLimit(w http.ResponseWriter, r *http.Request, body any, limit int64) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(body); err != nil {
 		respond(w, http.StatusBadRequest, map[string]string{"error": "invalid_json"})

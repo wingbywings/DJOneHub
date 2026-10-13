@@ -84,6 +84,10 @@ if [[ $check_only == 1 ]]; then
   echo 'Checks passed; no call configuration was changed.'
   exit 0
 fi
+# New Web releases require a local management session and verify the target
+# again at commit. Detect that boundary BEFORE this legacy script disables AI.
+web_management_code=$(curl -sS --max-time 5 "$base_url/api/remote-management/session/status" -o /dev/null -w '%{http_code}') || die 'Cannot verify management API before changing AI.'
+[[ $web_management_code != 200 ]] || die 'This release manages routes through authenticated Web UI. Open /remote/, select the module and iPhone, then adjust AI in the module page if desired. No configuration was changed.'
 api GET "$prefix/voice-agent/status" "$work/ai.json"
 jq -e '.state | select(type == "object") | {
   enabled:false, provider, fallback_provider, model, voice, instructions,

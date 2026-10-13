@@ -12,6 +12,7 @@ import (
 // Events are invalidation hints, never configuration, commands or credentials.
 // One pending hint per subscriber coalesces bursts without blocking call work.
 type nativeEvents struct {
+	webTicket   func() (string, error) // immutable before native listener starts
 	done        chan struct{}
 	closed      bool
 	mu          sync.Mutex

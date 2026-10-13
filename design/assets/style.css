@@ -1,0 +1,488 @@
+/* ============================================================
+   DJOneHub Phone · 柔和渐变设计系统
+   「暖阳」Soft Gradient — 拨号 / 联系人 / 通话记录 / 设置
+   ============================================================ */
+
+:root {
+  /* 背景渐变：蜜桃 → 粉樱 → 薰衣草 */
+  --bg-grad: linear-gradient(165deg, #FFEAD3 0%, #FFD9E3 46%, #E3D7FB 100%);
+  --peach: #FFEAD3;
+  --pink: #FFD9E3;
+  --lavender: #E3D7FB;
+
+  /* 文字 */
+  --ink: #3D2C4F;          /* 深紫梅，主文字 */
+  --ink-2: #6E5F82;        /* 次要文字 */
+  --ink-3: #9A8CAD;        /* 辅助文字 */
+
+  /* 主行动按钮：珊瑚橙渐变 */
+  --cta-grad: linear-gradient(135deg, #FF9A5A 0%, #FF5C74 100%);
+  --cta-shadow: 0 10px 24px rgba(255, 105, 110, .38);
+
+  /* 点缀色 */
+  --violet: #8B6FF0;       /* 主品牌紫 */
+  --violet-soft: #EFE9FF;
+  --green: #2FBF83;        /* 接听 / 在线 */
+  --green-grad: linear-gradient(135deg, #4ED99A 0%, #1FB87A 100%);
+  --red: #FF5C5C;          /* 挂断 / 未接 /  destructive */
+  --red-grad: linear-gradient(135deg, #FF7E6B 0%, #F4445A 100%);
+  --amber: #FFB020;
+
+  /* 表面：奶油玻璃 */
+  --surface: rgba(255, 255, 255, .72);
+  --surface-strong: rgba(255, 255, 255, .88);
+  --surface-dim: rgba(255, 255, 255, .5);
+  --stroke: rgba(255, 255, 255, .85);
+  --shadow-soft: 0 8px 22px rgba(93, 63, 130, .10);
+  --shadow-lift: 0 14px 30px rgba(93, 63, 130, .16);
+
+  /* 圆角 */
+  --r-key: 24px;      /* 拨号键 */
+  --r-card: 28px;     /* 卡片 */
+  --r-row: 20px;      /* 列表行 */
+  --r-pill: 999px;    /* 胶囊 */
+
+  --font: -apple-system, "SF Pro Rounded", "PingFang SC", "Hiragino Sans GB", sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+
+html, body { height: 100%; }
+body {
+  font-family: var(--font);
+  color: var(--ink);
+  background: #f3edf5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+/* ---------- 手机外框（展示用） ---------- */
+.phone {
+  width: 390px;
+  height: 844px;
+  border-radius: 54px;
+  padding: 12px;
+  background: #1c1a22;
+  box-shadow: 0 30px 70px rgba(61, 44, 79, .35), inset 0 0 0 2px #3a3644;
+  flex: none;
+}
+.screen {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 44px;
+  overflow: hidden;
+  background: var(--bg-grad);
+  display: flex;
+  flex-direction: column;
+}
+/* 灵动岛 */
+.island {
+  position: absolute;
+  top: 12px; left: 50%;
+  transform: translateX(-50%);
+  width: 122px; height: 34px;
+  background: #141118;
+  border-radius: 20px;
+  z-index: 30;
+}
+
+/* ---------- 状态栏 ---------- */
+.statusbar {
+  height: 54px;
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 30px 6px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.statusbar .sicons { display: flex; gap: 6px; align-items: center; }
+
+/* ---------- 页面体 ---------- */
+.page {
+  flex: 1;
+  overflow: hidden auto;
+  padding: 4px 22px 18px;
+  scrollbar-width: none;
+}
+.page::-webkit-scrollbar { display: none; }
+
+.page-title {
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: .5px;
+  margin: 10px 2px 4px;
+}
+.page-sub {
+  font-size: 14px;
+  color: var(--ink-2);
+  margin: 0 2px 16px;
+}
+
+/* ---------- 连接状态胶囊 ---------- */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-pill);
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  box-shadow: var(--shadow-soft);
+  backdrop-filter: blur(8px);
+}
+.dot { width: 8px; height: 8px; border-radius: 50%; }
+.dot.on  { background: var(--green); box-shadow: 0 0 0 4px rgba(47,191,131,.18); }
+.dot.off { background: #C9BDD6; }
+
+/* ---------- 拨号键盘 ---------- */
+.dial-display {
+  text-align: center;
+  font-size: 34px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  min-height: 46px;
+  margin: 6px 0 2px;
+  color: var(--ink);
+}
+.dial-module {
+  display: flex; justify-content: center; margin-bottom: 14px;
+}
+.module-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--violet-soft);
+  color: var(--violet);
+  border-radius: var(--r-pill);
+  padding: 6px 14px;
+  font-size: 13px; font-weight: 700;
+}
+.keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  padding: 0 8px;
+}
+.key {
+  height: 74px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-key);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+}
+.key .num { font-size: 28px; font-weight: 700; }
+.key .abc { font-size: 10px; font-weight: 600; letter-spacing: 2.5px; color: var(--ink-3); }
+.key:active { background: var(--surface-strong); transform: scale(.96); }
+
+.dial-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  margin-top: 16px;
+}
+.ghost-btn {
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  border: 1px solid var(--stroke);
+  background: var(--surface-dim);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink-2);
+  box-shadow: var(--shadow-soft);
+  cursor: pointer;
+}
+.call-btn {
+  height: 62px;
+  padding: 0 34px;
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--cta-grad);
+  color: #fff;
+  font-size: 19px;
+  font-weight: 700;
+  font-family: var(--font);
+  letter-spacing: 1px;
+  display: flex; align-items: center; gap: 10px;
+  box-shadow: var(--cta-shadow);
+  cursor: pointer;
+}
+
+/* ---------- 底部标签栏 ---------- */
+.tabbar {
+  flex: none;
+  height: 84px;
+  margin: 0 14px 12px;
+  border-radius: 30px;
+  background: var(--surface-strong);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow-lift);
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  backdrop-filter: blur(12px);
+}
+.tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-3);
+  padding-top: 2px;
+}
+.tab.active { color: var(--violet); }
+.tab.active .tab-ic {
+  background: var(--violet-soft);
+  border-radius: 14px;
+}
+.tab-ic {
+  width: 46px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* ---------- 通用卡片 / 列表行 ---------- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-soft);
+  padding: 18px;
+  margin-bottom: 14px;
+  backdrop-filter: blur(8px);
+}
+.card-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-3);
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  margin: 0 4px 10px;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-row);
+  box-shadow: var(--shadow-soft);
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.row .grow { flex: 1; min-width: 0; }
+.row .t1 { font-size: 16px; font-weight: 700; }
+.row .t2 { font-size: 12.5px; color: var(--ink-2); margin-top: 2px; }
+.row-ic {
+  width: 42px; height: 42px;
+  border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  flex: none;
+}
+.chev { color: var(--ink-3); flex: none; }
+
+/* 头像（渐变底 + 字） */
+.avatar {
+  width: 48px; height: 48px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  font-size: 18px; font-weight: 700;
+  flex: none;
+  border: 2.5px solid rgba(255,255,255,.9);
+  box-shadow: var(--shadow-soft);
+}
+.av-1 { background: linear-gradient(135deg, #FF9A5A, #FF5C74); }
+.av-2 { background: linear-gradient(135deg, #8B6FF0, #5E9BFF); }
+.av-3 { background: linear-gradient(135deg, #4ED99A, #1FB87A); }
+.av-4 { background: linear-gradient(135deg, #FFB020, #FF7A59); }
+.av-5 { background: linear-gradient(135deg, #FF6FB5, #B565F0); }
+
+/* 小圆按钮（回拨等） */
+.mini-btn {
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: var(--violet-soft);
+  color: var(--violet);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  flex: none;
+}
+.mini-btn.green { background: #E2F8EE; color: var(--green); }
+
+/* 标签小胶囊 */
+.tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--violet-soft);
+  color: var(--violet);
+}
+
+/* 分段控件 */
+.seg {
+  display: flex;
+  background: var(--surface-dim);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-pill);
+  padding: 4px;
+  margin-bottom: 16px;
+}
+.seg span {
+  flex: 1;
+  text-align: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-2);
+  padding: 8px 0;
+  border-radius: var(--r-pill);
+}
+.seg span.on {
+  background: #fff;
+  color: var(--ink);
+  box-shadow: var(--shadow-soft);
+}
+
+/* 开关 */
+.switch {
+  width: 52px; height: 32px;
+  border-radius: var(--r-pill);
+  background: #DCD2E8;
+  position: relative;
+  flex: none;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px; left: 3px;
+  width: 26px; height: 26px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 2px 6px rgba(0,0,0,.18);
+}
+.switch.on { background: var(--green); }
+.switch.on::after { left: 23px; }
+
+/* 按钮 */
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  border-radius: var(--r-pill);
+  padding: 14px 0;
+  font-size: 16px;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+}
+.btn-cta   { background: var(--cta-grad); color: #fff; box-shadow: var(--cta-shadow); }
+.btn-soft  { background: var(--violet-soft); color: var(--violet); }
+.btn-ghost { background: var(--surface-dim); color: var(--ink-2); border: 1px solid var(--stroke); }
+.btn-danger{ background: #FFEDED; color: var(--red); }
+
+/* 搜索框 */
+.search {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--surface);
+  border: 1px solid var(--stroke);
+  border-radius: var(--r-pill);
+  box-shadow: var(--shadow-soft);
+  padding: 12px 16px;
+  color: var(--ink-3);
+  font-size: 15px;
+  margin-bottom: 18px;
+}
+
+/* 分组日期标题 */
+.group-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink-3);
+  margin: 14px 6px 8px;
+}
+
+/* ---------- 通话中 / 来电 ---------- */
+.call-screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 26px 26px 30px;
+}
+.call-avatar {
+  width: 118px; height: 118px;
+  border-radius: 50%;
+  border: 4px solid rgba(255,255,255,.95);
+  box-shadow: var(--shadow-lift);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 42px; font-weight: 700; color: #fff;
+  margin-top: 26px;
+}
+.call-name { font-size: 30px; font-weight: 800; margin-top: 18px; }
+.call-state { font-size: 15px; color: var(--ink-2); margin-top: 6px; }
+.call-timer { font-size: 15px; color: var(--ink-2); margin-top: 6px; font-variant-numeric: tabular-nums; font-weight: 600; }
+
+.call-controls {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px 30px;
+  margin-top: auto;
+  margin-bottom: 26px;
+}
+.ctl { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+.ctl .cbtn {
+  width: 66px; height: 66px;
+  border-radius: 50%;
+  border: 1px solid var(--stroke);
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+  display: flex; align-items: center; justify-content: center;
+  color: var(--ink);
+  cursor: pointer;
+}
+.ctl .cbtn.on { background: #fff; color: var(--violet); box-shadow: var(--shadow-lift); }
+.ctl span { font-size: 12px; font-weight: 600; color: var(--ink-2); }
+
+.big-btn {
+  width: 74px; height: 74px;
+  border-radius: 50%;
+  border: none;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff;
+  cursor: pointer;
+}
+.big-btn.decline { background: var(--red-grad); box-shadow: 0 10px 24px rgba(244,68,90,.4); }
+.big-btn.accept  { background: var(--green-grad); box-shadow: 0 10px 24px rgba(31,184,122,.4); }
+
+.incoming-actions {
+  margin-top: auto;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0 34px;
+}
+.ia { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.ia span { font-size: 14px; font-weight: 700; color: var(--ink); }

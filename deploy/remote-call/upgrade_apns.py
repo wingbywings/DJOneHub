@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+from urllib.parse import urlsplit
 import sqlite3
 import shutil
 import sys
@@ -16,9 +18,36 @@ def validate_command(value):
     # systemctl exposes path/argv plus runtime timestamps. Do not interpret
     # arbitrary shell commands, unit specifiers or unknown command options.
     match = re.fullmatch(r"\{ path=/usr/local/bin/djonehub-relay ; argv\[\]=(.*?) ; .* \}", value.strip())
-    if not match or match.group(1) not in (BASE, BASE + APNS):
-        raise ValueError("Existing service differs from the supported installer layout; preserve it and migrate manually")
-    return "# Managed by DJOneHub APNs upgrade.\n[Service]\nExecStart=\nExecStart=" + BASE + APNS + "\n"
+    if not match:
+        raise ValueError("Existing service differs from the supported installer layout")
+    command = shlex.split(match.group(1))
+    base = shlex.split(BASE)
+    if command[:len(base)] != base:
+        raise ValueError("Existing service differs from the supported installer layout")
+    trailing = command[len(base):]
+    origin = None
+    seen = set()
+    while trailing:
+        if len(trailing) < 2:
+            raise ValueError("Missing managed option value")
+        option, value, trailing = trailing[0], trailing[1], trailing[2:]
+        if option in seen:
+            raise ValueError("Duplicate managed option")
+        seen.add(option)
+        if option == "--apns-config" and value == "/etc/djonehub/apns.json":
+            continue
+        if option == "--public-origin":
+            parsed = urlsplit(value)
+            if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                    or parsed.query or parsed.fragment or parsed.path not in ("", "/")
+                    or not re.fullmatch(r"https://[A-Za-z0-9.:\[\]-]+/?", value)):
+                raise ValueError("Invalid managed enrollment origin")
+            origin = value
+            continue
+        raise ValueError("Unknown managed option; preserve it and migrate manually")
+    suffix = " --public-origin " + origin if origin else ""
+    return "# Managed by DJOneHub APNs upgrade.\n[Service]\nExecStart=\nExecStart=" + BASE + APNS + suffix + "\n"
+
 
 
 def backup_database(source, destination):
@@ -35,7 +64,7 @@ def backup_database(source, destination):
         if read.execute("PRAGMA quick_check").fetchone() != ("ok",):
             raise ValueError("Source database integrity check failed")
         version = read.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (1, 2):
+        if version not in (1, 2, 3):
             raise ValueError("Unsupported database version")
         checkpoint = read.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
         if checkpoint is None or checkpoint[0] != 0:

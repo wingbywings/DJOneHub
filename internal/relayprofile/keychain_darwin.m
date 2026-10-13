@@ -47,6 +47,9 @@ int dj_remote_vault(int operation, const char *account, const void *data, size_t
         if (operation == 2) {
             return SecItemUpdate((CFDictionaryRef)query, (CFDictionaryRef)@{(id)kSecValueData:value});
         }
+        if (operation == 3) {
+            return SecItemDelete((CFDictionaryRef)query);
+        }
         return errSecParam;
     }
 }

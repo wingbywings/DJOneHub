@@ -18,6 +18,7 @@ import (
 
 	"github.com/iniwex5/vohive/internal/relay"
 	"github.com/iniwex5/vohive/internal/relay/identity"
+	"github.com/iniwex5/vohive/internal/relaystatus"
 	"github.com/iniwex5/vohive/internal/turncred"
 	"github.com/iniwex5/vohive/internal/voippush"
 )
@@ -49,6 +50,7 @@ func run(args []string) error {
 		return nil
 	}
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	publicOrigin := flags.String("public-origin", "", "HTTPS origin enabling public-key enrollment requests")
 	directory := flags.String("state-dir", "", "absolute private directory for SQLite state")
 	listen := flags.String("listen", "127.0.0.1:8443", "relay listen address")
 	cert := flags.String("tls-cert", "", "TLS certificate file")
@@ -70,13 +72,16 @@ func run(args []string) error {
 	if args[0] != "serve" && args[0] != "provision" && args[0] != "revoke" && args[0] != "lookup" {
 		return errors.New("unknown relay command")
 	}
-	if (*turnFile != "" || *pushFile != "") && args[0] != "serve" {
-		return errors.New("--turn-config and --apns-config apply only to serve")
+	if (*turnFile != "" || *pushFile != "" || *publicOrigin != "") && args[0] != "serve" {
+		return errors.New("--turn-config, --apns-config and --public-origin apply only to serve")
 	}
 	if args[0] == "serve" {
 		if err := validateTransport(*listen, *cert, *key, *insecure); err != nil {
 			return err
 		}
+	}
+	if *publicOrigin != "" && !identity.HTTPSOrigin(*publicOrigin) {
+		return errors.New("--public-origin requires an HTTPS origin")
 	}
 	store, err := identity.Open(*directory)
 	if err != nil {
@@ -128,7 +133,7 @@ func run(args []string) error {
 			return err
 		}
 	}
-	options := []relay.Option{relay.WithTURN(issuer)}
+	options := []relay.Option{relay.WithTURN(issuer), relay.WithEnrollmentOrigin(*publicOrigin), relay.WithBuild("web-management-v2")}
 	if *pushFile != "" {
 		sender, err := voippush.ReadConfig(*pushFile)
 		if err != nil {
@@ -141,6 +146,12 @@ func run(args []string) error {
 	server := &http.Server{Addr: *listen, Handler: handler, ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8192}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	stopStatus, err := relaystatus.Start(ctx, filepath.Join(*directory, relaystatus.Filename), handler.RuntimeSnapshot, func() { log.Print("Relay runtime status write failed; administration will show unknown") })
+	if err != nil {
+		log.Print("Relay runtime status unavailable; administration will show unknown")
+	} else {
+		defer stopStatus()
+	}
 	result := make(chan error, 1)
 	go func() {
 		if *cert != "" {

@@ -1,0 +1,17 @@
+[Unit]
+Description=DJOneHub Relay Web Administration
+Wants=network-online.target
+After=network-online.target djonehub-relay.service
+
+[Service]
+User=djonehub
+Group=djonehub
+UMask=0077
+ExecStart=/usr/local/bin/djonehub-relay-admin --listen 127.0.0.1:18444 --public-origin https://relay-admin.oops.work --relay-origin https://oops.work --state-dir /var/lib/djonehub-relay --admin-state-dir /var/lib/djonehub-relay-admin --tenant home
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -142,17 +142,15 @@ swift build \
   --scratch-path "${SWIFT_BUILD_DIR}" \
   -c release
 cp "${SWIFT_BUILD_DIR}/release/DJOneHubAudioHost" "${STAGE_DIR}/bin/djonehub-audio-host"
-CLANG_MODULE_CACHE_PATH="${BUILD_ROOT}/clang-module-cache" \
-SWIFTPM_MODULECACHE_OVERRIDE="${BUILD_ROOT}/swift-module-cache" \
-swift build --package-path "${ROOT_DIR}/macos/DJOneHubRemote" \
-  --scratch-path "${BUILD_ROOT}/swift-remote" -c release
-cp "${BUILD_ROOT}/swift-remote/release/DJOneHubRemote" "${STAGE_DIR}/bin/djonehub-remote"
-
-
 cp "${LIBUSB_PREFIX}/lib/libusb-1.0.0.dylib" "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 cp "${ROOT_DIR}/packaging/djonehub" "${STAGE_DIR}/djonehub"
 cp "${ROOT_DIR}/packaging/install" "${STAGE_DIR}/install"
 cp "${ROOT_DIR}/packaging/README.md" "${STAGE_DIR}/README.md"
+cp "${ROOT_DIR}/docs/REMOTE_WEB_OPERATIONS_GUIDE.md" "${STAGE_DIR}/REMOTE_WEB_OPERATIONS_GUIDE.md"
+cp "${ROOT_DIR}/docs/remote-web-browser-acceptance.md" "${STAGE_DIR}/remote-web-browser-acceptance.md"
+cp "${ROOT_DIR}/docs/remote-web-display-batch.md" "${STAGE_DIR}/remote-web-display-batch.md"
+cp "${ROOT_DIR}/docs/REMOTE_RELAY_WEB_ADMIN_DEPLOY.md" "${STAGE_DIR}/REMOTE_RELAY_WEB_ADMIN_DEPLOY.md"
+cp "${ROOT_DIR}/docs/REMOTE_OPERATIONS_GUIDE.md" "${STAGE_DIR}/REMOTE_OPERATIONS_GUIDE.md"
 cp "${ROOT_DIR}/LICENSE" "${STAGE_DIR}/LICENSE"
 cp "${LIBUSB_SOURCE}/COPYING" "${STAGE_DIR}/licenses/libusb-COPYING"
 cp "${OPUS_SOURCE}/COPYING" "${STAGE_DIR}/licenses/opus-COPYING"
@@ -162,8 +160,6 @@ chmod 755 "${STAGE_DIR}/djonehub" "${STAGE_DIR}/install" "${STAGE_DIR}/bin/djone
 codesign --force --sign - "${STAGE_DIR}/lib/libusb-1.0.0.dylib"
 codesign --force --sign - "${STAGE_DIR}/bin/djonehub-macos"
 codesign --force --sign - "${STAGE_DIR}/bin/djonehub-audio-host"
-chmod 755 "${STAGE_DIR}/bin/djonehub-remote"
-codesign --force --sign - "${STAGE_DIR}/bin/djonehub-remote"
 
 if otool -L "${STAGE_DIR}/bin/djonehub-macos" | grep -q '/opt/homebrew\|/usr/local\|/Cellar/'; then
   echo "Release binary still contains a package-manager dependency." >&2

@@ -40,6 +40,7 @@ func (b *signalBroker) wake(hub *signalConnection, m callsignal.Message, invite 
 		}
 		if err == nil && ctx.Err() == nil {
 			result, sendErr := b.push.Send(ctx, endpoint.Token, m)
+			b.pushActivity.Record(sendErr == nil)
 			err = sendErr
 			if result.InvalidToken {
 				_ = b.store.InvalidatePushEndpoint(context.Background(), endpoint, result.InvalidatedAt)

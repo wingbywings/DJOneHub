@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/iniwex5/vohive/internal/callcontrol"
+	"github.com/iniwex5/vohive/internal/relayclient"
+	"github.com/iniwex5/vohive/internal/relayprofile"
 	"github.com/iniwex5/vohive/pkg/smscodec"
 )
 
@@ -44,6 +46,8 @@ type managedUSBDevice struct {
 type usbDeviceHub struct {
 	nativeEvents          nativeEvents
 	remoteHub             *remoteHubService // guarded by mu
+	remoteWeb             *remoteWebManager // configured before HTTP server starts
+	remoteLifecycleMu     sync.Mutex
 	mu                    sync.RWMutex
 	reconcileMu           sync.Mutex
 	devices               map[string]*managedUSBDevice
@@ -645,10 +649,13 @@ func (h *usbDeviceHub) summaries() []usbDeviceSummary {
 	}
 	h.mu.RUnlock()
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].State != out[j].State {
+		if (out[i].State == "ready") != (out[j].State == "ready") {
 			return out[i].State == "ready"
 		}
-		return out[i].Alias < out[j].Alias
+		if out[i].Alias != out[j].Alias {
+			return out[i].Alias < out[j].Alias
+		}
+		return out[i].ID < out[j].ID
 	})
 	return out
 }
@@ -718,6 +725,16 @@ func (h *usbDeviceHub) defaultRuntime() *app {
 
 func (h *usbDeviceHub) routes(assets embed.FS) http.Handler {
 	mux := http.NewServeMux()
+	if h.remoteWeb != nil {
+		h.remoteWeb.register(mux)
+	} else {
+		mux.HandleFunc("PUT /api/devices/{deviceID}/remote-calls/config", func(w http.ResponseWriter, r *http.Request) {
+			writeError(w, http.StatusServiceUnavailable, "remote Web management unavailable")
+		})
+	}
+	mux.HandleFunc("PUT /api/remote-calls/config", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusBadRequest, "choose a concrete module in authenticated remote management")
+	})
 	mux.HandleFunc("GET /api/devices", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, h.summaries())
 	})
@@ -779,34 +796,41 @@ func (h *usbDeviceHub) dispatchDeviceAPI(w http.ResponseWriter, r *http.Request)
 }
 
 func serveUSBDeviceHub(hub *usbDeviceHub, listen string) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	defer hub.close()
+	directory, err := os.UserConfigDir()
+	if err != nil {
+		log.Print("remote Web management configuration unavailable")
+		return
+	}
+	origin, err := remoteWebOrigin(listen)
+	if err != nil {
+		log.Print("remote Web management requires a valid listener port")
+		return
+	}
+	web, err := newRemoteWebManager(ctx, hub, filepath.Join(directory, "DJOneHub", "remote-web"), origin, nativeControlFile, func() (*relayprofile.Store, error) { return systemRemoteProfiles(relayclient.Options{}) })
+	if err != nil {
+		log.Printf("remote Web management startup failed: %v", err)
+		return
+	}
+	hub.remoteWeb = web
+	hub.nativeEvents.webTicket = web.auth.IssueTicket
 	// Native requests must name a concrete module. Do not silently retarget a
 	// disappearing device to whichever module becomes the new default.
 	closeNative, err := startNativeControl(nativeControlFile, hub.runtime, &hub.nativeEvents)
 	if err != nil {
 		log.Printf("native audio control: %v", err)
-		hub.close()
+		web.Close()
 		return
 	}
 	defer closeNative()
+	defer web.Close() // finish cellular cleanup before closing native control/hardware
 	server := &http.Server{
 		Addr: listen, Handler: hub.routes(webAssets), ReadHeaderTimeout: 5 * time.Second,
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	defer hub.close()
-	manager, err := startRemoteHub(ctx, remoteOnlineProfile, nativeControlFile, hub.remoteDial)
-	if err != nil {
-		log.Printf("remote online startup failed: %v", err)
-		return
-	}
-	if manager != nil {
-		hub.mu.Lock()
-		hub.remoteHub = manager
-		hub.mu.Unlock()
-		defer manager.Close() // finish cellular cleanup before detaching hardware
-		log.Print("remote online-only mode enabled; APNs wakeup is not configured; ICE configuration comes from the relay")
-	}
 	hub.start()
+	web.boot(remoteOnlineProfile)
 	log.Printf("DJOneHub multi-module mode")
 	log.Printf("Open http://%s", listen)
 	serveErr := make(chan error, 1)

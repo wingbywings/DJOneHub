@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/callsignal"
 	"github.com/iniwex5/vohive/internal/relayclient"
+	"github.com/iniwex5/vohive/internal/relayprofile"
 	"github.com/iniwex5/vohive/internal/remotecall"
 	"github.com/iniwex5/vohive/internal/remotehub"
 	"github.com/iniwex5/vohive/internal/remotemedia"
@@ -26,13 +28,15 @@ var remoteCallControls bool
 
 type remoteHubService struct {
 	*remotehub.Manager
-	resume  func(context.Context, callsignal.Message) (*callsignal.Client, error)
-	refresh func(context.Context) (string, error)
-	ice     func(context.Context, string) (turncred.Credentials, error)
+	resume   func(context.Context, callsignal.Message) (*callsignal.Client, error)
+	refresh  func(context.Context) (string, error)
+	ice      func(context.Context, string) (turncred.Credentials, error)
+	activate func()
 }
 
 // An explicit integration entry point until background-call device validation is complete.
-// No HTTP request may select a profile or load Keychain credentials.
+// The authenticated Web manager may select profiles via its serialized job
+// boundary; public device/status routes never load Keychain credentials.
 func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming func(context.Context, remotehub.Connection, callsignal.Message)) (*remoteHubService, error) {
 	if profile == "" {
 		return nil, nil
@@ -44,6 +48,16 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 	if err != nil {
 		return nil, err
 	}
+	service, err := startRemoteHubWithStore(ctx, profile, nativeFile, store, incoming)
+	if err == nil {
+		service.activate()
+	}
+	return service, err
+}
+func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, store *relayprofile.Store, incoming func(context.Context, remotehub.Connection, callsignal.Message)) (*remoteHubService, error) {
+	if profile == "" || nativeFile == "" || !opus.Available() {
+		return nil, relayprofile.ErrInvalid
+	}
 	// Fail visibly before starting a background retry loop for an absent or
 	// ambiguous local identity. Never reenroll or overwrite it automatically.
 	status, err := store.Status(profile)
@@ -53,9 +67,16 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 	if status.Phase != "ready" {
 		return nil, errors.New("remote profile requires operator recovery")
 	}
+	ready := make(chan struct{})
+	var once sync.Once
 	manager := remotehub.Start(ctx, remotehub.Config{
 		RecoverCalls: remoteSignalResume,
 		Connect: func(ctx context.Context) (remotehub.Connection, error) {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-ready:
+			}
 			readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			config, err := store.ConnectionConfig(readCtx, profile)
 			cancel()
@@ -76,7 +97,7 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 		Refresh:  func(ctx context.Context) (string, error) { return store.RefreshAccess(ctx, profile) },
 		Incoming: incoming,
 	})
-	return &remoteHubService{Manager: manager,
+	return &remoteHubService{Manager: manager, activate: func() { once.Do(func() { close(ready) }) },
 		resume: func(ctx context.Context, binding callsignal.Message) (*callsignal.Client, error) {
 			config, err := store.ConnectionConfig(ctx, profile)
 			if err != nil {

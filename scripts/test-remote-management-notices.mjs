@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
+const source = fs.readFileSync(new URL('../cmd/djonehub-macos/web/remote/app.js', import.meta.url),'utf8');
+const block = source.slice(source.indexOf('async function waitJob('),source.indexOf('async function action('));
+let text = '请扫码确认', step = 0;
+const context = vm.createContext({ authenticated:true, Date, notice(value){text=value;}, error(code){return code;}, setTimeout(callback){callback();}, async api(){ return step++ === 0 ? {state:'running',started_at:new Date().toISOString()} : {state:'completed',result:{done:true}}; } });
+vm.runInContext(block,context);
+await context.waitJob('fixture'); assert.equal(text,'操作已完成，请核对对应状态。');
+text='请扫码确认'; step=0; await context.waitJob('fixture',true); assert.equal(text,'请扫码确认');
+console.log('Management notice: completed operation clears progress; background poll preserves user message.');

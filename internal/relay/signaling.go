@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/iniwex5/vohive/internal/callsignal"
 	"github.com/iniwex5/vohive/internal/relay/identity"
+	"github.com/iniwex5/vohive/internal/relaystatus"
 	"github.com/iniwex5/vohive/internal/voippush"
 	"golang.org/x/time/rate"
 )
@@ -43,14 +44,15 @@ type signalRoute struct {
 	stopWake       context.CancelFunc
 }
 type signalBroker struct {
-	push        voippush.Sender
-	workers     sync.WaitGroup
-	pushSlots   chan struct{}
-	store       *identity.Store
-	mu          sync.Mutex
-	closed      bool
-	connections map[string]*signalConnection
-	routes      map[string]*signalRoute // first version: one live call per Hub
+	push         voippush.Sender
+	pushActivity relaystatus.Activity
+	workers      sync.WaitGroup
+	pushSlots    chan struct{}
+	store        *identity.Store
+	mu           sync.Mutex
+	closed       bool
+	connections  map[string]*signalConnection
+	routes       map[string]*signalRoute // first version: one live call per Hub
 }
 
 func newSignalBroker(store *identity.Store) *signalBroker {

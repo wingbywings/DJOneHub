@@ -52,7 +52,7 @@ func TestPushEndpointScopeRotationRevocationAndMigration(t *testing.T) {
 		t.Fatal("revoked target routable")
 	}
 	// Reproduce an existing schema v1 database, then reopen with this migration.
-	if _, err := s.db.Exec("DROP TABLE push_endpoints; PRAGMA user_version=1;"); err != nil {
+	if _, err := s.db.Exec("DROP TABLE push_endpoints; DROP TABLE grant_metadata; DROP TABLE enrollment_requests; DROP TABLE identity_metadata; PRAGMA user_version=1;"); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()
@@ -66,7 +66,7 @@ func TestPushEndpointScopeRotationRevocationAndMigration(t *testing.T) {
 	}
 	var version int
 	next.db.QueryRow("PRAGMA user_version").Scan(&version)
-	if version != 2 {
+	if version != 3 {
 		t.Fatal(version)
 	}
 }

@@ -28,7 +28,7 @@ DJOneHub for macOS
   djonehub start          启动并自动打开管理网页
   djonehub start --demo   启动无硬件演示模式
   djonehub start --remote-profile NAME  使用已配对的钥匙串配置启动远程接听
-  djonehub remote-ui      打开本机远程配对管理窗口
+  djonehub remote-ui      打开 Web 远程接听与配对页面（兼容入口）
   djonehub remote ...     管理远程配对配置（remote help 查看说明）
   djonehub stop           停止正在运行的程序
   djonehub status         查看运行状态
@@ -62,6 +62,9 @@ clean_stale_pid() {
 
 open_page() {
   if [ "${DJONEHUB_NO_OPEN:-0}" = "1" ]; then
+    return 0
+  fi
+  if [ -f "${NATIVE_CONTROL_FILE}" ] && "${BINARY}" web-open --native-control-file "${NATIVE_CONTROL_FILE}" >/dev/null 2>&1; then
     return 0
   fi
   open "${URL}" >/dev/null 2>&1 || {
@@ -108,6 +111,9 @@ start_service() {
       set -- "$@" --remote-online-profile "${profile}" --native-control-file "${NATIVE_CONTROL_FILE}"
       ;;
   esac
+  if [ "${mode}" != "--demo" ] && [ "${mode}" != "--remote-profile" ]; then
+    set -- "$@" --native-control-file "${NATIVE_CONTROL_FILE}"
+  fi
   "${BINARY}" "$@" >>"${LOG_FILE}" 2>&1 &
   child=$!
   audio_child=""
@@ -144,7 +150,7 @@ start_service() {
   if [ "${ready}" -eq 1 ]; then
     if [ "${mode}" != "--demo" ] && [ -x "${AUDIO_HOST}" ]; then
       set -- --base-url "${URL}"
-      if [ "${mode}" = "--remote-profile" ]; then
+      if [ "${mode}" != "--demo" ]; then
         set -- "$@" --native-control-file "${NATIVE_CONTROL_FILE}"
       fi
       "${AUDIO_HOST}" "$@" >>"${LOG_FILE}" 2>&1 &
@@ -231,7 +237,7 @@ case "${1:-}" in
       *) usage; exit 2 ;;
     esac
     ;;
-  remote-ui) exec "${ROOT_DIR}/bin/djonehub-remote" ;;
+  remote-ui) open_page ;;
   remote) shift; exec "${BINARY}" remote "$@" ;;
   stop) stop_service ;;
   status) show_status ;;
