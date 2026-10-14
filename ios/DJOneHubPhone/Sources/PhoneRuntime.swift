@@ -113,15 +113,25 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   }
   @Published var selectedModule = ""
   @Published var dialNumber = ""
-  @Published private(set) var outgoing = false
+  @Published private(set) var outgoing = false { didSet { updateRingback() } }
   private var pendingDial: (uuid: UUID, module: String, number: String)?
   private var signalingEpoch = ""
-  private var activatedSession: AVAudioSession?
+  private var activatedSession: AVAudioSession? { didSet { updateRingback() } }
+  private lazy var ringback: PhoneRingback = {
+    let tone = PhoneRingback()
+    tone.onFailure = { [weak self] error in
+      self?.recordDiagnostic("ringback_failed_" + phoneFailureCode(error))
+    }
+    return tone
+  }()
+  private func updateRingback() {
+    ringback.update(outgoing: outgoing, phase: callPhase, audioActive: activatedSession != nil)
+  }
   @Published private(set) var callUUID: UUID?
   private var incomingReportedUUID: UUID?
   @Published private(set) var callDisplay = ""
   @Published private(set) var callModule = ""
-  @Published private(set) var callPhase = ""
+  @Published private(set) var callPhase = "" { didSet { updateRingback() } }
   @Published private(set) var muted = false
   @Published private(set) var speaker = false
   @Published private(set) var callControlPending = false
@@ -1011,6 +1021,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
         status = "静音同步未确认，请重试"
       }
     case .answerCompleted(let b):
+      // Stop before WebRTC is enabled; awaiting_audio's phase effect follows
+      // this callback and must not leave a tone mixed into the first speech.
+      ringback.stop()
       if coordinator?.outgoing == true {
         if activeAudioBinding?.callUUID == b.callUUID, let session = activatedSession {
           media?.activated(session)
