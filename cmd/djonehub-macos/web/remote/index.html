@@ -1,17 +1,80 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DJOneHub 远程接听与配对</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
-<body><header><div><h1>远程接听与配对</h1><p>Mac 注册 · iPhone 配对 · 模块接听目标</p></div><div class="actions"><a href="/">返回模块管理</a></div></header><main>
-<p id="notice" role="status" aria-live="polite"></p>
-<section id="session-panel"><h2>本机远程管理</h2><p>正在连接本机服务，无需账号或密码。请在这台 Mac 的浏览器打开 127.0.0.1 管理地址。</p><button id="session-retry" type="button">重新连接页面</button></section>
-<div id="management" hidden>
-<section><div class="section-head"><h2>当前连接</h2><button id="refresh">刷新</button></div><p id="overview"></p><div id="pending-operation"></div><p>管理页独立于上方模块选择。切换连接会检查所有模块的来电、通话与恢复状态。</p>
-<form id="connection-form"><label>已注册 Mac 配置<select id="connection-profile" required></select></label><label class="check"><input id="auto-start" type="checkbox" checked>下次启动自动连接此配置</label><button type="submit">连接所选配置</button><button id="disconnect" type="button" class="secondary">断开（保留重启选择）</button><button id="disconnect-clear" type="button" class="secondary">断开并取消自动连接</button></form></section>
-<section><h2>注册此 Mac</h2><p>先勾选本机已发现且可用的模块，创建申请并提交到 Relay。管理员审核后，在下方对应申请中导入授权文件。</p>
-<form id="registration-form"><div class="grid"><label>Mac 备注名称<input id="registration-name" required maxlength="128" placeholder="例如：家庭 Mac"></label><label>原生 Relay 地址<input id="relay-url" type="url" required placeholder="https://oops.work"></label></div><label>Relay 管理地址（可选）<input id="relay-admin-url" type="url" placeholder="https://oops.work/relay-admin/"><small>填写已部署的管理站点 HTTPS 地址，以便从申请卡片直接打开。</small></label><fieldset id="registration-modules"><legend>本机模块</legend></fieldset><button type="submit">创建签名注册申请</button></form>
-<details><summary>导入已经保存在钥匙串中的旧配置</summary><p>只需输入曾经使用的本机 profile 名称，不需要复制凭据，也不会覆盖原身份。</p><form id="legacy-form"><label>旧 profile 名称<input id="legacy-profile" required maxlength="64" pattern="[A-Za-z0-9_-]+" placeholder="例如：home-xiaomi"></label><label>显示备注<input id="legacy-name" maxlength="128"></label><button type="submit">读取并加入列表</button></form></details></section>
-<section><h2>已注册配置与待登记申请</h2><div id="profiles"></div></section>
-<section><h2>配对 iPhone</h2><form id="pairing-form"><label>所属 Mac 配置<select id="pairing-profile" required></select></label><label>手机备注<input id="phone-name" maxlength="128" placeholder="例如：我的 iPhone"></label><fieldset id="pairing-modules"><legend>已知且已授权的模块</legend></fieldset><button type="submit">生成五分钟一次性二维码</button></form><p>二维码只授权所选模块。手机扫码确认后，页面显示此次邀请实际登记的身份；不会猜测“最新一部手机”。</p><div id="pairing-delivery" hidden><h3>等待 iPhone 扫码确认</h3><p id="pairing-expiry"></p><img id="pairing-qr" alt="一次性 iPhone 配对二维码" hidden><p id="pairing-state"></p><div class="actions"><button id="pairing-download">下载配对文件</button><button id="pairing-check">检查此次配对结果</button><button id="pairing-cancel" class="danger">撤销未使用的邀请</button><button id="pairing-apply" hidden>应用到此次配对的模块</button></div></div></section>
-<section><div class="section-head"><h2>已签发配对邀请</h2><button id="invitations-refresh">读取邀请列表</button></div><p>显示所选 Mac 配置最近 128 个邀请。刷新页面或重启后仍可检查结果和撤销未使用邀请；旧二维码和配对文件不会重新展示。</p><div id="invitations"></div></section>
-<section><div class="section-head"><h2>已配对 iPhone 管理</h2><button id="phones-refresh">读取手机列表</button></div><p>以下列表属于“配对 iPhone”中的 Mac 配置。推送登记不等于手机当前在线；撤销会使引用该身份的模块目标失效。</p><p id="presence-note">读取列表后每五秒更新 WSS 连接观测；推送登记与当前连接分别显示。</p><div id="phones"></div></section>
-<section><div class="section-head"><h2>各模块的接听目标</h2><button id="routes-refresh">读取模块配置</button></div><p>仅可选择当前连接 Mac 下、有效且覆盖该模块的手机。保存不关闭 AI；启用 AI 时继续由 AI 接听，不发送远程来电。</p><div id="module-routes"></div></section>
-</div></main></body></html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DJOneHub 远程接听与配对</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <div><a class="brand" href="/">DJOneHub <span>macOS</span></a><h1>远程接听与配对</h1><p>从这台 Mac，连接模块与 iPhone。</p></div>
+    <a class="back-link" href="/">← 返回模块管理</a>
+  </header>
+  <main>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <section id="session-panel"><h2>连接本机管理服务</h2><p>正在连接本机服务，无需账号或密码。请在这台 Mac 的浏览器打开 127.0.0.1 管理地址。</p><button id="session-retry" type="button">重新连接页面</button></section>
+    <div id="management" hidden>
+      <section class="connection-summary" aria-labelledby="connection-summary-title">
+        <div class="section-head"><div class="summary-title"><span class="status-dot" id="connection-dot" aria-hidden="true"></span><h2 id="connection-summary-title">当前连接</h2></div><div class="actions"><button id="refresh" class="secondary" type="button">↻ 刷新状态</button><button type="button" data-dialog="connection-dialog" aria-haspopup="dialog" aria-controls="connection-dialog">管理连接</button></div></div>
+        <p id="overview">正在读取连接状态…</p><div id="pending-operation"></div>
+        <div class="summary-stats"><span>可用模块 <strong id="module-count">—</strong></span><span>已登记配置 <strong id="profile-count">—</strong></span><span>待处理申请 <strong id="request-count">—</strong></span></div>
+      </section>
+      <div class="features-heading"><div><span class="eyebrow">REMOTE MANAGEMENT</span><h2>选择要使用的功能</h2></div><p>点击功能按钮，在独立窗口中完成设置。</p></div>
+      <nav class="feature-grid" aria-label="远程管理功能">
+        <button class="feature-button" type="button" data-dialog="connection-dialog" aria-haspopup="dialog" aria-controls="connection-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-2 2M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l2-2"/></svg></span><span class="feature-copy"><strong>当前连接</strong><span>管理信令连接与启动偏好</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="registration-dialog" aria-haspopup="dialog" aria-controls="registration-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5m-3-11h6m-3-3v6"/></svg></span><span class="feature-copy"><strong>注册此 Mac</strong><span>选择模块，创建新的登记申请</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="profiles-dialog" aria-haspopup="dialog" aria-controls="profiles-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M7 12h10m-10 4h6"/></svg></span><span class="feature-copy"><strong>配置与登记申请</strong><span>提交申请、导入授权与管理配置</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="pairing-dialog" aria-haspopup="dialog" aria-controls="pairing-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h2v2h-2zM21 15v6h-6m-3-18v3m0 6h3m6 0h-3M3 12h3m6 3v6"/></svg></span><span class="feature-copy"><strong>配对 iPhone</strong><span>生成一次性二维码，连接你的手机</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="invitations-dialog" aria-haspopup="dialog" aria-controls="invitations-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8V5H3v3a4 4 0 0 1 0 8v3h18v-3a4 4 0 0 1 0-8ZM13 5v3m0 3v2m0 3v3"/></svg></span><span class="feature-copy"><strong>配对邀请</strong><span>检查配对结果，撤销未使用的邀请</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="phones-dialog" aria-haspopup="dialog" aria-controls="phones-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg></span><span class="feature-copy"><strong>iPhone 管理</strong><span>查看连接状态、修改备注与撤销授权</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="routes-dialog" aria-haspopup="dialog" aria-controls="routes-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="7" height="6" rx="1"/><rect x="15" y="15" width="7" height="6" rx="1"/><path d="M5 9v9h10m-3-6 3 3-3 3m6-15v8m-3-3 3 3 3-3"/></svg></span><span class="feature-copy"><strong>模块接听目标</strong><span>为每个模块选择远程接听的手机</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="legacy-dialog" aria-haspopup="dialog" aria-controls="legacy-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6m-8 3v7m-3-3 3 3 3-3"/></svg></span><span class="feature-copy"><strong>导入旧配置</strong><span>从本机钥匙串读取已有配置</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+      </nav>
+      <p class="dashboard-note">首次使用：注册此 Mac → 在配置中完成授权 → 连接配置 → 配对 iPhone。</p>
+    </div>
+  </main>
+  <dialog id="connection-dialog" class="feature-dialog" aria-labelledby="connection-title">
+    <div class="dialog-heading"><div><span class="eyebrow">管理信令连接与启动偏好</span><h2 id="connection-title">当前连接</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭当前连接">×</button></div>
+    <div class="dialog-content"><p>切换连接会检查所有模块的来电、通话与恢复状态。</p><form id="connection-form"><label>已注册 Mac 配置<select id="connection-profile" required></select></label><label class="check"><input id="auto-start" type="checkbox" checked>下次启动自动连接此配置</label><button type="submit">连接所选配置</button><button id="disconnect" type="button" class="secondary">断开（保留重启选择）</button><button id="disconnect-clear" type="button" class="secondary">断开并取消自动连接</button></form></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="registration-dialog" class="feature-dialog" aria-labelledby="registration-title">
+    <div class="dialog-heading"><div><span class="eyebrow">选择模块，创建新的登记申请</span><h2 id="registration-title">注册此 Mac</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭注册此 Mac">×</button></div>
+    <div class="dialog-content"><p>先勾选本机已发现且可用的模块，创建申请并提交到 Relay。管理员审核后，打开“配置与登记申请”导入对应的授权文件。</p>
+<form id="registration-form"><div class="grid"><label>Mac 备注名称<input id="registration-name" required maxlength="128" placeholder="例如：家庭 Mac"></label><label>原生 Relay 地址<input id="relay-url" type="url" required placeholder="https://oops.work"></label></div><label>Relay 管理地址（可选）<input id="relay-admin-url" type="url" placeholder="https://oops.work/relay-admin/"><small>填写已部署的管理站点 HTTPS 地址，以便从申请卡片直接打开。</small></label><fieldset id="registration-modules"><legend>本机模块</legend></fieldset><button type="submit">创建签名注册申请</button></form></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="profiles-dialog" class="feature-dialog" aria-labelledby="profiles-title">
+    <div class="dialog-heading"><div><span class="eyebrow">提交申请、导入授权与管理配置</span><h2 id="profiles-title">配置与登记申请</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭配置与登记申请">×</button></div>
+    <div class="dialog-content"><div id="profiles"></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="pairing-dialog" class="feature-dialog" aria-labelledby="pairing-title">
+    <div class="dialog-heading"><div><span class="eyebrow">生成一次性二维码，连接你的手机</span><h2 id="pairing-title">配对 iPhone</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭配对 iPhone">×</button></div>
+    <div class="dialog-content"><form id="pairing-form"><label>所属 Mac 配置<select id="pairing-profile" required></select></label><label>手机备注<input id="phone-name" maxlength="128" placeholder="例如：我的 iPhone"></label><fieldset id="pairing-modules"><legend>已知且已授权的模块</legend></fieldset><button type="submit">生成五分钟一次性二维码</button></form><p>二维码只授权所选模块。手机扫码确认后，页面显示此次邀请实际登记的身份；不会猜测“最新一部手机”。</p><div id="pairing-delivery" hidden><h3>等待 iPhone 扫码确认</h3><p id="pairing-expiry"></p><img id="pairing-qr" alt="一次性 iPhone 配对二维码" hidden><p id="pairing-state"></p><div class="actions"><button id="pairing-download">下载配对文件</button><button id="pairing-check">检查此次配对结果</button><button id="pairing-cancel" class="danger">撤销未使用的邀请</button><button id="pairing-apply" hidden>应用到此次配对的模块</button></div></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="invitations-dialog" class="feature-dialog" aria-labelledby="invitations-title">
+    <div class="dialog-heading"><div><span class="eyebrow">检查配对结果，撤销未使用的邀请</span><h2 id="invitations-title">配对邀请</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭配对邀请">×</button></div>
+    <div class="dialog-content"><label>所属 Mac 配置<select id="invitations-profile" data-profile-picker required><option value="">请选择已登记配置</option></select></label><button id="invitations-refresh">读取邀请列表</button><p>显示所选 Mac 配置最近 128 个邀请。刷新页面或重启后仍可检查结果和撤销未使用邀请；旧二维码和配对文件不会重新展示。</p><div id="invitations"></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="phones-dialog" class="feature-dialog" aria-labelledby="phones-title">
+    <div class="dialog-heading"><div><span class="eyebrow">查看连接状态、修改备注与撤销授权</span><h2 id="phones-title">iPhone 管理</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭iPhone 管理">×</button></div>
+    <div class="dialog-content"><label>所属 Mac 配置<select id="phones-profile" data-profile-picker required><option value="">请选择已登记配置</option></select></label><button id="phones-refresh">读取手机列表</button><p>以下列表属于此处所选的 Mac 配置。推送登记不等于手机当前在线；撤销会使引用该身份的模块目标失效。</p><p id="presence-note">读取列表后每五秒更新 WSS 连接观测；推送登记与当前连接分别显示。</p><div id="phones"></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="routes-dialog" class="feature-dialog" aria-labelledby="routes-title">
+    <div class="dialog-heading"><div><span class="eyebrow">为每个模块选择远程接听的手机</span><h2 id="routes-title">模块接听目标</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭模块接听目标">×</button></div>
+    <div class="dialog-content"><button id="routes-refresh">读取模块配置</button><p>仅可选择当前连接 Mac 下、有效且覆盖该模块的手机。保存不关闭 AI；启用 AI 时继续由 AI 接听，不发送远程来电。</p><div id="module-routes"></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="legacy-dialog" class="feature-dialog" aria-labelledby="legacy-title">
+    <div class="dialog-heading"><div><span class="eyebrow">从本机钥匙串读取已有配置</span><h2 id="legacy-title">导入旧配置</h2></div><button type="button" class="dialog-close secondary" data-close-dialog aria-label="关闭导入旧配置">×</button></div>
+    <div class="dialog-content"><p>只需输入曾经使用的本机 profile 名称，不需要复制凭据，也不会覆盖原身份。</p><form id="legacy-form"><label>旧 profile 名称<input id="legacy-profile" required maxlength="64" pattern="[A-Za-z0-9_-]+" placeholder="例如：home-xiaomi"></label><label>显示备注<input id="legacy-name" maxlength="128"></label><button type="submit">读取并加入列表</button></form></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+</body>
+</html>

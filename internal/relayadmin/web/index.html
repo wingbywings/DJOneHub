@@ -1,20 +1,66 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="djonehub-admin-base" content="/admin/"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DJOneHub Relay 授权管理</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="djonehub-admin-base" content="/admin/">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DJOneHub Relay 授权管理</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
 <body>
-<header><div><h1>Relay 授权管理</h1><p>Mac 注册申请、授权文件和已配对设备</p></div><button id="logout" hidden>退出登录</button></header>
-<main>
-<p id="notice" role="status" aria-live="polite"></p>
-<section id="login-panel"><h2 id="login-title">管理员登录</h2><form id="login-form">
+  <header class="app-header">
+    <div><div class="brand">DJOneHub <span>Relay Admin</span></div><h1>Relay 授权管理</h1><p>管理 Mac 注册、模块授权与 iPhone 身份。</p></div>
+    <button id="logout" class="secondary" type="button" hidden>退出登录</button>
+  </header>
+  <main>
+    <p id="notice" role="status" aria-live="polite"></p>
+    <section id="login-panel"><h2 id="login-title">管理员登录</h2><form id="login-form">
 <label id="setup-field" hidden>一次性初始化凭据<input id="setup-token" type="password" autocomplete="off"><small>从服务器私有 setup.json 获取；初始化后失效。</small></label>
-<label>管理员账号<input id="username" autocomplete="username" required maxlength="64" pattern="[A-Za-z0-9_-]+"></label>
+<label>管理员账号<input id="username" autocomplete="username" required maxlength="64" pattern="[A-Za-z0-9_\-]+"></label>
 <label>密码<input id="password" type="password" autocomplete="current-password" required minlength="12" maxlength="256"></label>
 <button type="submit" id="login-button">登录</button></form></section>
-<div id="management" hidden>
-<section><div class="section-head"><h2>服务与权限</h2><button id="refresh">刷新</button></div><p id="overview"></p><div id="runtime-health" aria-live="polite"></div><p>运行状态每五秒刷新。TURN 签发成功不代表媒体连通，APNs 接受请求不代表手机已收到；未观测的端到端能力保持未知。</p><p>模块候选由 Mac 的设备清单提交。请核对申请编号、公钥指纹及设备范围后批准。</p>
-<label class="file-label">导入 Mac 注册申请<input id="import-request" type="file" accept="application/json,.json"></label></section>
-<section><h2>注册申请与授权文件</h2><p>先批准所选模块，再签发下载。重新签发会使旧的未消费授权失效；授权文件通常有效 10 分钟。可单独删除最新授权，或删除申请及全部授权；已注册设备不受影响，本地下载文件需自行清理。</p><div id="requests"></div></section>
-<section><h2>已注册 Mac 与已配对 iPhone</h2><p>撤销 Mac 将使其所属手机授权一并失效；此操作可能中断活动通话。已撤销条目可删除；删除 Mac 时一并清理所属已失效 iPhone，审批历史和审计记录保留。</p><div class="table-scroll"><table><thead><tr><th>设备 / 身份</th><th>所属 Hub</th><th>模块范围</th><th>状态</th><th>操作</th></tr></thead><tbody id="identities"></tbody></table></div></section>
-<section><div class="section-head"><h2>管理操作记录</h2><button id="clear-audit" class="danger">清除已完成记录</button></div><p>pending 表示操作结果尚未完整记录，请刷新对象状态核对。清除操作保留待核对记录和本次清除记录；不改变设备、申请或授权。</p><div id="audit"></div></section>
-</div>
-</main></body></html>
+    <div id="management" hidden>
+      <section class="connection-summary" aria-labelledby="summary-title">
+        <div class="section-head"><div class="summary-title"><span class="status-dot" id="runtime-dot" aria-hidden="true"></span><h2 id="summary-title">服务概览</h2><span id="runtime-state" class="status-label">正在读取状态…</span></div><div class="actions"><button id="refresh" class="secondary" type="button">↻ 刷新状态</button><button type="button" data-dialog="health-dialog" aria-haspopup="dialog" aria-controls="health-dialog">查看服务状态</button></div></div>
+        <p id="overview">正在读取 Relay 与管理范围…</p>
+        <div class="summary-stats"><span>待审核申请 <strong id="request-count">—</strong></span><span>有效 Mac <strong id="mac-count">—</strong></span><span>有效 iPhone <strong id="phone-count">—</strong></span><span>在线连接 <strong id="online-count">—</strong></span></div>
+      </section>
+      <div class="features-heading"><div><span class="eyebrow">RELAY MANAGEMENT</span><h2>选择要使用的功能</h2></div><p>点击功能按钮，在独立窗口中完成管理。</p></div>
+      <nav class="feature-grid" aria-label="Relay 管理功能">
+        <button class="feature-button" type="button" data-dialog="health-dialog" aria-haspopup="dialog" aria-controls="health-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01m4-11h6m-6 11h6"/></svg></span><span class="feature-copy"><strong>服务与权限</strong><span>检查 Relay、信令、TURN 与 APNs 的运行状态</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="import-dialog" aria-haspopup="dialog" aria-controls="import-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8ZM14 2v6h6m-8 3v7m-3-3 3 3 3-3"/></svg></span><span class="feature-copy"><strong>导入注册申请</strong><span>从 Mac 申请文件开始新的设备登记</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="requests-dialog" aria-haspopup="dialog" aria-controls="requests-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 3H5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-4"/><rect x="9" y="2" width="6" height="4" rx="1"/><path d="m8 13 3 3 5-6"/></svg></span><span class="feature-copy"><strong>注册申请与授权</strong><span>审核模块范围，签发与管理授权文件</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="identities-dialog" aria-haspopup="dialog" aria-controls="identities-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="14" height="11" rx="2"/><path d="M5 19h8m-4-5v5"/><rect x="16" y="9" width="6" height="12" rx="1.5"/><path d="M18.5 18h1"/></svg></span><span class="feature-copy"><strong>Mac 与 iPhone 管理</strong><span>查看设备身份、模块授权与连接状态</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+        <button class="feature-button" type="button" data-dialog="audit-dialog" aria-haspopup="dialog" aria-controls="audit-dialog"><span class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v15a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2h-3"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M7 11h10M7 15h10m-10 4h6"/></svg></span><span class="feature-copy"><strong>管理操作记录</strong><span>查看操作结果，清理已完成的记录</span></span><span class="feature-arrow" aria-hidden="true">↗</span></button>
+      </nav>
+      <div class="dashboard-footer"><p>登记流程：接收申请 → 核对并批准模块 → 下载授权文件 → 在 Mac 导入。</p><p id="last-updated">状态每五秒自动更新。</p></div>
+    </div>
+  </main>
+  <dialog id="health-dialog" class="feature-dialog" aria-labelledby="health-title">
+    <div class="dialog-heading"><div><span class="eyebrow">检查 Relay、信令、TURN 与 APNs 的运行状态</span><h2 id="health-title">服务与权限</h2></div><button class="dialog-close secondary" type="button" data-close-dialog aria-label="关闭服务与权限">×</button></div>
+    <div class="dialog-content"><div id="runtime-health" aria-live="polite"></div><p>运行状态每五秒刷新。TURN 签发成功不代表媒体连通，APNs 接受请求不代表手机已收到；未观测的端到端能力保持未知。</p><p>此页面仅展示当前管理员范围内的运行观测与连接状态。</p></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="import-dialog" class="feature-dialog" aria-labelledby="import-title">
+    <div class="dialog-heading"><div><span class="eyebrow">从 Mac 申请文件开始新的设备登记</span><h2 id="import-title">导入注册申请</h2></div><button class="dialog-close secondary" type="button" data-close-dialog aria-label="关闭导入注册申请">×</button></div>
+    <div class="dialog-content"><p>模块候选由 Mac 的设备清单提交。导入后，打开“注册申请与授权”核对申请编号、公钥指纹及设备范围，再批准所选模块。</p><label class="file-label">Mac 注册申请文件<input id="import-request" type="file" accept="application/json,.json"><small>选择从 Mac 下载的 JSON 注册申请文件，最大 16 KiB。</small></label></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="requests-dialog" class="feature-dialog" aria-labelledby="requests-title">
+    <div class="dialog-heading"><div><span class="eyebrow">审核模块范围，签发与管理授权文件</span><h2 id="requests-title">注册申请与授权</h2></div><button class="dialog-close secondary" type="button" data-close-dialog aria-label="关闭注册申请与授权">×</button></div>
+    <div class="dialog-content"><p>先批准所选模块，再签发下载。重新签发会使旧的未消费授权失效；授权文件通常有效 10 分钟。可单独删除最新授权，或删除申请及全部授权；已注册设备不受影响，本地下载文件需自行清理。</p><div id="requests"></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="identities-dialog" class="feature-dialog dialog-wide" aria-labelledby="identities-title">
+    <div class="dialog-heading"><div><span class="eyebrow">查看设备身份、模块授权与连接状态</span><h2 id="identities-title">Mac 与 iPhone 管理</h2></div><button class="dialog-close secondary" type="button" data-close-dialog aria-label="关闭Mac 与 iPhone 管理">×</button></div>
+    <div class="dialog-content"><p>撤销 Mac 将使其所属手机授权一并失效；此操作可能中断活动通话。已撤销条目可删除；删除 Mac 时一并清理所属已失效 iPhone，审批历史和审计记录保留。</p><div class="table-scroll"><table><thead><tr><th>设备 / 身份</th><th>所属 Hub</th><th>模块范围</th><th>状态</th><th>操作</th></tr></thead><tbody id="identities"></tbody></table></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="audit-dialog" class="feature-dialog" aria-labelledby="audit-title">
+    <div class="dialog-heading"><div><span class="eyebrow">查看操作结果，清理已完成的记录</span><h2 id="audit-title">管理操作记录</h2></div><button class="dialog-close secondary" type="button" data-close-dialog aria-label="关闭管理操作记录">×</button></div>
+    <div class="dialog-content"><div class="section-head"><span>最近 256 条记录</span><button id="clear-audit" class="danger" type="button">清除已完成记录</button></div><p>pending 表示操作结果尚未完整记录，请刷新对象状态核对。清除操作保留待核对记录和本次清除记录；不改变设备、申请或授权。</p><div id="audit"></div></div>
+    <p class="dialog-notice" role="status" aria-live="polite"></p>
+  </dialog>
+</body>
+</html>

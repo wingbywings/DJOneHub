@@ -13,7 +13,36 @@ const errorMessages = { management_login_required: '请重新登录', login_deni
 const actionNames = { import_request: '导入注册申请', approve_request: '批准注册申请', reject_request: '拒绝或撤销申请', issue_authorization: '签发授权文件', revoke_identity: '撤销设备身份', delete_revoked_identity: '删除已撤销设备记录', delete_enrollment_request: '删除注册申请', delete_enrollment_authorization: '删除授权文件', clear_audit: '清除已完成管理记录' };
 const resultNames = { pending: '结果待核对', success: '成功', failed: '失败' };
 const states = { pending: '待审核', approved: '已批准', rejected: '已拒绝', expired: '已过期', completed: '已注册' };
-function notice(text) { $('#notice').textContent = text; }
+function notice(text) {
+  $('#notice').textContent = text;
+  const current = document.querySelector('.feature-dialog[open] .dialog-notice');
+  if (current) current.textContent = text;
+}
+function openFeature(id) {
+  if (!authenticated) return;
+  const dialog = document.getElementById(id);
+  document.querySelectorAll('.feature-dialog[open]').forEach(item => item.close());
+  dialog.querySelector('.dialog-notice').textContent = '';
+  dialog.showModal();
+  document.body.classList.add('modal-open');
+}
+for (const trigger of document.querySelectorAll('[data-dialog]')) {
+  trigger.addEventListener('click', () => openFeature(trigger.dataset.dialog));
+}
+for (const dialog of document.querySelectorAll('.feature-dialog')) {
+  dialog.querySelector('[data-close-dialog]').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => {
+    if (!document.querySelector('.feature-dialog[open]')) document.body.classList.remove('modal-open');
+  });
+  // Dismiss only when both ends of the click are outside the dialog.
+  const outside = event => {
+    const rect = dialog.getBoundingClientRect();
+    return event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom);
+  };
+  let startedOutside = false;
+  dialog.addEventListener('pointerdown', event => { startedOutside = outside(event); });
+  dialog.addEventListener('click', event => { if (startedOutside && outside(event)) dialog.close(); startedOutside = false; });
+}
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -22,6 +51,7 @@ function element(tag, text, className) {
 }
 function date(value) { return value ? new Date(value).toLocaleString() : '旧记录 / 未知'; }
 function showLogin() {
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close());
   authenticated = false; csrf = ''; renderSignatures.clear(); selections.clear();
   $('#management').hidden = true; $('#login-panel').hidden = false; $('#logout').hidden = true;
   $('#setup-field').hidden = configured;
@@ -41,19 +71,19 @@ async function api(path, body, download = false) {
   return download ? response.blob() : response.json();
 }
 async function confirmAction(message) {
-  const panel = element('div', undefined, 'confirmation');
-  panel.setAttribute('role', 'alertdialog');
-  panel.setAttribute('aria-label', '确认管理操作');
-  panel.append(element('p', message));
+  const dialog = element('dialog', undefined, 'confirmation');
+  dialog.setAttribute('role', 'alertdialog');
+  dialog.setAttribute('aria-labelledby', 'confirmation-title');
+  dialog.append(Object.assign(element('h2', '确认管理操作'), { id: 'confirmation-title' }), element('p', message));
   const actions = element('div', undefined, 'actions');
-  const accept = element('button', '确认操作');
-  const cancel = element('button', '取消');
-  actions.append(accept, cancel); panel.append(actions);
-  document.querySelector('main').prepend(panel);
-  cancel.focus();
+  const accept = element('button', '确认操作'), cancel = element('button', '取消', 'secondary');
+  accept.type = cancel.type = 'button';
+  actions.append(cancel, accept); dialog.append(actions); document.body.append(dialog);
   return new Promise(resolve => {
-    accept.addEventListener('click', () => { panel.remove(); resolve(true); });
-    cancel.addEventListener('click', () => { panel.remove(); resolve(false); });
+    dialog.addEventListener('close', () => { const confirmed = dialog.returnValue === 'confirmed'; dialog.remove(); resolve(confirmed); }, { once: true });
+    accept.addEventListener('click', () => dialog.close('confirmed'));
+    cancel.addEventListener('click', () => dialog.close());
+    dialog.showModal(); cancel.focus();
   });
 }
 async function action(button, work) {
@@ -63,14 +93,22 @@ async function action(button, work) {
   finally { busy = false; if (button.isConnected) button.disabled = false; }
 }
 function button(label, work, danger = false) {
-  const node = element('button', label, danger ? 'danger' : '');
+  const node = element('button', label, danger ? 'danger' : 'secondary');
+  node.type = 'button';
   node.addEventListener('click', () => action(node, work));
   return node;
 }
-function copyButton(label, value) { const b = button(label, async () => { const text = typeof value === 'function' ? await value() : value; try { await navigator.clipboard.writeText(text); notice('已复制'); } catch { notice('浏览器未允许自动复制，请选择文本手动复制。'); const field = element('textarea'); field.value = text; field.readOnly = true; $('#notice').append(field); field.focus(); field.select(); } }); b.disabled = !value; return b; }
+function copyButton(label, value) { const b = button(label, async () => { const text = typeof value === 'function' ? await value() : value; try { await navigator.clipboard.writeText(text); notice('已复制'); } catch { notice('浏览器未允许自动复制，请选择文本手动复制。'); const field = element('textarea'); field.value = text; field.readOnly = true; (document.querySelector('.feature-dialog[open] .dialog-notice') || $('#notice')).append(field); field.focus(); field.select(); } }); b.disabled = !value; return b; }
 function signalLabel(item) { const age = Date.now() - item.signal_received_at; if (!item.signal_observed_at || !Number.isFinite(new Date(item.signal_observed_at).getTime()) || !Number.isFinite(age) || age < -1000 || age > 12000) return 'WSS 在线状态未知'; return item.signal_state === 'online' ? 'WSS 在线' : item.signal_state === 'offline' ? 'WSS 未连接' : 'WSS 在线状态未知'; }
 function activityLabel(value, label) { if (!value?.loaded) return `${label}：未加载`; const result = value.last_result === 'accepted' ? '接受' : '失败'; return `${label}：已加载${value.environment ? '（' + value.environment + '）' : ''}；${value.last_attempt ? `最近请求${result} · ${date(value.last_attempt)}；成功 ${value.successes} / 失败 ${value.failures}` : '尚无请求结果'}`; }
-function renderHealth(runtime) { const box = $('#runtime-health'); box.replaceChildren(); if (runtime?.state !== 'fresh' || !runtime.snapshot) { box.append(element('p', runtime?.state === 'stale' ? `运行观测已过期（最后更新：${date(runtime.snapshot?.observed_at)}）；健康和在线状态未知。` : '无法读取运行观测；请确认 Relay 已升级、正在运行，并与管理服务使用同一服务用户和身份目录。')); return; } const s = runtime.snapshot; box.append(element('p', `采样：${date(s.observed_at)} · Relay 构建：${s.build || '未知'} · 启动：${date(s.started_at)}`)); const list = element('ul'); for (const line of [`信令：${s.running ? 'Relay 正在运行' : 'Relay 已停止'} · 本管理范围 WSS 连接：${s.online_count}`, `身份数据库：${s.identity_healthy ? '查询正常' : '查询失败'}`, activityLabel(s.turn, 'TURN 凭据签发'), activityLabel(s.apns, 'APNs 推送')]) list.append(element('li', line)); box.append(list); if (!s.running) box.append(element('p', '进程已停止，上述配置及请求结果仅为退出时记录。')); }
+function renderHealthSummary(runtime) {
+  const fresh = runtime?.state === 'fresh' && runtime.snapshot;
+  const running = fresh && runtime.snapshot.running;
+  $('#runtime-dot').classList.toggle('online', Boolean(running));
+  $('#runtime-state').textContent = fresh ? (running ? 'Relay 正在运行' : 'Relay 已停止') : runtime?.state === 'stale' ? '运行观测已过期' : '运行状态未知';
+  $('#online-count').textContent = running ? runtime.snapshot.online_count : '—';
+}
+function renderHealth(runtime) { renderHealthSummary(runtime); const box = $('#runtime-health'); box.replaceChildren(); if (runtime?.state !== 'fresh' || !runtime.snapshot) { box.append(element('p', runtime?.state === 'stale' ? `运行观测已过期（最后更新：${date(runtime.snapshot?.observed_at)}）；健康和在线状态未知。` : '无法读取运行观测；请确认 Relay 已升级、正在运行，并与管理服务使用同一服务用户和身份目录。')); return; } const s = runtime.snapshot; box.append(element('p', `采样：${date(s.observed_at)} · Relay 构建：${s.build || '未知'} · 启动：${date(s.started_at)}`)); const list = element('ul'); for (const line of [`信令：${s.running ? 'Relay 正在运行' : 'Relay 已停止'} · 本管理范围 WSS 连接：${s.online_count}`, `身份数据库：${s.identity_healthy ? '查询正常' : '查询失败'}`, activityLabel(s.turn, 'TURN 凭据签发'), activityLabel(s.apns, 'APNs 推送')]) list.append(element('li', line)); box.append(list); if (!s.running) box.append(element('p', '进程已停止，上述配置及请求结果仅为退出时记录。')); }
 function renderRequests(items) {
   if (!changed('requests', items)) return;
   const container = $('#requests'); container.replaceChildren();
@@ -177,6 +215,10 @@ async function refresh() {
     const [overview, requests, identities, audit] = await Promise.all([api('overview'), api('requests'), api('identities'), api('audit')]);
     if (!authenticated) return;
     $('#overview').textContent = `Relay：${overview.relay_origin} · 管理范围：${overview.tenant} · 构建：${overview.build}`;
+    $('#request-count').textContent = requests.requests.filter(item => item.state === 'pending').length;
+    $('#mac-count').textContent = identities.identities.filter(item => item.kind === 'hub' && !item.revoked).length;
+    $('#phone-count').textContent = identities.identities.filter(item => item.kind === 'installation' && !item.revoked).length;
+    $('#last-updated').textContent = `更新于 ${new Date().toLocaleTimeString()} · 每五秒自动刷新`;
     runtimeReceivedAt = Date.now(); lastRuntime = overview.runtime; identities.identities.forEach(item => { item.signal_received_at = runtimeReceivedAt; }); renderHealth(overview.runtime); renderRequests(requests.requests); renderIdentities(identities.identities); renderAudit(audit.events);
   } catch (error) { renderHealth({ state: 'unavailable' }); $('#identities').querySelectorAll('.connection-state').forEach(item => { item.textContent = 'WSS 在线状态未知'; }); $('#identities').querySelectorAll('.connection-time').forEach(item => { item.textContent = '本次查询失败'; }); notice(error.message); } finally { loading = false; }
 }
