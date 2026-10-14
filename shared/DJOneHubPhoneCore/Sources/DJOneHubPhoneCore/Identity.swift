@@ -122,6 +122,7 @@ extension IdentityHTTP {
   private let vault: IdentityVault
   private let http: IdentityHTTP
   private var busy = false
+  private var refreshTask: Task<StoredIdentity, Error>?
   public var operationInProgress: Bool { busy }
   public init(vault: IdentityVault, http: IdentityHTTP) {
     self.vault = vault
@@ -164,14 +165,25 @@ extension IdentityHTTP {
     try vault.replace(Wire.encoder().encode(record))
   }
   public func credentials(forceRefresh: Bool = false) async throws -> StoredIdentity {
+    // Push registration and a PushKit wake can need credentials together. Join
+    // the in-flight rotation rather than rejecting the incoming call as busy.
+    if let refreshTask { return try await refreshTask.value }
     guard !busy else { throw PhoneError.busy }
     busy = true
     defer { busy = false }
-    guard var r = try status(), r.phase == "ready", let old = r.tokens else {
+    guard let r = try status(), r.phase == "ready", let old = r.tokens else {
       throw PhoneError.recoveryRequired
     }
     try old.validate(allowExpiredAccess: true)
     if !forceRefresh && old.principal.access_expires_at > Date().addingTimeInterval(60) { return r }
+    let record = r
+    let task = Task { try await self.refresh(record, old: old) }
+    refreshTask = task
+    defer { refreshTask = nil }
+    return try await task.value
+  }
+  private func refresh(_ record: StoredIdentity, old: Tokens) async throws -> StoredIdentity {
+    var r = record
     struct Request: Encodable {
       let identity_id: String
       let refresh_token: String

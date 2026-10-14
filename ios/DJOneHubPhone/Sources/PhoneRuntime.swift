@@ -359,6 +359,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
           if error == nil { self.provider.reportCall(with: uuid, endedAt: Date(), reason: .failed) }
           return
         }
+        self.recordDiagnostic(error.map { "push_report_" + phoneFailureCode($0) } ?? "push_callkit_reported")
         self.wakeReported = error == nil
         if error != nil && !self.wakeRejected {
           self.disconnect("系统未允许后台来电")
@@ -377,6 +378,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
           self.history.begin(id: uuid, module: hint.binding.moduleID, display: caller.display, outgoing: false)
           self.saveHistory()
         } catch {
+          self.recordDiagnostic("push_validation_" + phoneFailureCode(error))
           self.disconnect("后台来电已失效")
           return
         }
@@ -464,16 +466,21 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       status = "需要麦克风权限才能接听"
       return
     }
+    var connectionStage = "credentials"
     do {
       let credentials = try await identity.credentials()
       guard connectionID == attempt, !fromPush || wake?.binding == wakeBinding else { return }
       guard let tokens = credentials.tokens else { throw PhoneError.invalidData }
+      connectionStage = "push_validation"
       if let wake { try wake.validate(principal: tokens.principal) }
+      connectionStage = "socket_setup"
       let c = try SignalSocket(identity: credentials)
       coordinator = PhoneCall(principal: tokens.principal) { [weak self] effect in self?.handle(effect) }
       installSocket(c, credentials: credentials, recovering: false)
 
     } catch {
+      guard connectionID == attempt else { return }
+      recordDiagnostic("connect_" + connectionStage + "_" + phoneFailureCode(error))
       reloadStatus()
       if fromPush || wake != nil { disconnect("后台来电连接失败") }
       else if identityReady { status = "连接失败；可点击重新连接，或检查 Relay 和配对状态" }
@@ -721,6 +728,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     }
   }
   func disconnect(_ message: String = "已断开") {
+    if callUUID != nil || wake != nil || coordinator?.binding != nil {
+      recordDiagnostic("disconnect_reason=" + message)
+    }
     if coordinator?.binding != nil { recordDiagnostic("signaling_disconnected") }
     if let wake, coordinator?.binding != wake.binding {
       provider.reportCall(
@@ -856,7 +866,10 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     }
   }
   private func recordDiagnostic(_ code: String) {
-    logger.info("stage=\(code, privacy: .public)")
+    // Persist call stages so an incident can be investigated after the app is
+    // suspended. Only app-defined reasons, native codes and call IDs are logged.
+    let call = callUUID?.uuidString.lowercased() ?? "none"
+    logger.notice("stage=\(code, privacy: .public) call=\(call, privacy: .public) phase=\(self.callPhase, privacy: .public)")
     callDiagnostics.append(code)
     if callDiagnostics.count > 24 { callDiagnostics.removeFirst(callDiagnostics.count - 24) }
   }
@@ -1181,6 +1194,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     if let wake, wake.binding.callUUID == action.callUUID.uuidString.lowercased(),
       coordinator?.binding == nil, answerAction == nil
     {
+      recordDiagnostic("answer_requested_before_signaling")
       answerAction = action
       return
     }
@@ -1191,6 +1205,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       return
     }
     do { try media?.configureAudio() } catch {
+      recordDiagnostic("answer_audio_config_" + phoneFailureCode(error))
       action.fail()
       disconnect("音频配置失败")
       return

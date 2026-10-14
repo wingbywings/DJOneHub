@@ -25,6 +25,18 @@ import XCTest
     return try response(path, body)
   }
 }
+@MainActor private final class SuspendedRefreshHTTP: IdentityHTTP {
+  var calls: [String] = []
+  var challenge: CheckedContinuation<Data, Error>?
+  var refreshResponse = Data()
+  func post(origin: URL, path: String, body: Data, accessToken: String?) async throws -> Data {
+    calls.append(path)
+    if path == "/v1/auth/challenge" {
+      return try await withCheckedThrowingContinuation { challenge = $0 }
+    }
+    return refreshResponse
+  }
+}
 final class PhoneTests: XCTestCase {
   let now = Date()
   func principal() -> Principal {
@@ -50,6 +62,36 @@ final class PhoneTests: XCTestCase {
         "deadline": .string(f.string(from: Date().addingTimeInterval(45))),
         "display": .string("DJOneHub"),
       ])
+  }
+  @MainActor func testPushWakeJoinsRegistrationCredentialRefresh() async throws {
+    let vault = MemoryVault()
+    let http = SuspendedRefreshHTTP()
+    let identity = PhoneIdentity(vault: vault, http: http)
+    try vault.create(Wire.encoder().encode(StoredIdentity(
+      relay: "https://relay.example", seed: Data(repeating: 1, count: 32), phase: "ready",
+      tokens: tokens(Date().addingTimeInterval(10)))))
+    http.refreshResponse = try Wire.encoder().encode(tokens(
+      Date().addingTimeInterval(900), refresh: String(repeating: "n", count: 43)))
+    let registration = Task { try await identity.credentials() }
+    while http.challenge == nil { await Task.yield() }
+    XCTAssertTrue(identity.operationInProgress)
+    var wakeStarted = false, forcedRefreshStarted = false
+    let wake = Task { wakeStarted = true; return try await identity.credentials() }
+    let forcedRefresh = Task { forcedRefreshStarted = true; return try await identity.credentials(forceRefresh: true) }
+    while !wakeStarted || !forcedRefreshStarted { await Task.yield() }
+    let challenge = try JSONSerialization.data(withJSONObject: [
+      "id": "challenge", "value": String(repeating: "v", count: 43),
+      "expires_at": ISO8601DateFormatter().string(from: Date().addingTimeInterval(90)),
+    ])
+    http.challenge?.resume(returning: challenge)
+    let first = try await registration.value
+    let second = try await wake.value
+    let third = try await forcedRefresh.value
+    XCTAssertEqual(first.tokens?.refresh_token, second.tokens?.refresh_token)
+    XCTAssertEqual(first.tokens?.refresh_token, third.tokens?.refresh_token)
+    XCTAssertEqual(http.calls, ["/v1/auth/challenge", "/v1/auth/refresh"])
+    XCTAssertEqual(try identity.status()?.phase, "ready")
+    XCTAssertFalse(identity.operationInProgress)
   }
   func testWireRejectsForeignInstallationOversizeAndUnknownFields() throws {
     let message = invite()
