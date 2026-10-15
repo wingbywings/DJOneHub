@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,19 +15,29 @@ import (
 	"time"
 )
 
+const moduleSetupVerifyWindow = 60 * time.Second
+
 // moduleSetupStatus is persisted per Device ID so a USB identity change and
 // Runtime replacement can continue the same setup transaction safely.
 type moduleSetupStatus struct {
-	TransactionID        string `json:"transaction_id,omitempty"`
-	State                string `json:"state"`
-	Summary              string `json:"summary"`
-	Detail               string `json:"detail,omitempty"`
-	CanInitialize        bool   `json:"can_initialize"`
-	RequiresConfirmation bool   `json:"requires_confirmation"`
-	RequiresADBPasscode  bool   `json:"requires_adb_passcode,omitempty"`
-	ADBChallenge         string `json:"adb_challenge,omitempty"`
-	BackupPath           string `json:"backup_path,omitempty"`
-	UpdatedAt            string `json:"updated_at"`
+	Stage                string    `json:"stage,omitempty"`
+	OriginalStage        string    `json:"original_stage,omitempty"`
+	OriginalError        string    `json:"original_error,omitempty"`
+	RestartError         string    `json:"restart_error,omitempty"`
+	Rollback             bool      `json:"rollback,omitempty"`
+	RestartEnumeration   string    `json:"restart_enumeration,omitempty"`
+	RestartPhysicalID    string    `json:"restart_physical_id,omitempty"`
+	VerifyDeadline       time.Time `json:"verify_deadline,omitempty"`
+	TransactionID        string    `json:"transaction_id,omitempty"`
+	State                string    `json:"state"`
+	Summary              string    `json:"summary"`
+	Detail               string    `json:"detail,omitempty"`
+	CanInitialize        bool      `json:"can_initialize"`
+	RequiresConfirmation bool      `json:"requires_confirmation"`
+	RequiresADBPasscode  bool      `json:"requires_adb_passcode,omitempty"`
+	ADBChallenge         string    `json:"adb_challenge,omitempty"`
+	BackupPath           string    `json:"backup_path,omitempty"`
+	UpdatedAt            string    `json:"updated_at"`
 }
 
 type usbComposition struct {
@@ -244,7 +255,7 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 	if a.demo {
 		return moduleSetupStatus{State: "ready", Summary: "演示模块已完成初始化", UpdatedAt: now}
 	}
-	response, err := a.runATCommand(`AT+QCFG="USBCFG"`, 4*time.Second)
+	response, err := a.runModuleSetupAT(`AT+QCFG="USBCFG"`, 4*time.Second)
 	if err != nil {
 		return moduleSetupStatus{State: "disconnected", Summary: "等待 4G 模块连接", Detail: err.Error(), UpdatedAt: now}
 	}
@@ -258,9 +269,9 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 		}
 		return moduleSetupStatus{State: state, Summary: summary, Detail: err.Error(), UpdatedAt: now}
 	}
-	imsResponse, imsErr := a.runATCommand(`AT+QCFG="ims"`, 3*time.Second)
+	imsResponse, imsErr := a.runModuleSetupAT(`AT+QCFG="ims"`, 3*time.Second)
 	imsConfiguration, imsCapability, imsParseErr := parseIMSConfiguration(imsResponse)
-	volteResponse, volteErr := a.runATCommand(`AT+QCFG="volte_disable"`, 3*time.Second)
+	volteResponse, volteErr := a.runModuleSetupAT(`AT+QCFG="volte_disable"`, 3*time.Second)
 	volteDisable, volteParseErr := parseVoLTEDisable(volteResponse)
 	if composition.isUACTarget() && imsErr == nil && imsParseErr == nil && volteErr == nil && volteParseErr == nil && imsConfiguration == 1 && imsCapability == 1 && volteDisable == 0 {
 		return moduleSetupStatus{State: "ready", Summary: "模块已具备 USB 音频与 VoLTE 能力", Detail: composition.command(), UpdatedAt: now}
@@ -272,7 +283,7 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 	requiresADBPasscode := false
 	adbChallenge := ""
 	if composition.needsADBUnlockForVoice() {
-		if qadbResponse, qadbErr := a.runATCommand("AT+QADBKEY?", 4*time.Second); qadbErr == nil {
+		if qadbResponse, qadbErr := a.runModuleSetupAT("AT+QADBKEY?", 4*time.Second); qadbErr == nil {
 			if challenge, parseErr := parseQADBChallenge(qadbResponse); parseErr == nil {
 				requiresADBPasscode = true
 				adbChallenge = challenge
@@ -284,21 +295,24 @@ func (a *app) inspectModuleSetup() moduleSetupStatus {
 		detail = firstSetupDetail(detail, errorText(imsErr), errorText(imsParseErr), errorText(volteErr), errorText(volteParseErr))
 	}
 	return moduleSetupStatus{
-		State: "needs_initialization", Summary: setupInitializationSummary(requiresADBPasscode), Detail: detail,
+		State: "needs_initialization", Summary: setupInitializationSummary(composition.hasUAC(), requiresADBPasscode), Detail: detail,
 		CanInitialize: true, RequiresConfirmation: true, RequiresADBPasscode: requiresADBPasscode,
 		ADBChallenge: adbChallenge, UpdatedAt: now,
 	}
 }
 
-func setupInitializationSummary(requiresADBPasscode bool) string {
+func setupInitializationSummary(hasUAC, requiresADBPasscode bool) string {
 	if requiresADBPasscode {
-		return "USB 音频已启用，将自动解锁 ADB"
+		if hasUAC {
+			return "USB 音频已启用，将自动解锁 ADB"
+		}
+		return "将自动解锁 ADB 并启用 USB 音频"
 	}
 	return "可备份当前配置并启用通话支持"
 }
 
 func moduleSetupIsTransient(state string) bool {
-	return state == "initializing" || state == "restarting" || state == "verifying" || state == "rolling_back"
+	return state == "initializing" || state == "restarting" || state == "verifying" || state == "rolling_back" || state == "rollback_restarting" || state == "rollback_verifying"
 }
 
 func moduleSetupIsCachedTerminal(state string) bool {
@@ -314,6 +328,8 @@ func (a *app) moduleSetupStatusAPI(w http.ResponseWriter, _ *http.Request) {
 		inspection := a.inspectModuleSetup()
 		a.operationMu.RUnlock()
 		if inspection.State == "ready" {
+			inspection.OriginalError = current.OriginalError
+			inspection.RestartError = current.RestartError
 			writeJSON(w, http.StatusOK, inspection)
 			return
 		}
@@ -412,10 +428,13 @@ func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	transactionID := time.Now().UTC().Format("20060102T150405.000000000Z")
-	a.setModuleSetup(moduleSetupStatus{
-		TransactionID: transactionID, State: "initializing", Summary: "正在备份并启用通话支持",
+	if !a.beginModuleSetup(moduleSetupStatus{
+		TransactionID: transactionID, State: "initializing", Stage: "backup", Summary: "正在备份并启用通话支持",
 		Detail: inspection.Detail,
-	})
+	}) {
+		writeError(w, http.StatusConflict, "模块通话支持正在初始化")
+		return
+	}
 	go a.runModuleSetup(transactionID)
 	a.moduleSetupMu.RLock()
 	status := a.moduleSetup
@@ -423,10 +442,37 @@ func (a *app) moduleSetupStartAPI(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, status)
 }
 
+func (a *app) beginModuleSetup(status moduleSetupStatus) bool {
+	a.moduleSetupMu.Lock()
+	if moduleSetupIsTransient(a.moduleSetup.State) || a.moduleSetupResuming {
+		a.moduleSetupMu.Unlock()
+		return false
+	}
+	previous := a.moduleSetup
+	status.UpdatedAt = time.Now().Format(time.RFC3339)
+	a.moduleSetup = status
+	err := a.persistModuleSetupStateLocked()
+	a.moduleSetupMu.Unlock()
+	a.logModuleSetupTransition(previous, status, err)
+	return true
+}
+
 func (a *app) runModuleSetup(transactionID string) {
 	a.operationMu.Lock()
-	defer a.operationMu.Unlock()
+	defer func() {
+		a.operationMu.Unlock()
+		ctx := a.moduleSetupContext
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		go a.resumeModuleSetup(ctx)
+	}()
 
+	if a.hasActiveCall() {
+		a.failModuleSetup(transactionID, "初始化取消，模块已有通话", errors.New("通话期间不能修改模块配置"), "")
+		return
+	}
+	a.moduleSetupStage("backup", "正在读取并备份原始配置")
 	backup, err := a.readModuleSetupBackup()
 	if err != nil {
 		a.failModuleSetup(transactionID, "启用前校验未通过", err, "")
@@ -440,27 +486,25 @@ func (a *app) runModuleSetup(transactionID string) {
 	a.updateModuleSetup(transactionID, moduleSetupStatus{State: "initializing", Summary: "备份已保存，正在写入并回读配置", BackupPath: backupPath})
 
 	if backup.USB.needsADBUnlockForVoice() {
+		a.moduleSetupStage("adb_unlock", "正在自动解锁 ADB")
 		if err := a.unlockModuleADBForVoiceIfNeeded(); err != nil {
 			a.failModuleSetup(transactionID, "ADB 解锁失败，未修改模块配置", err, backupPath)
 			return
 		}
 	}
 	targetUSB := targetVoiceUSB(backup.USB)
+	a.moduleSetupStage("configure", "正在写入并回读 USB、IMS 与 VoLTE 配置")
 	if err := a.writeAndVerifySetup(targetUSB, 1, 0); err != nil {
 		a.rollbackModuleSetup(transactionID, backupPath, backup, "写入或回读验证失败："+err.Error())
 		return
 	}
-	a.updateModuleSetup(transactionID, moduleSetupStatus{State: "restarting", Summary: "配置回读通过，模块正在重启", BackupPath: backupPath})
-	_, restartErr := a.runATCommand("AT+CFUN=1,1", 5*time.Second)
-	if restartErr != nil && !isLikelyUSBDetachError(restartErr) {
-		a.rollbackModuleSetup(transactionID, backupPath, backup, "模块拒绝重启："+restartErr.Error())
-		return
+	if err := a.requestModuleSetupRestart(transactionID, backupPath, false); err != nil {
+		a.rollbackModuleSetup(transactionID, backupPath, backup, "重启命令失败："+err.Error())
 	}
-	a.markUSBATDetached("voice setup reboot")
 }
 
 func (a *app) unlockModuleADBForVoiceIfNeeded() error {
-	response, err := a.runATCommand("AT+QADBKEY?", 4*time.Second)
+	response, err := a.runModuleSetupAT("AT+QADBKEY?", 4*time.Second)
 	if err != nil {
 		return errors.New("读取 QADBKEY challenge 时通信失败")
 	}
@@ -524,25 +568,25 @@ func (a *app) runSecretUSBATCommand(command string, timeout time.Duration) (stri
 }
 
 func (a *app) readModuleSetupBackup() (moduleSetupBackup, error) {
-	usbResponse, err := a.runATCommand(`AT+QCFG="USBCFG"`, 5*time.Second)
+	usbResponse, err := a.readModuleSetupSetting(`AT+QCFG="USBCFG"`, 5*time.Second)
 	if err != nil {
-		return moduleSetupBackup{}, err
+		return moduleSetupBackup{}, fmt.Errorf("读取USB 配置：%w", err)
 	}
 	usb, err := parseUSBComposition(usbResponse)
 	if err != nil || !usb.isRecoverable() {
 		return moduleSetupBackup{}, firstSetupError(err, "模块 USB 配置不完整，拒绝写入")
 	}
-	imsResponse, err := a.runATCommand(`AT+QCFG="ims"`, 4*time.Second)
+	imsResponse, err := a.readModuleSetupSetting(`AT+QCFG="ims"`, 4*time.Second)
 	if err != nil {
-		return moduleSetupBackup{}, err
+		return moduleSetupBackup{}, fmt.Errorf("读取IMS 配置：%w", err)
 	}
 	ims, _, err := parseIMSConfiguration(imsResponse)
 	if err != nil {
 		return moduleSetupBackup{}, err
 	}
-	volteResponse, err := a.runATCommand(`AT+QCFG="volte_disable"`, 4*time.Second)
+	volteResponse, err := a.readModuleSetupSetting(`AT+QCFG="volte_disable"`, 4*time.Second)
 	if err != nil {
-		return moduleSetupBackup{}, err
+		return moduleSetupBackup{}, fmt.Errorf("读取VoLTE 配置：%w", err)
 	}
 	volte, err := parseVoLTEDisable(volteResponse)
 	if err != nil {
@@ -568,40 +612,42 @@ func (a *app) writeAndVerifySetup(usb usbComposition, imsConfiguration, volteDis
 	if err := a.writeSetupCommand(fmt.Sprintf(`AT+QCFG="ims",%d`, imsConfiguration)); err != nil {
 		return err
 	}
-	return a.verifyModuleSetupValues(usb, imsConfiguration, volteDisable)
+	// Check stored settings before reboot. The runtime IMS capability may
+	// still be zero until reboot; the post-reboot check requires it to be one.
+	return a.verifyModuleSetupValues(usb, imsConfiguration, volteDisable, false)
 }
 
 func (a *app) writeSetupCommand(command string) error {
-	response, err := a.runATCommand(command, 8*time.Second)
+	response, err := a.runModuleSetupAT(command, 8*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("写入 %s：%w", command, err)
 	}
-	if setupATResponseIsError(response) {
+	if setupATResponseIsError(response) || !atProbeSucceeded(response) {
 		return fmt.Errorf("模块拒绝 %s：%s", command, strings.TrimSpace(response))
 	}
 	return nil
 }
 
-func (a *app) verifyModuleSetupValues(wantUSB usbComposition, wantIMS, wantVoLTE int) error {
-	usbResponse, err := a.runATCommand(`AT+QCFG="USBCFG"`, 5*time.Second)
+func (a *app) verifyModuleSetupValues(wantUSB usbComposition, wantIMS, wantVoLTE int, requireCapability bool) error {
+	usbResponse, err := a.readModuleSetupSetting(`AT+QCFG="USBCFG"`, 5*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 USB 配置：%w", err)
 	}
 	actualUSB, err := parseUSBComposition(usbResponse)
 	if err != nil || !usbSetupReadbackMatches(wantUSB, actualUSB) {
 		return firstSetupError(err, fmt.Sprintf("USB 配置回读不一致：%s", strings.TrimSpace(usbResponse)))
 	}
-	imsResponse, err := a.runATCommand(`AT+QCFG="ims"`, 4*time.Second)
+	imsResponse, err := a.readModuleSetupSetting(`AT+QCFG="ims"`, 4*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 IMS 配置：%w", err)
 	}
 	actualIMS, capability, err := parseIMSConfiguration(imsResponse)
-	if err != nil || actualIMS != wantIMS || (wantIMS == 1 && capability != 1) {
+	if err != nil || actualIMS != wantIMS || (requireCapability && wantIMS == 1 && capability != 1) {
 		return firstSetupError(err, fmt.Sprintf("IMS 回读不一致：%s", strings.TrimSpace(imsResponse)))
 	}
-	volteResponse, err := a.runATCommand(`AT+QCFG="volte_disable"`, 4*time.Second)
+	volteResponse, err := a.readModuleSetupSetting(`AT+QCFG="volte_disable"`, 4*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 VoLTE 配置：%w", err)
 	}
 	actualVoLTE, err := parseVoLTEDisable(volteResponse)
 	if err != nil || actualVoLTE != wantVoLTE {
@@ -610,32 +656,103 @@ func (a *app) verifyModuleSetupValues(wantUSB usbComposition, wantIMS, wantVoLTE
 	return nil
 }
 
+// runModuleSetupAT is the transport boundary for setup's non-secret commands.
+func (a *app) runModuleSetupAT(command string, timeout time.Duration) (string, error) {
+	if a.moduleSetupAT != nil {
+		return a.moduleSetupAT(command, timeout)
+	}
+	return a.runATCommand(command, timeout)
+}
+
+func (a *app) readModuleSetupSetting(command string, timeout time.Duration) (string, error) {
+	response, err := a.runModuleSetupAT(command, timeout)
+	if err != nil {
+		return "", err
+	}
+	if setupATResponseIsError(response) || !atProbeSucceeded(response) {
+		return "", fmt.Errorf("%s 未返回完整 OK 回复：%s", command, strings.TrimSpace(response))
+	}
+	return response, nil
+}
+
+func (a *app) moduleSetupStage(stage, summary string) {
+	a.moduleSetupMu.RLock()
+	current := a.moduleSetup
+	a.moduleSetupMu.RUnlock()
+	current.Stage, current.Summary = stage, summary
+	a.updateModuleSetup(current.TransactionID, current)
+}
+
+func setupEnumeration(locator *usbDeviceLocator) string {
+	if locator == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s/%04x:%04x/%d", locator.PhysicalID(), locator.VendorID, locator.ProductID, locator.Address)
+}
+
+// A USB transfer error during CFUN is ambiguous, not proof of failure or
+// success. Persist a pending state, release the old handle, and require a new
+// enumeration on the same port plus an exact configuration readback.
+func (a *app) requestModuleSetupRestart(transactionID, backupPath string, rollback bool) error {
+	state, stage, summary := "restarting", "restart", "正在重启，等待 USB 重新枚举和配置验证"
+	if rollback {
+		state, stage, summary = "rollback_restarting", "rollback_restart", "原始配置已回读，等待重启后再次验证"
+	}
+	physicalID := ""
+	if a.usbLocator != nil {
+		physicalID = a.usbLocator.PhysicalID()
+	}
+	next := moduleSetupStatus{
+		State: state, Stage: stage, Summary: summary, Rollback: rollback, BackupPath: backupPath,
+		RestartEnumeration: setupEnumeration(a.usbLocator), RestartPhysicalID: physicalID,
+		VerifyDeadline: time.Now().Add(moduleSetupVerifyWindow),
+	}
+	a.updateModuleSetup(transactionID, next)
+	response, err := a.runModuleSetupAT("AT+CFUN=1,1", 5*time.Second)
+	if err == nil && (setupATResponseIsError(response) || !atProbeSucceeded(response)) {
+		return fmt.Errorf("模块未确认重启命令：%s", strings.TrimSpace(response))
+	}
+	if err != nil {
+		if !isLikelyUSBRestartError(err) {
+			return err
+		}
+		next.RestartError = err.Error()
+		next.Detail = "重启时 USB 通信中断，正在等待重新枚举后核验"
+		a.updateModuleSetup(transactionID, next)
+	}
+	a.markUSBATDetached("voice setup awaiting reboot verification")
+	return nil
+}
+
 func (a *app) rollbackModuleSetup(transactionID, backupPath string, backup moduleSetupBackup, reason string) {
-	a.updateModuleSetup(transactionID, moduleSetupStatus{State: "rolling_back", Summary: "验证未通过，正在恢复全部原始配置", Detail: reason, BackupPath: backupPath})
+	a.moduleSetupMu.RLock()
+	originalStage := a.moduleSetup.Stage
+	a.moduleSetupMu.RUnlock()
+	a.updateModuleSetup(transactionID, moduleSetupStatus{
+		OriginalStage: originalStage,
+		State:         "rolling_back", Stage: "rollback", Summary: "正在恢复并回读全部原始配置",
+		OriginalError: reason, Detail: reason, Rollback: true, BackupPath: backupPath,
+	})
 	if err := a.writeAndVerifySetup(backup.USB, backup.IMSConfiguration, backup.VoLTEDisable); err != nil {
 		a.failModuleSetup(transactionID, "自动回滚失败，需要人工检查模块", err, backupPath)
 		return
 	}
-	_, restartErr := a.runATCommand("AT+CFUN=1,1", 5*time.Second)
-	if restartErr != nil && !isLikelyUSBDetachError(restartErr) {
-		a.failModuleSetup(transactionID, "原始配置已恢复，但模块重启失败", restartErr, backupPath)
-		return
+	if err := a.requestModuleSetupRestart(transactionID, backupPath, true); err != nil {
+		a.failModuleSetup(transactionID, "原始配置已回读，但重启命令未确认", err, backupPath)
 	}
-	a.markUSBATDetached("voice setup rollback reboot")
-	a.updateModuleSetup(transactionID, moduleSetupStatus{
-		State: "rolled_back", Summary: "初始化未验证，已恢复 USB、IMS 与 VoLTE 原始配置", Detail: reason,
-		CanInitialize: true, RequiresConfirmation: true, BackupPath: backupPath,
-	})
+}
+
+func moduleSetupAwaitsVerification(state string) bool {
+	return state == "restarting" || state == "verifying" || state == "rollback_restarting" || state == "rollback_verifying"
 }
 
 func (a *app) resumeModuleSetup(ctx context.Context) {
 	a.moduleSetupMu.Lock()
-	if a.moduleSetupResuming || (a.moduleSetup.State != "restarting" && a.moduleSetup.State != "verifying") {
+	if a.moduleSetupResuming || !moduleSetupAwaitsVerification(a.moduleSetup.State) {
 		a.moduleSetupMu.Unlock()
 		return
 	}
 	a.moduleSetupResuming = true
-	status := a.moduleSetup
 	a.moduleSetupMu.Unlock()
 	defer func() {
 		a.moduleSetupMu.Lock()
@@ -643,69 +760,143 @@ func (a *app) resumeModuleSetup(ctx context.Context) {
 		a.moduleSetupMu.Unlock()
 	}()
 
-	for attempts := 0; attempts < 30; attempts++ {
-		select {
-		case <-ctx.Done():
+	for {
+		a.moduleSetupMu.RLock()
+		status := a.moduleSetup
+		a.moduleSetupMu.RUnlock()
+		if !moduleSetupAwaitsVerification(status.State) || ctx.Err() != nil {
 			return
-		default:
+		}
+		// Old persisted transactions did not have a deadline. Give them one
+		// bounded verification window, without resending any write or reboot.
+		if status.VerifyDeadline.IsZero() {
+			status.VerifyDeadline = time.Now().Add(moduleSetupVerifyWindow)
+			a.updateModuleSetup(status.TransactionID, status)
+		}
+		err := a.waitModuleSetupVerification(ctx, status)
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			return
+		}
+		if status.Rollback {
+			a.failModuleSetup(status.TransactionID, "回滚后重启或配置验证未通过，需要检查模块", err, status.BackupPath)
+			return
+		}
+		backup, backupErr := loadModuleSetupBackup(status.BackupPath, a.deviceID)
+		if backupErr != nil {
+			a.failModuleSetup(status.TransactionID, "重启后验证失败且无法读取回滚备份", fmt.Errorf("%v；%w", err, backupErr), status.BackupPath)
+			return
 		}
 		a.operationMu.Lock()
-		err := a.verifyCurrentVoiceSetup()
+		a.rollbackModuleSetup(status.TransactionID, status.BackupPath, backup, "重启后验证失败："+err.Error())
 		a.operationMu.Unlock()
-		if err == nil {
-			detail := "USB、IMS 与 VoLTE 已回读确认"
-			state := "configured"
-			summary := "模块配置已完成，等待模块侧语音运行时"
-			if adbDetail, adbErr := a.verifyTargetADB(); adbErr == nil {
-				state = "ready"
-				summary = "模块配置与精确 ADB 绑定已验证"
-				detail += "；" + adbDetail
-			} else {
-				summary = "模块音频与 VoLTE 已配置，ADB 路由尚未就绪"
-				detail += "；ADB 尚未就绪：" + adbErr.Error()
-			}
-			a.updateModuleSetup(status.TransactionID, moduleSetupStatus{State: state, Summary: summary, Detail: detail, BackupPath: status.BackupPath})
-			if state == "ready" {
-				go a.warmModuleVoiceIfReady()
-			}
-			return
+		// The same worker verifies the rollback reboot; it must not publish
+		// rolled_back until the original values are observed after reconnect.
+	}
+}
+
+func (a *app) waitModuleSetupVerification(ctx context.Context, status moduleSetupStatus) error {
+	var backup moduleSetupBackup
+	if status.Rollback {
+		var err error
+		backup, err = loadModuleSetupBackup(status.BackupPath, a.deviceID)
+		if err != nil {
+			return err
 		}
+	}
+	lastErr := errors.New("尚未确认 USB 重新枚举")
+	for time.Now().Before(status.VerifyDeadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if a.operationMu.TryLock() {
+			lastErr = a.verifyReconnectedModuleSetup(status, backup)
+			if lastErr == nil {
+				a.completeModuleSetupVerification(status)
+			}
+			a.operationMu.Unlock()
+			if lastErr == nil {
+				return nil
+			}
+		}
+		state, stage := "verifying", "verify"
+		if status.Rollback {
+			state, stage = "rollback_verifying", "rollback_verify"
+		}
+		a.updateModuleSetup(status.TransactionID, moduleSetupStatus{
+			State: state, Stage: stage, Rollback: status.Rollback, Summary: "正在等待重连并回读配置",
+			Detail: lastErr.Error(), BackupPath: status.BackupPath,
+		})
+		timer := time.NewTimer(2 * time.Second)
 		select {
 		case <-ctx.Done():
-			return
-		case <-time.After(2 * time.Second):
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
-	backup, err := loadModuleSetupBackup(status.BackupPath, a.deviceID)
-	if err != nil {
-		a.failModuleSetup(status.TransactionID, "重启后验证失败且无法读取回滚备份", err, status.BackupPath)
+	return fmt.Errorf("验证等待超时：%w", lastErr)
+}
+
+// Caller holds operationMu so the hub cannot replace the locator/AT handle
+// between checking the physical enumeration and reading its configuration.
+func (a *app) verifyReconnectedModuleSetup(status moduleSetupStatus, backup moduleSetupBackup) error {
+	if status.RestartEnumeration != "" && (a.usbLocator == nil ||
+		a.usbLocator.PhysicalID() != status.RestartPhysicalID ||
+		setupEnumeration(a.usbLocator) == status.RestartEnumeration) {
+		return errors.New("尚未确认原 USB 端口上的新枚举")
+	}
+	if status.Rollback {
+		return a.verifyModuleSetupValues(backup.USB, backup.IMSConfiguration, backup.VoLTEDisable, true)
+	}
+	return a.verifyCurrentVoiceSetup()
+}
+
+func (a *app) completeModuleSetupVerification(status moduleSetupStatus) {
+	if status.Rollback {
+		a.updateModuleSetup(status.TransactionID, moduleSetupStatus{
+			State: "rolled_back", Stage: "complete", Rollback: true,
+			Summary: "已重连并确认 USB、IMS 与 VoLTE 原始配置恢复", Detail: status.OriginalError,
+			CanInitialize: true, RequiresConfirmation: true, BackupPath: status.BackupPath,
+		})
 		return
 	}
-	a.operationMu.Lock()
-	a.rollbackModuleSetup(status.TransactionID, status.BackupPath, backup, "重启后 60 秒内未能回读目标配置")
-	a.operationMu.Unlock()
+	state, summary := "ready", "模块配置与精确 ADB 绑定已验证"
+	detail := "USB、IMS 与 VoLTE 已回读确认"
+	if adbDetail, adbErr := a.verifyTargetADB(); adbErr == nil {
+		detail += "；" + adbDetail
+	} else {
+		state, summary = "configured", "模块音频与 VoLTE 已配置，ADB 路由尚未就绪"
+		detail += "；ADB 尚未就绪：" + adbErr.Error()
+	}
+	a.updateModuleSetup(status.TransactionID, moduleSetupStatus{State: state, Stage: "complete", Summary: summary, Detail: detail, BackupPath: status.BackupPath})
+	if state == "ready" {
+		go a.warmModuleVoiceIfReady()
+	}
 }
 
 func (a *app) verifyCurrentVoiceSetup() error {
-	usbResponse, err := a.runATCommand(`AT+QCFG="USBCFG"`, 5*time.Second)
+	usbResponse, err := a.readModuleSetupSetting(`AT+QCFG="USBCFG"`, 5*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 USB 配置：%w", err)
 	}
 	usb, err := parseUSBComposition(usbResponse)
 	if err != nil || !usb.isUACTarget() {
 		return firstSetupError(err, "USB 音频或 ADB 配置尚未生效")
 	}
-	imsResponse, err := a.runATCommand(`AT+QCFG="ims"`, 4*time.Second)
+	imsResponse, err := a.readModuleSetupSetting(`AT+QCFG="ims"`, 4*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 IMS 配置：%w", err)
 	}
 	ims, capability, err := parseIMSConfiguration(imsResponse)
 	if err != nil || ims != 1 || capability != 1 {
 		return firstSetupError(err, "IMS/VoLTE capability 尚未生效")
 	}
-	volteResponse, err := a.runATCommand(`AT+QCFG="volte_disable"`, 4*time.Second)
+	volteResponse, err := a.readModuleSetupSetting(`AT+QCFG="volte_disable"`, 4*time.Second)
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 VoLTE 配置：%w", err)
 	}
 	volte, err := parseVoLTEDisable(volteResponse)
 	if err != nil || volte != 0 {
@@ -737,27 +928,65 @@ func (a *app) verifyTargetADB() (string, error) {
 func (a *app) setModuleSetup(status moduleSetupStatus) {
 	status.UpdatedAt = time.Now().Format(time.RFC3339)
 	a.moduleSetupMu.Lock()
+	previous := a.moduleSetup
 	a.moduleSetup = status
 	err := a.persistModuleSetupStateLocked()
 	a.moduleSetupMu.Unlock()
-	if err != nil {
-		logSetupPersistenceError(a.deviceID, err)
+	a.logModuleSetupTransition(previous, status, err)
+}
+
+func (a *app) logModuleSetupTransition(previous, status moduleSetupStatus, persistErr error) {
+	if previous.State != status.State || previous.Stage != status.Stage || previous.Detail != status.Detail || previous.OriginalError != status.OriginalError || previous.RestartError != status.RestartError {
+		log.Printf("module setup device=%s transaction=%s state=%s stage=%s summary=%q detail=%q original_stage=%s original_error=%q restart_error=%q", a.deviceID, status.TransactionID, status.State, status.Stage, status.Summary, status.Detail, status.OriginalStage, status.OriginalError, status.RestartError)
+	}
+	if persistErr != nil {
+		logSetupPersistenceError(a.deviceID, persistErr)
 	}
 }
 
 func (a *app) updateModuleSetup(transactionID string, next moduleSetupStatus) {
-	a.moduleSetupMu.RLock()
+	// Compare and publish under one lock so a late recovery worker cannot
+	// overwrite a newer transaction after passing a stale ID check.
+	a.moduleSetupMu.Lock()
 	current := a.moduleSetup
-	a.moduleSetupMu.RUnlock()
 	if current.TransactionID != "" && current.TransactionID != transactionID {
+		a.moduleSetupMu.Unlock()
 		return
 	}
 	next.TransactionID = transactionID
-	a.setModuleSetup(next)
+	if next.Stage == "" {
+		next.Stage = current.Stage
+	}
+	if current.OriginalError != "" {
+		next.OriginalError = current.OriginalError
+		next.OriginalStage = current.OriginalStage
+	}
+	if next.RestartError == "" {
+		next.RestartError = current.RestartError
+	}
+	if next.RestartEnumeration == "" {
+		next.RestartEnumeration = current.RestartEnumeration
+		next.RestartPhysicalID = current.RestartPhysicalID
+	}
+	if next.VerifyDeadline.IsZero() {
+		next.VerifyDeadline = current.VerifyDeadline
+	}
+	next.Rollback = next.Rollback || current.Rollback
+	next.UpdatedAt = time.Now().Format(time.RFC3339)
+	a.moduleSetup = next
+	err := a.persistModuleSetupStateLocked()
+	a.moduleSetupMu.Unlock()
+	a.logModuleSetupTransition(current, next, err)
 }
 
 func (a *app) failModuleSetup(transactionID, summary string, err error, backupPath string) {
-	a.updateModuleSetup(transactionID, moduleSetupStatus{State: "failed", Summary: summary, Detail: errorText(err), BackupPath: backupPath})
+	a.moduleSetupMu.RLock()
+	original, stage := a.moduleSetup.OriginalError, a.moduleSetup.Stage
+	a.moduleSetupMu.RUnlock()
+	if original == "" {
+		original = errorText(err)
+	}
+	a.updateModuleSetup(transactionID, moduleSetupStatus{State: "failed", Summary: summary, Detail: errorText(err), OriginalStage: stage, OriginalError: original, BackupPath: backupPath})
 }
 
 func (a *app) loadModuleSetupState() error {
@@ -859,6 +1088,16 @@ func isLikelyUSBDetachError(err error) bool {
 	}
 	text := strings.ToUpper(err.Error())
 	return strings.Contains(text, "NO_DEVICE") || strings.Contains(text, "NOT_FOUND") || strings.Contains(text, "TIMED OUT") || strings.Contains(text, "TIMEOUT")
+}
+
+// Only use this around a reboot command. IO/PIPE are not a successful write,
+// and must never be used to accept a configuration change without readback.
+func isLikelyUSBRestartError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToUpper(err.Error())
+	return isLikelyUSBDetachError(err) || strings.Contains(text, "LIBUSB_ERROR_IO") || strings.Contains(text, "LIBUSB_ERROR_PIPE")
 }
 
 func firstSetupError(err error, fallback string) error {

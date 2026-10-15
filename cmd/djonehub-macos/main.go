@@ -145,6 +145,8 @@ type app struct {
 	moduleSetupPath      string
 	moduleSetupBackupDir string
 	moduleSetupResuming  bool
+	moduleSetupContext   context.Context
+	moduleSetupAT        func(string, time.Duration) (string, error)
 
 	moduleVoiceMu        sync.Mutex
 	moduleVoiceOpMu      sync.Mutex
@@ -449,6 +451,8 @@ func serve(instance *app, listen string) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	instance.moduleSetupContext = ctx
+	go instance.resumeModuleSetup(ctx)
 	go instance.startCallPoller(ctx)
 
 	if !instance.demo {

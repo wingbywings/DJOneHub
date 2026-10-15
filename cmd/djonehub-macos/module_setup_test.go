@@ -2,11 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseUSBCompositionAndClassification(t *testing.T) {
@@ -233,5 +238,222 @@ func TestModuleSetupBackupRejectsAnotherDevice(t *testing.T) {
 	data, err := json.Marshal(backup)
 	if err != nil || len(data) == 0 {
 		t.Fatalf("backup is not JSON serializable: %v", err)
+	}
+}
+
+// The fake transport exercises configuration/reboot state transitions without
+// writing to a connected modem. Only known non-secret setup commands are used.
+func setupRecoveryFixture(t *testing.T) (*app, moduleSetupBackup) {
+	t.Helper()
+	a := &app{demo: true, deviceID: "fixture", moduleSetupBackupDir: t.TempDir(), moduleSetupPath: filepath.Join(t.TempDir(), "state.json")}
+	a.usbLocator = &usbDeviceLocator{VendorID: djiUSBVendorID, ProductID: djiUSBProductID, Bus: 2, Address: 7, PortPath: []uint8{1, 1, 1}}
+	backup := moduleSetupBackup{FormatVersion: 1, DeviceID: a.deviceID, USB: usbComposition{VendorID: djiUSBVendorID, ProductID: djiUSBProductID, Flags: []int{1, 1, 1, 1, 1, 0, 1}}}
+	return a, backup
+}
+
+func setupReadback(usb usbComposition, ims, capability int) func(string, time.Duration) (string, error) {
+	return func(command string, _ time.Duration) (string, error) {
+		switch command {
+		case `AT+QCFG="USBCFG"`:
+			return strings.Replace(usb.command(), `AT+QCFG=`, `+QCFG: `, 1) + "\r\nOK", nil
+		case `AT+QCFG="ims"`:
+			return fmt.Sprintf("+QCFG: \"ims\",%d,%d\r\nOK", ims, capability), nil
+		case `AT+QCFG="volte_disable"`:
+			return "+QCFG: \"volte/disable\",0\r\nOK", nil
+		default:
+			return "OK", nil
+		}
+	}
+}
+
+func TestModuleSetupRollbackWaitsForReenumerationAndPreservesCause(t *testing.T) {
+	for _, usbError := range []string{"LIBUSB_ERROR_IO", "LIBUSB_ERROR_PIPE", "LIBUSB_ERROR_NO_DEVICE", "USB AT command timed out without response"} {
+		t.Run(usbError, func(t *testing.T) {
+			a, backup := setupRecoveryFixture(t)
+			path, err := a.saveModuleSetupBackup("tx", backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readback := setupReadback(backup.USB, 0, 0)
+			reboots := 0
+			a.moduleSetupAT = func(command string, timeout time.Duration) (string, error) {
+				if command == "AT+CFUN=1,1" {
+					reboots++
+					return "", errors.New(usbError)
+				}
+				return readback(command, timeout)
+			}
+			a.setModuleSetup(moduleSetupStatus{TransactionID: "tx", State: "initializing", Stage: "configure"})
+			cause := "USB 配置回读不一致：ADB 位仍为 0"
+			a.rollbackModuleSetup("tx", path, backup, cause)
+			pending := a.moduleSetup
+			if pending.State != "rollback_restarting" || pending.OriginalError != cause || pending.RestartError != usbError {
+				t.Fatalf("pending rollback lost diagnostics: %#v", pending)
+			}
+			// Even a successful AT read on the old enumeration must not count.
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			err = a.waitModuleSetupVerification(ctx, pending)
+			cancel()
+			if !errors.Is(err, context.DeadlineExceeded) || a.moduleSetup.State == "rolled_back" {
+				t.Fatalf("old enumeration accepted: %v, %#v", err, a.moduleSetup)
+			}
+			a.usbLocator.Address++
+			a.resumeModuleSetup(context.Background())
+			if a.moduleSetup.State != "rolled_back" || a.moduleSetup.OriginalError != cause || reboots != 1 {
+				t.Fatalf("rollback verification/reboot replay: %#v, reboots=%d", a.moduleSetup, reboots)
+			}
+			reloaded := &app{moduleSetupPath: a.moduleSetupPath}
+			if err := reloaded.loadModuleSetupState(); err != nil {
+				t.Fatal(err)
+			}
+			if reloaded.moduleSetup.OriginalError != cause || reloaded.moduleSetup.RestartError != usbError {
+				t.Fatalf("persisted diagnostics lost: %#v", reloaded.moduleSetup)
+			}
+		})
+	}
+}
+
+func TestModuleSetupRollbackErrorsDoNotOverwriteOriginal(t *testing.T) {
+	a, backup := setupRecoveryFixture(t)
+	a.setModuleSetup(moduleSetupStatus{TransactionID: "tx", State: "initializing", Stage: "configure"})
+	a.moduleSetupAT = func(string, time.Duration) (string, error) { return "", errors.New("LIBUSB_ERROR_PIPE") }
+	a.rollbackModuleSetup("tx", "backup.json", backup, "IMS 回读不一致")
+	if a.moduleSetup.State != "failed" || a.moduleSetup.OriginalError != "IMS 回读不一致" || !strings.Contains(a.moduleSetup.Detail, "LIBUSB_ERROR_PIPE") || a.moduleSetup.Stage != "rollback" {
+		t.Fatalf("original failure overwritten: %#v", a.moduleSetup)
+	}
+}
+
+func TestModuleSetupRebootRejectionAndIncompleteReplies(t *testing.T) {
+	for _, response := range []string{"ERROR", "+CME ERROR: 3", "AT+CFUN=1,1", ""} {
+		t.Run(response, func(t *testing.T) {
+			a, _ := setupRecoveryFixture(t)
+			a.moduleSetupAT = func(string, time.Duration) (string, error) { return response, nil }
+			if err := a.requestModuleSetupRestart("tx", "backup.json", false); err == nil {
+				t.Fatalf("unconfirmed reboot accepted: %q", response)
+			}
+			if err := a.writeSetupCommand(`AT+QCFG="ims",1`); err == nil {
+				t.Fatalf("unconfirmed config write accepted: %q", response)
+			}
+		})
+	}
+}
+
+func TestModuleSetupIMSRuntimeCapabilityCheckedAfterReboot(t *testing.T) {
+	a, backup := setupRecoveryFixture(t)
+	target := targetVoiceUSB(backup.USB)
+	a.moduleSetupAT = setupReadback(target, 1, 0)
+	if err := a.writeAndVerifySetup(target, 1, 0); err != nil {
+		t.Fatalf("stored IMS setting must be allowed before restart: %v", err)
+	}
+	if err := a.verifyCurrentVoiceSetup(); err == nil {
+		t.Fatal("runtime capability must be ready after restart")
+	}
+	a.moduleSetupAT = setupReadback(target, 1, 1)
+	if err := a.verifyCurrentVoiceSetup(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModuleSetupRollbackVerificationTimeoutNeverReportsSuccess(t *testing.T) {
+	a, backup := setupRecoveryFixture(t)
+	path, err := a.saveModuleSetupBackup("tx", backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.setModuleSetup(moduleSetupStatus{TransactionID: "tx", State: "rollback_restarting", Rollback: true, Stage: "rollback_restart", BackupPath: path, OriginalError: "USB 回读不一致", RestartError: "LIBUSB_ERROR_IO", VerifyDeadline: time.Now().Add(-time.Second)})
+	a.moduleSetupAT = func(string, time.Duration) (string, error) {
+		t.Fatal("expired transaction replayed an AT command")
+		return "", nil
+	}
+	a.resumeModuleSetup(context.Background())
+	if a.moduleSetup.State != "failed" || a.moduleSetup.OriginalError != "USB 回读不一致" || !strings.Contains(a.moduleSetup.Detail, "超时") {
+		t.Fatalf("false recovery success: %#v", a.moduleSetup)
+	}
+}
+
+func TestModuleSetupVerificationRejectsDifferentUSBPort(t *testing.T) {
+	a, backup := setupRecoveryFixture(t)
+	path, err := a.saveModuleSetupBackup("tx", backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := moduleSetupStatus{TransactionID: "tx", State: "rollback_verifying", Rollback: true, BackupPath: path, RestartEnumeration: setupEnumeration(a.usbLocator), RestartPhysicalID: a.usbLocator.PhysicalID(), VerifyDeadline: time.Now().Add(time.Second)}
+	a.setModuleSetup(pending)
+	a.usbLocator.Address++
+	a.usbLocator.PortPath = []uint8{1, 1, 2}
+	a.moduleSetupAT = func(string, time.Duration) (string, error) {
+		t.Fatal("verification touched another USB port")
+		return "", nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := a.waitModuleSetupVerification(ctx, pending); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+}
+
+func TestModuleSetupInitializationSummaryReflectsUAC(t *testing.T) {
+	if got := setupInitializationSummary(false, true); strings.Contains(got, "已启用") {
+		t.Fatal(got)
+	}
+	if got := setupInitializationSummary(true, true); !strings.Contains(got, "USB 音频已启用") {
+		t.Fatal(got)
+	}
+}
+
+func TestModuleSetupStartIsExclusiveAndClearsOldDiagnostics(t *testing.T) {
+	a, _ := setupRecoveryFixture(t)
+	a.setModuleSetup(moduleSetupStatus{TransactionID: "old", State: "failed", OriginalError: "old failure"})
+	results := make(chan bool, 2)
+	for _, id := range []string{"first", "second"} {
+		go func() { results <- a.beginModuleSetup(moduleSetupStatus{TransactionID: id, State: "initializing"}) }()
+	}
+	first, second := <-results, <-results
+	if first == second {
+		t.Fatalf("expected exactly one setup to start: %v, %v", first, second)
+	}
+	if a.moduleSetup.OriginalError != "" {
+		t.Fatal("new transaction retained an old failure")
+	}
+	currentID := a.moduleSetup.TransactionID
+	a.updateModuleSetup("old", moduleSetupStatus{State: "failed", OriginalError: "late failure"})
+	if a.moduleSetup.TransactionID != currentID || a.moduleSetup.State != "initializing" {
+		t.Fatal("old worker overwrote a newer transaction")
+	}
+}
+
+func TestModuleSetupRejectsPartialReadback(t *testing.T) {
+	a, backup := setupRecoveryFixture(t)
+	a.moduleSetupAT = func(string, time.Duration) (string, error) {
+		return strings.Replace(backup.USB.command(), `AT+QCFG=`, `+QCFG: `, 1), nil
+	}
+	if err := a.verifyModuleSetupValues(backup.USB, 0, 0, false); err == nil || !strings.Contains(err.Error(), "完整 OK") {
+		t.Fatalf("partial response accepted: %v", err)
+	}
+}
+
+func TestModuleSetupVerificationRetriesTransientReadFailure(t *testing.T) {
+	a, backup := setupRecoveryFixture(t)
+	path, err := a.saveModuleSetupBackup("tx", backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := moduleSetupStatus{TransactionID: "tx", State: "rollback_verifying", Rollback: true, OriginalError: "original failure", BackupPath: path, VerifyDeadline: time.Now().Add(5 * time.Second)}
+	a.setModuleSetup(status)
+	reads := 0
+	readback := setupReadback(backup.USB, 0, 0)
+	a.moduleSetupAT = func(command string, timeout time.Duration) (string, error) {
+		if !strings.HasPrefix(command, `AT+QCFG="`) || (!strings.HasSuffix(command, `"`)) {
+			t.Fatalf("verification replayed a write: %s", command)
+		}
+		reads++
+		if reads == 1 {
+			return "", errors.New("LIBUSB_ERROR_NO_DEVICE")
+		}
+		return readback(command, timeout)
+	}
+	a.resumeModuleSetup(context.Background())
+	if a.moduleSetup.State != "rolled_back" || reads != 4 || a.moduleSetup.OriginalError != "original failure" {
+		t.Fatalf("transient verification failed: %#v, reads=%d", a.moduleSetup, reads)
 	}
 }

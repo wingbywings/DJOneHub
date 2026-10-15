@@ -1215,11 +1215,13 @@ async function loadVoiceSetup() {
   const detail = $("#voice-setup-detail");
   const initializeButton = $("#initialize-voice-module");
   const installButton = $("#install-voice-runtime");
+  const requestedDevice = activeDeviceID;
   try {
     const [setup, voice] = await Promise.all([
       api("/api/module/setup"),
       api("/api/voice/status"),
     ]);
+    if (requestedDevice !== activeDeviceID) return;
     const setupText = setup.summary || setup.state || "模块配置状态未知";
     currentVoiceSetup = setup;
     const runtimeText = voice.runtime_installed
@@ -1230,12 +1232,19 @@ async function loadVoiceSetup() {
           : (voice.prepared ? "ADB 与 ACDB 已准备" : "语音运行时已校验")))
       : "语音运行时尚未安装";
     summary.textContent = `${setupText} · ${runtimeText}`;
-    detail.textContent = [setup.detail, voice.last_error || voice.detail || voice.runtime_detail].filter(Boolean).join("；");
+    detail.textContent = [...new Set([
+      ({ backup: "正在备份配置", adb_unlock: "正在解锁 ADB", configure: "正在写入和回读配置", restart: "正在等待重启", verify: "正在验证重启后的配置", rollback: "正在恢复原始配置", rollback_restart: "正在等待回滚重启", rollback_verify: "正在验证回滚后的配置" })[setup.stage],
+      setup.original_error && `首次失败：${setup.original_error}`,
+      setup.restart_error && `重启通信：${setup.restart_error}`,
+      setup.detail !== setup.original_error && setup.detail,
+      voice.last_error || voice.detail || voice.runtime_detail,
+    ].filter(Boolean))].join("；");
     initializeButton.hidden = !setup.can_initialize;
-    initializeButton.disabled = ["initializing", "restarting", "verifying", "rolling_back"].includes(setup.state);
+    initializeButton.disabled = ["initializing", "restarting", "verifying", "rolling_back", "rollback_restarting", "rollback_verifying"].includes(setup.state);
     initializeButton.textContent = setup.requires_adb_passcode ? "自动解锁 ADB 并完成配置" : "初始化模块";
     installButton.hidden = Boolean(voice.runtime_installed);
   } catch (error) {
+    if (requestedDevice !== activeDeviceID) return;
     summary.textContent = `语音准备状态读取失败：${error.message}`;
     detail.textContent = "";
     currentVoiceSetup = {};

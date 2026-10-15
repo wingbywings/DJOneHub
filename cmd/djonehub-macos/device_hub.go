@@ -358,6 +358,7 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 	}
 	h.configureDeviceSettings(runtime, id)
 	deviceCtx, cancel := context.WithCancel(h.ctx)
+	runtime.moduleSetupContext = deviceCtx
 	runtime.onUSBDetached = func(reason string) {
 		go h.beginPhysicalReconnect(physicalID, reason)
 	}
