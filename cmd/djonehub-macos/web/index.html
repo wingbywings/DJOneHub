@@ -342,7 +342,22 @@
         </summary>
         <div class="call-feature-content">
           <div class="call-content-heading"><span>选择一通电话进入完整详情。</span><button id="refresh-voice-agent-calls" class="secondary compact" type="button">刷新记录</button></div>
-          <div id="voice-agent-call-list" class="agent-call-list empty">暂无 AI 通话记录</div>
+          <form id="voice-agent-call-search-form" class="agent-call-search" role="search" aria-label="搜索 AI 通话记录">
+            <input id="voice-agent-call-search" type="search" aria-label="电话号码或转写关键字" placeholder="搜索电话号码或转写关键字" autocomplete="off">
+            <button class="compact" type="submit">搜索</button>
+            <button id="clear-voice-agent-call-search" class="secondary compact" type="button" disabled>清除</button>
+          </form>
+          <div id="voice-agent-call-list" class="agent-call-list empty" aria-busy="false">暂无 AI 通话记录</div>
+          <div class="agent-call-pagination">
+            <span id="voice-agent-call-page-summary" role="status" aria-live="polite">共 0 通</span>
+            <div class="agent-call-page-controls">
+              <label for="voice-agent-call-page-size">每页</label>
+              <select id="voice-agent-call-page-size" aria-label="每页通话记录数"><option value="10">10 条</option><option value="20">20 条</option><option value="50">50 条</option></select>
+              <button id="voice-agent-call-prev" class="secondary compact" type="button" disabled>上一页</button>
+              <span id="voice-agent-call-page-number">第 0 / 0 页</span>
+              <button id="voice-agent-call-next" class="secondary compact" type="button" disabled>下一页</button>
+            </div>
+          </div>
         </div>
       </details>
       </div>

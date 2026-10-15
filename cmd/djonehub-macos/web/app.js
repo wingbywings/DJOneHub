@@ -6,7 +6,13 @@ let networkTrafficTimer = null;
 let networkTrafficPrevious = null;
 let networkTrafficInFlight = false;
 let callPollInFlight = false;
-let voiceAgentCallsInFlight = false;
+let voiceAgentCallsInFlight = "";
+let voiceAgentCallsRequest = 0;
+let voiceAgentCallsPage = 1;
+let voiceAgentCallsPageSize = 10;
+let voiceAgentCallsKeyword = "";
+let voiceAgentCallsTotal = 0;
+let voiceAgentCallsTotalPages = 0;
 let voiceSetupInFlight = false;
 let currentVoiceSetup = {};
 let currentCallState = null;
@@ -158,6 +164,14 @@ async function refreshActiveDevice() {
   voiceAgentLoadedDevice = null;
   renderedVoiceAgentCallsSignature = "";
   currentVoiceAgentCalls = [];
+  voiceAgentCallsRequest++;
+  voiceAgentCallsInFlight = "";
+  voiceAgentCallsPage = 1;
+  voiceAgentCallsTotal = 0;
+  voiceAgentCallsTotalPages = 0;
+  $("#voice-agent-call-list").replaceChildren();
+  $("#voice-agent-call-count").textContent = "0 通";
+  updateVoiceAgentCallPagination();
   closeVoiceAgentCallDetail();
   closeVoiceAgentEvents();
   const tasks = [loadStatus(), loadSMS(), loadBarkSettings("sms"), loadRemoteSettings()];
@@ -1027,15 +1041,14 @@ function renderVoiceAgentCalls(calls) {
   const list = $("#voice-agent-call-list");
   const rows = Array.isArray(calls) ? calls : [];
   currentVoiceAgentCalls = rows;
-  const signature = JSON.stringify(rows);
+  const signature = JSON.stringify([voiceAgentCallsKeyword, rows]);
   if (signature === renderedVoiceAgentCallsSignature) return;
   const detailPlayer = $("#voice-agent-call-detail-recording audio");
   if (detailPlayer && !detailPlayer.paused && !detailPlayer.ended) return;
   renderedVoiceAgentCallsSignature = signature;
-  $("#voice-agent-call-count").textContent = `${rows.length} 通`;
   if (!rows.length) {
     list.className = "agent-call-list empty";
-    list.textContent = "暂无 AI 通话记录";
+    list.textContent = voiceAgentCallsKeyword ? "没有找到匹配的通话记录，请尝试其他电话号码或转写关键字" : "暂无 AI 通话记录";
     if (selectedVoiceAgentCallID) closeVoiceAgentCallDetail();
     return;
   }
@@ -1055,7 +1068,11 @@ function renderVoiceAgentCalls(calls) {
     meta.textContent = [call.provider ? `AI · ${call.provider}` : "AI 接听", status, `${messages.length} 条转写`].filter(Boolean).join(" · ");
     const preview = document.createElement("span");
     preview.className = "agent-call-list-preview";
-    preview.textContent = messages.length ? messages[messages.length - 1].text : (call.ended_at ? "没有识别到有效通话内容" : "正在等待通话内容…");
+    const keyword = voiceAgentCallsKeyword.toLowerCase();
+    const match = keyword && messages.find((message) => (message.text || "").toLowerCase().includes(keyword));
+    const previewText = match ? match.text : (messages.length ? messages[messages.length - 1].text : "");
+    const matchStart = match ? Math.max(0, previewText.toLowerCase().indexOf(keyword) - 20) : 0;
+    preview.textContent = previewText ? `${matchStart ? "…" : ""}${previewText.slice(matchStart)}` : (call.ended_at ? "没有识别到有效通话内容" : "正在等待通话内容…");
     identity.append(number, meta, preview);
     const started = document.createElement("time");
     started.className = "agent-call-list-time";
@@ -1071,19 +1088,50 @@ function renderVoiceAgentCalls(calls) {
   }
 }
 
+function updateVoiceAgentCallPagination() {
+  const loading = Boolean(voiceAgentCallsInFlight);
+  const start = voiceAgentCallsTotal ? (voiceAgentCallsPage - 1) * voiceAgentCallsPageSize + 1 : 0;
+  const end = Math.min(voiceAgentCallsPage * voiceAgentCallsPageSize, voiceAgentCallsTotal);
+  $("#voice-agent-call-list").setAttribute("aria-busy", String(loading));
+  $("#voice-agent-call-page-summary").textContent = loading ? "正在加载记录…" : `${voiceAgentCallsKeyword ? "匹配 " : "共 "}${voiceAgentCallsTotal} 通${voiceAgentCallsTotal ? ` · 显示 ${start}–${end} 通` : ""}`;
+  $("#voice-agent-call-page-number").textContent = `第 ${voiceAgentCallsTotalPages ? voiceAgentCallsPage : 0} / ${voiceAgentCallsTotalPages} 页`;
+  $("#voice-agent-call-prev").disabled = loading || voiceAgentCallsPage <= 1;
+  $("#voice-agent-call-next").disabled = loading || voiceAgentCallsPage >= voiceAgentCallsTotalPages;
+  $("#refresh-voice-agent-calls").disabled = loading;
+  $("#clear-voice-agent-call-search").disabled = !voiceAgentCallsKeyword && !$("#voice-agent-call-search").value;
+}
+
 async function loadVoiceAgentCalls() {
-  if (voiceAgentCallsInFlight) return;
-  voiceAgentCallsInFlight = true;
+  const params = new URLSearchParams({ page: String(voiceAgentCallsPage), limit: String(voiceAgentCallsPageSize), q: voiceAgentCallsKeyword });
+  const requestedDevice = activeDeviceID;
+  const requestKey = JSON.stringify([requestedDevice, params.toString()]);
+  if (voiceAgentCallsInFlight === requestKey) return;
+  const request = ++voiceAgentCallsRequest;
+  voiceAgentCallsInFlight = requestKey;
+  updateVoiceAgentCallPagination();
   try {
-    const result = await api("/api/voice-agent/calls?limit=50");
+    const result = await api(`/api/voice-agent/calls?${params}`);
+    if (request !== voiceAgentCallsRequest || requestedDevice !== activeDeviceID) return;
+    voiceAgentCallsPage = result.page;
+    voiceAgentCallsTotal = result.total;
+    voiceAgentCallsTotalPages = result.total_pages;
+    $("#voice-agent-call-count").textContent = `${voiceAgentCallsTotal} 通${voiceAgentCallsKeyword ? "匹配" : ""}`;
     renderVoiceAgentCalls(result.calls || []);
   } catch (error) {
+    if (request !== voiceAgentCallsRequest || requestedDevice !== activeDeviceID) return;
     const list = $("#voice-agent-call-list");
     renderedVoiceAgentCallsSignature = "";
+    currentVoiceAgentCalls = [];
+    voiceAgentCallsTotal = 0;
+    voiceAgentCallsTotalPages = 0;
+    $("#voice-agent-call-count").textContent = "加载失败";
     list.className = "agent-call-list empty";
-    list.textContent = error.message;
+    list.textContent = `加载通话记录失败：${error.message}，请点击“刷新记录”重试`;
   } finally {
-    voiceAgentCallsInFlight = false;
+    if (request === voiceAgentCallsRequest) {
+      voiceAgentCallsInFlight = "";
+      updateVoiceAgentCallPagination();
+    }
   }
 }
 
@@ -1977,6 +2025,37 @@ $("#clear-live-transcript").addEventListener("click", () => {
   renderVoiceAgentEvents($("#voice-agent-transcript"), [], "等待 Voice Agent 事件...");
 });
 $("#refresh-voice-agent-calls").addEventListener("click", loadVoiceAgentCalls);
+$("#voice-agent-call-search-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  voiceAgentCallsKeyword = $("#voice-agent-call-search").value.trim();
+  voiceAgentCallsPage = 1;
+  void loadVoiceAgentCalls();
+});
+$("#voice-agent-call-search").addEventListener("input", updateVoiceAgentCallPagination);
+$("#voice-agent-call-search").addEventListener("search", () => {
+  if (!$("#voice-agent-call-search").value) $("#clear-voice-agent-call-search").click();
+});
+$("#clear-voice-agent-call-search").addEventListener("click", () => {
+  $("#voice-agent-call-search").value = "";
+  voiceAgentCallsKeyword = "";
+  voiceAgentCallsPage = 1;
+  void loadVoiceAgentCalls();
+});
+$("#voice-agent-call-page-size").addEventListener("change", () => {
+  voiceAgentCallsPageSize = Number($("#voice-agent-call-page-size").value);
+  voiceAgentCallsPage = 1;
+  void loadVoiceAgentCalls();
+});
+$("#voice-agent-call-prev").addEventListener("click", () => {
+  if (voiceAgentCallsPage <= 1) return;
+  voiceAgentCallsPage--;
+  void loadVoiceAgentCalls();
+});
+$("#voice-agent-call-next").addEventListener("click", () => {
+  if (voiceAgentCallsPage >= voiceAgentCallsTotalPages) return;
+  voiceAgentCallsPage++;
+  void loadVoiceAgentCalls();
+});
 $("#back-to-voice-agent-calls").addEventListener("click", () => {
   closeVoiceAgentCallDetail();
   $("#voice-agent-call-panel").open = true;

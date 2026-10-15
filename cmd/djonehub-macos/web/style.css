@@ -243,6 +243,12 @@ input:focus, textarea:focus, select:focus { border-color: #6698ed; outline: 0; b
 .agent-event.error .agent-event-text { color: #b4404e; }
 .agent-event.tool .agent-event-text { color: #b45309; }
 .agent-call-list { display: grid; gap: 10px; }
+.agent-call-search { display: flex; gap: 8px; margin-bottom: 14px; }
+.agent-call-search input { flex: 1; min-width: 0; }
+.agent-call-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-top: 16px; color: var(--text-muted); font-size: 12px; }
+.agent-call-page-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.agent-call-page-controls select { width: auto; min-height: 32px; padding: 4px 24px 4px 8px; }
+.agent-call-pagination button:disabled { cursor: default; }
 .agent-call-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto 18px; align-items: center; gap: 14px; width: 100%; min-height: 76px; padding: 13px 14px; border-color: var(--border); background: var(--surface-subtle); color: inherit; text-align: left; }
 .agent-call-list-item:hover:not(:disabled) { border-color: #9ab8eb; background: var(--surface-hover); }
 .agent-call-list-item::after { content: "›"; color: var(--text-soft); font-size: 23px; font-weight: 400; }

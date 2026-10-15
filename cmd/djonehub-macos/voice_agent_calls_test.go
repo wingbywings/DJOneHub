@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,98 @@ import (
 
 	"github.com/iniwex5/vohive/internal/voiceagent"
 )
+
+func TestVoiceAgentCallsPaginationAndSearch(t *testing.T) {
+	controller := newVoiceAgentController("")
+	started := time.Date(2026, 10, 15, 10, 0, 0, 0, time.UTC)
+	for index := range 65 {
+		controller.runtime.callRecords = append(controller.runtime.callRecords, voiceAgentCallRecord{
+			CallID: fmt.Sprintf("call-%02d", index), Number: fmt.Sprintf("1380013%04d", index),
+			StartedAt: started.Add(time.Duration(index) * time.Minute),
+			Messages:  []voiceAgentCallMessage{{Role: "caller", Text: "普通通话"}},
+		})
+	}
+	// The search must include records older than the legacy 50-record window,
+	// and either side of the conversation, beyond the last preview message.
+	controller.runtime.callRecords[0].Messages = []voiceAgentCallMessage{
+		{Role: "caller", Text: "请安排明天的快递 DELIVERY"},
+		{Role: "ai", Text: "好的"},
+	}
+	controller.runtime.callRecords[12].Messages = []voiceAgentCallMessage{{Role: "ai", Text: "快递将在明天送达"}}
+	instance := newDemoApp()
+	instance.voiceAgentOnce.Do(func() { instance.voiceAgent = controller })
+	routes := instance.routes()
+	tests := []struct {
+		name       string
+		query      string
+		page       int
+		limit      int
+		total      int
+		totalPages int
+		count      int
+		first      string
+		last       string
+	}{
+		{name: "legacy default", limit: 50, page: 1, total: 65, totalPages: 2, count: 50, first: "call-64", last: "call-15"},
+		{name: "first page", query: "limit=10", limit: 10, page: 1, total: 65, totalPages: 7, count: 10, first: "call-64", last: "call-55"},
+		{name: "second page", query: "limit=10&page=2", limit: 10, page: 2, total: 65, totalPages: 7, count: 10, first: "call-54", last: "call-45"},
+		{name: "partial last page", query: "limit=10&page=7", limit: 10, page: 7, total: 65, totalPages: 7, count: 5, first: "call-04", last: "call-00"},
+		{name: "clamped page", query: "limit=10&page=9223372036854775807", limit: 10, page: 7, total: 65, totalPages: 7, count: 5, first: "call-04", last: "call-00"},
+		{name: "phone substring", query: "q=13800130000", limit: 50, page: 1, total: 1, totalPages: 1, count: 1, first: "call-00", last: "call-00"},
+		{name: "both transcript roles", query: "q=" + url.QueryEscape("快递"), limit: 50, page: 1, total: 2, totalPages: 1, count: 2, first: "call-12", last: "call-00"},
+		{name: "filter before pagination", query: "q=" + url.QueryEscape("快递") + "&limit=1&page=2", limit: 1, page: 2, total: 2, totalPages: 2, count: 1, first: "call-00", last: "call-00"},
+		{name: "case and whitespace", query: "q=" + url.QueryEscape("  delivery  "), limit: 50, page: 1, total: 1, totalPages: 1, count: 1, first: "call-00", last: "call-00"},
+		{name: "empty keyword", query: "q=+++&limit=100", limit: 100, page: 1, total: 65, totalPages: 1, count: 65, first: "call-64", last: "call-00"},
+		{name: "no matches", query: "q=not-found&page=8", limit: 50, page: 1},
+		{name: "invalid parameters", query: "limit=bad&page=-2", limit: 50, page: 1, total: 65, totalPages: 2, count: 50, first: "call-64", last: "call-15"},
+		{name: "zero parameters", query: "limit=0&page=0", limit: 50, page: 1, total: 65, totalPages: 2, count: 50, first: "call-64", last: "call-15"},
+		{name: "bounded limit", query: "limit=10000", limit: 100, page: 1, total: 65, totalPages: 1, count: 65, first: "call-64", last: "call-00"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/voice-agent/calls?"+test.query, nil))
+			var result struct {
+				Calls      []voiceAgentCallView `json:"calls"`
+				Count      int                  `json:"count"`
+				Total      int                  `json:"total"`
+				Page       int                  `json:"page"`
+				Limit      int                  `json:"limit"`
+				TotalPages int                  `json:"total_pages"`
+			}
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result) != nil {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			if result.Page != test.page || result.Limit != test.limit || result.Total != test.total || result.TotalPages != test.totalPages || result.Count != test.count || len(result.Calls) != test.count || result.Calls == nil {
+				t.Fatalf("unexpected pagination: %s", response.Body.String())
+			}
+			if test.count > 0 && (result.Calls[0].CallID != test.first || result.Calls[test.count-1].CallID != test.last) {
+				t.Fatalf("unexpected call order: %s", response.Body.String())
+			}
+		})
+	}
+}
+
+func TestVoiceAgentCallsSearchThroughDeviceRoute(t *testing.T) {
+	controller := newVoiceAgentController("")
+	controller.runtime.callRecords = []voiceAgentCallRecord{
+		{CallID: "device-call", Number: "13800138000", Messages: []voiceAgentCallMessage{{Role: "caller", Text: "设备内转写"}}},
+	}
+	runtime := newDemoApp()
+	runtime.deviceID = "device-search"
+	runtime.voiceAgentOnce.Do(func() { runtime.voiceAgent = controller })
+	hub := &usbDeviceHub{
+		devices: map[string]*managedUSBDevice{
+			"device-search": {ID: "device-search", State: "ready", Runtime: runtime},
+		},
+		fallback: newDemoApp(),
+	}
+	response := httptest.NewRecorder()
+	hub.routes(webAssets).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/devices/device-search/voice-agent/calls?limit=1&q="+url.QueryEscape("设备内"), nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"call_id":"device-call"`) || !strings.Contains(response.Body.String(), `"total":1`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
 
 func TestVoiceAgentCallRecordPersistsBothSidesWithoutAuditRedaction(t *testing.T) {
 	settingsPath := filepath.Join(t.TempDir(), "voice-agent.json")

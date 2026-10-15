@@ -219,20 +219,41 @@ func (c *voiceAgentController) recordCallEvent(callID string, event voiceagent.E
 }
 
 func (a *app) voiceAgentCalls(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
 	limit := 50
-	if parsed, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && parsed > 0 {
+	if parsed, err := strconv.Atoi(query.Get("limit")); err == nil && parsed > 0 {
 		limit = min(parsed, voiceAgentCallRecordLimit)
 	}
+	page := 1
+	if parsed, err := strconv.Atoi(query.Get("page")); err == nil && parsed > 0 {
+		page = parsed
+	}
+	keyword := strings.ToLower(strings.TrimSpace(query.Get("q")))
 	controller := a.ensureVoiceAgent()
 	controller.runtime.mu.Lock()
 	records := cloneVoiceAgentCallRecords(controller.runtime.callRecords)
 	controller.runtime.mu.Unlock()
-	if len(records) > limit {
-		records = records[len(records)-limit:]
-	}
-	views := make([]voiceAgentCallView, 0, len(records))
+	matched := make([]voiceAgentCallRecord, 0, len(records))
 	for index := len(records) - 1; index >= 0; index-- {
 		record := records[index]
+		matches := keyword == "" || strings.Contains(strings.ToLower(record.Number), keyword)
+		for _, message := range record.Messages {
+			if matches {
+				break
+			}
+			matches = strings.Contains(strings.ToLower(message.Text), keyword)
+		}
+		if matches {
+			matched = append(matched, record)
+		}
+	}
+	total := len(matched)
+	totalPages := (total + limit - 1) / limit
+	page = min(page, max(totalPages, 1))
+	start := min((page-1)*limit, total)
+	matched = matched[start:min(start+limit, total)]
+	views := make([]voiceAgentCallView, 0, len(matched))
+	for _, record := range matched {
 		view := voiceAgentCallView{
 			CallID: record.CallID, Number: record.Number, Direction: record.Direction,
 			Provider: record.Provider, StartedAt: record.StartedAt, EndedAt: record.EndedAt,
@@ -246,7 +267,10 @@ func (a *app) voiceAgentCalls(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, view)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"calls": views, "count": len(views)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"calls": views, "count": len(views), "total": total,
+		"page": page, "limit": limit, "total_pages": totalPages,
+	})
 }
 
 func (a *app) voiceAgentCallRecording(w http.ResponseWriter, r *http.Request) {
