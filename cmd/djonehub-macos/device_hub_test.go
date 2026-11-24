@@ -123,7 +123,7 @@ func TestDeviceHubRoutesRequestToSelectedRuntime(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/api/devices/second/sms", nil)
 	response := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(response, request)
+	hub.routes(webAssets, nil).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -146,7 +146,7 @@ func TestDeviceHubRoutesDialToSelectedRuntime(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/api/devices/second/calls/dial", bytes.NewBufferString(`{"number":"10086"}`))
 	response := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(response, request)
+	hub.routes(webAssets, nil).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -166,7 +166,7 @@ func TestDeviceHubListsOfflineAndReadyDevices(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodGet, "/api/devices", nil)
 	response := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(response, request)
+	hub.routes(webAssets, nil).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -188,7 +188,7 @@ func TestRenameDevicePersistsAlias(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPatch, "/api/devices/device-1", bytes.NewBufferString(`{"alias":"移动主卡"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(response, request)
+	hub.routes(webAssets, nil).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
@@ -217,14 +217,14 @@ func TestDeviceHubAllowsOnlyOneNetworkModeOwner(t *testing.T) {
 
 	firstRequest := httptest.NewRequest(http.MethodPost, "/api/devices/first/network/usbnet", bytes.NewBufferString(`{"mode":1}`))
 	firstResponse := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(firstResponse, firstRequest)
+	hub.routes(webAssets, nil).ServeHTTP(firstResponse, firstRequest)
 	if firstResponse.Code != http.StatusOK {
 		t.Fatalf("first module status = %d, body = %s", firstResponse.Code, firstResponse.Body.String())
 	}
 
 	secondRequest := httptest.NewRequest(http.MethodPost, "/api/devices/second/network/usbnet", bytes.NewBufferString(`{"mode":1}`))
 	secondResponse := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(secondResponse, secondRequest)
+	hub.routes(webAssets, nil).ServeHTTP(secondResponse, secondRequest)
 	if secondResponse.Code != http.StatusConflict {
 		t.Fatalf("second module status = %d, want 409; body = %s", secondResponse.Code, secondResponse.Body.String())
 	}

@@ -36,6 +36,10 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     working || identity.operationInProgress || pushTask != nil || socket != nil || callUUID != nil || wake != nil || reconnectTask != nil
   }
   func foregrounded() {
+    PhoneSMSInbox.shared.bind(identity: identity, environment: pushEnvironment)
+    PhoneSMSInbox.shared.activate()
+    PhoneSMSOutbox.shared.bind(identity)
+    PhoneSMSOutbox.shared.activate()
     foregroundIntent.activate()
     requestForegroundConnection()
   }
@@ -144,8 +148,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
       .appendingPathComponent("call-history.json")
   }
-  private func saveHistory() {
-    guard historyWritable else { return }
+  @discardableResult private func saveHistory() -> Bool {
+    guard historyWritable else { return false }
     do {
       try FileManager.default.createDirectory(at: historyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
       try JSONEncoder().encode(history).write(to: historyURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
@@ -154,7 +158,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       values.isExcludedFromBackup = true
       try url.setResourceValues(values)
       historyError = ""
-    } catch { historyError = "本机通话记录保存失败" }
+      return true
+    } catch { historyError = "本机通话记录保存失败"; return false }
   }
   private func finishHistory(_ result: String) {
     guard let id = callUUID else { return }
@@ -162,6 +167,12 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     saveHistory()
   }
   func clearHistory() { history.clearCompleted(); historyWritable = true; saveHistory() }
+  @discardableResult func deleteHistory(_ id: UUID) -> Bool {
+    let previous = history
+    guard history.deleteCompleted(id) else { return false }
+    guard saveHistory() else { history = previous; return false }
+    return true
+  }
   private let controller = CXCallController()
   private let provider: CXProvider
   private var socket: SignalSocket?
@@ -233,6 +244,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     pushEnabled = true
     UserDefaults.standard.set(true, forKey: "voipPushEnabled")
     startPushIfEnabled()
+    PhoneSMSInbox.shared.activate()
     syncPushRegistration()
     requestForegroundConnection()
   }
@@ -404,6 +416,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       installation = record?.tokens?.principal.id ?? ""
       modules = record?.tokens?.principal.modules ?? []
       restoreModuleNames(record)
+      PhoneSMSInbox.shared.bind(identity: identity, environment: pushEnvironment)
+      PhoneSMSOutbox.shared.bind(identity)
       if !modules.contains(selectedModule) { selectedModule = modules.first ?? "" }
       fingerprint = try identity.fingerprint() ?? ""
       if let r = record, r.phase != "ready" { status = "配对或凭据更新未完成，请先在 Hub 撤销此安装身份，再清理本机凭据重新配对。" }
@@ -420,6 +434,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       pushToken = nil
       UserDefaults.standard.set(false, forKey: "voipPushEnabled")
       try vault.remove()
+      PhoneSMSInbox.shared.forget()
+      PhoneSMSOutbox.shared.forget()
       UserDefaults.standard.removeObject(forKey: Self.moduleNamesCacheKey)
       reloadStatus()
       status = "本机凭据已清理，可重新导入配对文件"
@@ -438,7 +454,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   func pair(data: Data) async {
     guard !working, !paired, !online, callUUID == nil else { return }
     working = true
-    defer { working = false; reloadStatus(); syncPushRegistration(); requestForegroundConnection() }
+    defer { working = false; reloadStatus(); syncPushRegistration(); PhoneSMSInbox.shared.activate(); PhoneSMSOutbox.shared.activate(); requestForegroundConnection() }
     do {
       try await identity.pair(PairingFile.parse(data))
       status = "配对完成"
@@ -722,6 +738,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     }
   }
   func backgrounded() {
+    PhoneSMSOutbox.shared.background()
     foregroundIntent.deactivate()
     if coordinator?.binding == nil && wake == nil {
       disconnect(pushEnabled ? "后台等待来电推送" : "已停止前台连接；打开 App 后自动连接")

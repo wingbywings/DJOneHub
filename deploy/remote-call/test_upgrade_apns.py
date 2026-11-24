@@ -4,8 +4,11 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+import re
+import subprocess
+import sys
 
-from upgrade_apns import BASE, APNS, backup_database, health, validate_command
+from upgrade_apns import BASE, APNS, SUPPORTED_SCHEMAS, backup_database, health, preflight_database, validate_command
 
 
 class UpgradeAPNsTests(unittest.TestCase):
@@ -71,13 +74,59 @@ class UpgradeAPNsTests(unittest.TestCase):
                 validate_command("{ path=/usr/local/bin/djonehub-relay ; argv[]=" + BASE + APNS + " --public-origin " + origin + " ; pid=12 }")
 
     def test_health_requires_push_and_preserves_existing_features(self):
-        caps = dict(identity=True, signaling=True, outgoing_calls=True, voip_push=True, turn=True)
+        caps = dict(identity=True, signaling=True, outgoing_calls=True, voip_push=True, turn=True, sms_push=True, sms_send=True)
         health(json.dumps(dict(capabilities=caps)))
         for key in caps:
             wrong = dict(caps)
             wrong[key] = False
             with self.assertRaises(ValueError):
                 health(json.dumps(dict(capabilities=wrong)))
+
+    def test_supported_schemas_track_relay_migrations(self):
+        root = Path(__file__).resolve().parents[2]
+        store = (root / "internal/relay/identity/store.go").read_text()
+        maximum = int(re.search(r"if version > (\d+) \{", store).group(1))
+        self.assertEqual(SUPPORTED_SCHEMAS, tuple(range(1, maximum + 1)))
+        script = (root / "scripts/upgrade-relay-apns.sh").read_text()
+        self.assertLess(script.index('upgrade_apns.py" preflight'), script.index('stopped=true'))
+
+    def test_sms_schema_preflight_and_backup_preserve_data(self):
+        for version in (4, 5):
+            with self.subTest(schema=version), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "identities.sqlite"
+                connection = sqlite3.connect(str(source))
+                try:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.executescript("PRAGMA user_version={}; CREATE TABLE sms_outgoing(message TEXT); INSERT INTO sms_outgoing VALUES('private-sms');".format(version))
+                    connection.commit()
+                    preflight_database(source)
+                    backup = Path(directory) / "backup.sqlite"
+                    backup_database(source, backup)
+                    result = sqlite3.connect(str(backup))
+                    try:
+                        self.assertEqual(result.execute("PRAGMA user_version").fetchone(), (version,))
+                        self.assertEqual(result.execute("SELECT message FROM sms_outgoing").fetchone(), ("private-sms",))
+                    finally:
+                        result.close()
+                finally:
+                    connection.close()
+
+    def test_future_schema_fails_before_copy_and_cli_has_safe_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "identities.sqlite"
+            connection = sqlite3.connect(str(source))
+            connection.executescript("PRAGMA user_version=99; CREATE TABLE secret(value TEXT); INSERT INTO secret VALUES('never-print-this');")
+            connection.close()
+            with self.assertRaisesRegex(ValueError, "schema=99"):
+                preflight_database(source)
+            destination = Path(directory) / "backup.sqlite"
+            with self.assertRaises(ValueError):
+                backup_database(source, destination)
+            self.assertFalse(destination.exists())
+            process = subprocess.run([sys.executable, str(Path(__file__).with_name("upgrade_apns.py")), "backup", str(source), str(destination)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn("backup failed: Unsupported database schema=99", process.stderr)
+            self.assertNotIn("never-print-this", process.stdout + process.stderr)
 
 
 if __name__ == "__main__":

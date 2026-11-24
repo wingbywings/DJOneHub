@@ -28,8 +28,8 @@ struct PhoneRecentsView: View {
   }
 
   var body: some View {
-    ScrollView {
-      VStack(spacing: 12) {
+    List {
+      Group {
         PageHeading(title: "通话记录", subtitle: "仅保存在此 iPhone")
         HStack(spacing: 4) {
           filterButton("全部", missed: false)
@@ -39,11 +39,9 @@ struct PhoneRecentsView: View {
           EmptyPhoneState(icon: "clock", title: missedOnly ? "没有未接来电" : "暂无通话记录",
                           message: "你的通话记录会显示在这里")
         }
-        LazyVStack(spacing: 10) {
-          ForEach(groups, id: \.date) { group in
-            SectionCaption(title: dayTitle(group.date))
-            ForEach(group.entries) { entry in recentRow(entry) }
-          }
+        ForEach(groups, id: \.date) { group in
+          SectionCaption(title: dayTitle(group.date))
+          ForEach(group.entries) { entry in recentRow(entry) }
         }
         if !runtime.historyError.isEmpty {
           Text(runtime.historyError).font(.caption).foregroundStyle(PhoneTheme.red)
@@ -55,8 +53,10 @@ struct PhoneRecentsView: View {
               .frame(maxWidth: .infinity).padding(.vertical, 15).background(PhoneTheme.redSoft, in: Capsule())
           }.buttonStyle(PhonePressStyle()).padding(.top, 12)
         }
-      }.padding(.horizontal, 22).padding(.bottom, 22)
-    }.scrollIndicators(.hidden)
+      }.listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }.listStyle(.plain).scrollContentBackground(.hidden).scrollIndicators(.hidden)
   }
 
   private func filterButton(_ title: String, missed: Bool) -> some View {
@@ -88,6 +88,11 @@ struct PhoneRecentsView: View {
           .disabled(PhoneCall.dialNumber(entry.display) == nil || entry.ended == nil)
       }
     }.padding(14).phoneGlass(radius: 20)
+      .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+        if entry.ended != nil {
+          Button("删除", systemImage: "trash", role: .destructive) { runtime.deleteHistory(entry.id) }
+        }
+      }
   }
 
   private func dayTitle(_ date: Date) -> String {

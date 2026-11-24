@@ -23,6 +23,7 @@ import (
 	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/relayclient"
 	"github.com/iniwex5/vohive/internal/relayprofile"
+	"github.com/iniwex5/vohive/internal/webadmin"
 	"github.com/iniwex5/vohive/pkg/smscodec"
 )
 
@@ -346,6 +347,7 @@ func (h *usbDeviceHub) attach(locator usbDeviceLocator) {
 		callPollInterval: 3 * time.Second,
 	}
 	runtime.nativeEvents = &h.nativeEvents
+	runtime.remoteSMSDispatch = func(message receivedSMS, target string) { h.dispatchRemoteSMS(runtime, message, target) }
 	runtime.remoteDispatch = func(ctx context.Context, call callRecord) { h.dispatchRemote(runtime, ctx, call) }
 	runtime.remoteConnectionState = func() string {
 		h.mu.RLock()
@@ -724,10 +726,14 @@ func (h *usbDeviceHub) defaultRuntime() *app {
 	return h.devices[ids[0]].Runtime
 }
 
-func (h *usbDeviceHub) routes(assets embed.FS) http.Handler {
+func (h *usbDeviceHub) routes(assets embed.FS, remoteAuth *webadmin.Auth) http.Handler {
 	mux := http.NewServeMux()
 	if h.remoteWeb != nil {
-		h.remoteWeb.register(mux)
+		auth := remoteAuth
+		if auth == nil {
+			auth = h.remoteWeb.auth
+		}
+		h.remoteWeb.register(mux, auth)
 	} else {
 		mux.HandleFunc("PUT /api/devices/{deviceID}/remote-calls/config", func(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "remote Web management unavailable")
@@ -810,10 +816,17 @@ func serveUSBDeviceHub(hub *usbDeviceHub, listen string) {
 		log.Print("remote Web management requires a valid listener port")
 		return
 	}
-	web, err := newRemoteWebManager(ctx, hub, filepath.Join(directory, "DJOneHub", "remote-web"), origin, nativeControlFile, func() (*relayprofile.Store, error) { return systemRemoteProfiles(relayclient.Options{}) })
+	access := loadWebAccess(filepath.Join(directory, "DJOneHub"))
+	web, err := newRemoteWebManager(ctx, hub, filepath.Join(directory, "DJOneHub", "remote-web"), origin, nativeControlFile, func() (*relayprofile.Store, error) { return systemRemoteProfiles(relayclient.Options{}) }, append([]string{"localhost"}, access.Hosts...))
 	if err != nil {
+		// A malformed alias set must not take the whole hub down; fall back to
+		// the implicit localhost alias only.
 		log.Printf("remote Web management startup failed: %v", err)
-		return
+		web, err = newRemoteWebManager(ctx, hub, filepath.Join(directory, "DJOneHub", "remote-web"), origin, nativeControlFile, func() (*relayprofile.Store, error) { return systemRemoteProfiles(relayclient.Options{}) }, []string{"localhost"})
+		if err != nil {
+			log.Printf("remote Web management startup failed: %v", err)
+			return
+		}
 	}
 	hub.remoteWeb = web
 	hub.nativeEvents.webTicket = web.auth.IssueTicket
@@ -828,7 +841,21 @@ func serveUSBDeviceHub(hub *usbDeviceHub, listen string) {
 	defer closeNative()
 	defer web.Close() // finish cellular cleanup before closing native control/hardware
 	server := &http.Server{
-		Addr: listen, Handler: hub.routes(webAssets), ReadHeaderTimeout: 5 * time.Second,
+		Addr: listen, Handler: hub.routes(webAssets, nil), ReadHeaderTimeout: 5 * time.Second,
+	}
+	var lanServer *http.Server
+	if access.LANListen != "" {
+		if lanAuth, lanErr := lanWebAdmin(filepath.Join(directory, "DJOneHub"), access.LANListen, access.Hosts); lanErr != nil {
+			log.Printf("LAN management listener disabled: %v", lanErr)
+		} else {
+			defer lanAuth.Close()
+			if _, statErr := os.Stat(filepath.Join(directory, "DJOneHub", "web-lan", "account.json")); statErr != nil {
+				log.Printf("LAN management on %s: first-use setup token in %s", access.LANListen, lanAuth.SetupPath())
+			}
+			lanServer = &http.Server{
+				Addr: access.LANListen, Handler: lanGate(lanAuth, hub.routes(webAssets, lanAuth)), ReadHeaderTimeout: 5 * time.Second,
+			}
+		}
 	}
 	hub.start()
 	web.boot(remoteOnlineProfile)
@@ -836,14 +863,31 @@ func serveUSBDeviceHub(hub *usbDeviceHub, listen string) {
 	log.Printf("Open http://%s", listen)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- server.ListenAndServe() }()
-	select {
-	case err := <-serveErr:
-		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("http server: %v", err)
+	lanErrCh := make(chan error, 1)
+	if lanServer != nil {
+		go func() { lanErrCh <- lanServer.ListenAndServe() }()
+	}
+	for {
+		select {
+		case err := <-serveErr:
+			if !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("http server: %v", err)
+			}
+			return
+		case err := <-lanErrCh:
+			// The loopback listener keeps serving; LAN access is an add-on.
+			if !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("LAN management listener stopped: %v", err)
+			}
+			lanServer = nil
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+			if lanServer != nil {
+				_ = lanServer.Shutdown(shutdownCtx)
+			}
+			return
 		}
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
 	}
 }

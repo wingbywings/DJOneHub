@@ -9,6 +9,7 @@ import (
 	"github.com/iniwex5/vohive/internal/desktopopen"
 	"github.com/iniwex5/vohive/internal/relay/identity"
 	"github.com/iniwex5/vohive/internal/relayprofile"
+	"github.com/iniwex5/vohive/internal/webadmin"
 	"io"
 	"io/fs"
 	"net/http"
@@ -50,12 +51,16 @@ func (m *remoteWebManager) start(w http.ResponseWriter, kind, profile string, ru
 	}
 	writeJSON(w, 202, j)
 }
-func (m *remoteWebManager) register(mux *http.ServeMux) {
+// register mounts the management API and the /remote page. The auth instance
+// decides the deployment flavor: the loopback manager passes its passwordless
+// auth, while the LAN listener passes its password auth so one login covers
+// the whole surface.
+func (m *remoteWebManager) register(mux *http.ServeMux, auth *webadmin.Auth) {
 	sessions := http.NewServeMux()
-	m.auth.Register(sessions, remoteWebAPI+"/session")
-	mux.Handle(remoteWebAPI+"/session/", m.auth.Guard(sessions))
+	auth.Register(sessions, remoteWebAPI+"/session")
+	mux.Handle(remoteWebAPI+"/session/", auth.Guard(sessions))
 	require := func(method, path string, handler http.HandlerFunc) {
-		mux.Handle(method+" "+path, m.auth.Guard(m.auth.Require(handler)))
+		mux.Handle(method+" "+path, auth.Guard(auth.Require(handler)))
 	}
 	require("GET", remoteWebAPI+"/profiles", func(w http.ResponseWriter, r *http.Request) {
 		items, err := m.catalog.list(r.Context())
@@ -356,7 +361,7 @@ func (m *remoteWebManager) register(mux *http.ServeMux) {
 		})
 	})
 	content, _ := fs.Sub(webAssets, "web/remote")
-	mux.Handle("GET /remote/", m.auth.Guard(http.StripPrefix("/remote/", http.FileServer(http.FS(content)))))
+	mux.Handle("GET /remote/", auth.Guard(http.StripPrefix("/remote/", http.FileServer(http.FS(content)))))
 }
 func (m *remoteWebManager) erasePairingSecret(id string) {
 	m.mu.Lock()

@@ -38,6 +38,18 @@ type Options struct {
 	LoopbackOnly    bool
 	LocalTickets    bool // launcher-owned native control may issue short-lived tickets
 	LocalNoPassword bool // explicit Mac-only loopback mode; never valid for HTTPS/proxied admin
+	// HostAliases are additional Host header values the Guard accepts, given
+	// as bare hostnames or host:port (the port must match the origin port).
+	// They extend, never replace, the exact origin host check.
+	HostAliases []string
+	// AllowInsecureHTTP explicitly permits a non-loopback plaintext HTTP
+	// origin. Password authentication is mandatory in that mode and it can
+	// never be combined with LocalNoPassword.
+	AllowInsecureHTTP bool
+	// AcceptAnyHost skips the Host allowlist. Only sensible together with
+	// mandatory login, where the session cookie scoping and same-origin
+	// checks carry the DNS-rebinding defense.
+	AcceptAnyHost bool
 }
 type passwordRecord struct {
 	Version    int    `json:"version"`
@@ -60,6 +72,7 @@ type Auth struct {
 	mu           sync.Mutex
 	options      Options
 	host         string
+	hosts        map[string]bool
 	secure       bool
 	account      *passwordRecord
 	setup        setupRecord
@@ -91,23 +104,30 @@ func Open(options Options) (*Auth, error) {
 		return nil, ErrConfig
 	}
 	secure := origin.Scheme == "https"
+	if options.LocalNoPassword && (options.AllowInsecureHTTP || options.AcceptAnyHost) {
+		return nil, ErrConfig
+	}
 	if options.LocalNoPassword && (!options.LoopbackOnly || origin.Scheme != "http" || net.ParseIP(origin.Hostname()) == nil || !net.ParseIP(origin.Hostname()).IsLoopback()) {
 		return nil, ErrConfig
 	}
 	if options.LocalTickets && (!options.LoopbackOnly || origin.Scheme != "http" || net.ParseIP(origin.Hostname()) == nil || !net.ParseIP(origin.Hostname()).IsLoopback()) {
 		return nil, ErrConfig
 	}
-	if !secure && (origin.Scheme != "http" || net.ParseIP(origin.Hostname()) == nil || !net.ParseIP(origin.Hostname()).IsLoopback()) {
+	if !secure && !options.AllowInsecureHTTP && (origin.Scheme != "http" || net.ParseIP(origin.Hostname()) == nil || !net.ParseIP(origin.Hostname()).IsLoopback()) {
+		return nil, ErrConfig
+	}
+	hosts, err := aliasHosts(origin.Host, options.HostAliases)
+	if err != nil {
 		return nil, ErrConfig
 	}
 	if err = os.MkdirAll(options.Directory, 0700); err != nil {
-		return nil, err
+		return nil, ErrConfig
 	}
 	unlock, err := lockDirectory(options.Directory)
 	if err != nil {
-		return nil, err
+		return nil, ErrConfig
 	}
-	a := &Auth{options: options, host: origin.Host, secure: secure, sessions: make(map[[32]byte]session), tickets: make(map[[32]byte]time.Time), now: time.Now, unlock: unlock}
+	a := &Auth{options: options, host: origin.Host, hosts: hosts, secure: secure, sessions: make(map[[32]byte]session), tickets: make(map[[32]byte]time.Time), now: time.Now, unlock: unlock}
 	success := false
 	defer func() {
 		if !success {
@@ -159,6 +179,42 @@ func Open(options Options) (*Auth, error) {
 }
 func (a *Auth) SetupPath() string { return filepath.Join(a.options.Directory, "setup.json") }
 func (a *Auth) Tenant() string    { return a.options.Tenant }
+
+// aliasHosts normalizes the origin host plus every alias onto the origin
+// port. Aliases keep the deployment explicit: only configured names pass the
+// Host check, so an arbitrary rebinding domain is still rejected.
+func aliasHosts(originHost string, aliases []string) (map[string]bool, error) {
+	port := ""
+	if _, originPort, err := net.SplitHostPort(originHost); err == nil {
+		port = originPort
+	} else if strings.Contains(originHost, ":") && !strings.HasPrefix(originHost, "[") {
+		// Bracketless IPv6 literals never appear in a Host header.
+		return nil, ErrConfig
+	}
+	hosts := map[string]bool{originHost: true}
+	for _, alias := range aliases {
+		host := alias
+		if name, aliasPort, err := net.SplitHostPort(alias); err == nil {
+			if aliasPort != port {
+				return nil, ErrConfig
+			}
+			host = name
+		} else if strings.Contains(alias, ":") {
+			return nil, ErrConfig
+		}
+		if host == "" || len(host) > 253 || strings.IndexFunc(host, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-')
+		}) >= 0 {
+			return nil, ErrConfig
+		}
+		host = strings.ToLower(host)
+		if port != "" {
+			host = net.JoinHostPort(host, port)
+		}
+		hosts[host] = true
+	}
+	return hosts, nil
+}
 func (a *Auth) Close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -184,7 +240,9 @@ func (a *Auth) Register(mux *http.ServeMux, prefix string) {
 }
 
 // Guard applies to both assets and APIs. Caller supplies the exact public
-// origin; proxy-forwarded headers never override it.
+// origin; proxy-forwarded headers never override it. Configured Host aliases
+// (or any-host mode for mandatory-login deployments) additionally accept the
+// request's own Host as the same-origin baseline.
 func (a *Auth) Guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -193,20 +251,35 @@ func (a *Auth) Guard(next http.Handler) http.Handler {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		w.Header().Set("Cache-Control", "no-store")
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if r.Host != a.host || a.options.LoopbackOnly && (err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
+		if !a.options.AcceptAnyHost && !a.hosts[r.Host] || a.options.LoopbackOnly && (err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
 			respond(w, http.StatusForbidden, map[string]string{"error": "invalid_management_host"})
 			return
 		}
-		if origin := r.Header.Get("Origin"); origin != "" && origin != a.options.Origin {
+		if origin := r.Header.Get("Origin"); origin != "" && !a.originAllowed(origin, r) {
 			respond(w, http.StatusForbidden, map[string]string{"error": "management_origin_required"})
 			return
 		}
-		if r.Method != "GET" && r.Method != "HEAD" && (r.Header.Get("Origin") != a.options.Origin || !jsonContentType(r.Header.Get("Content-Type"))) {
+		if r.Method != "GET" && r.Method != "HEAD" && (!a.originAllowed(r.Header.Get("Origin"), r) || !jsonContentType(r.Header.Get("Content-Type"))) {
 			respond(w, http.StatusForbidden, map[string]string{"error": "same_origin_json_required"})
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// originAllowed accepts the configured origin and, so aliased deployments
+// keep working from any accepted Host, the literal same-origin value derived
+// from the request Host. An empty Origin is never "allowed"; callers decide
+// whether it must be present.
+func (a *Auth) originAllowed(origin string, r *http.Request) bool {
+	if origin == "" || origin == a.options.Origin {
+		return origin != ""
+	}
+	scheme := "http"
+	if a.secure {
+		scheme = "https"
+	}
+	return origin == scheme+"://"+r.Host
 }
 func (a *Auth) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

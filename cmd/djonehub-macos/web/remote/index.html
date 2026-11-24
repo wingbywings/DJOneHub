@@ -14,7 +14,28 @@
   </header>
   <main>
     <p id="notice" role="status" aria-live="polite"></p>
-    <section id="session-panel"><h2>连接本机管理服务</h2><p>正在连接本机服务，无需账号或密码。请在这台 Mac 的浏览器打开 127.0.0.1 管理地址。</p><button id="session-retry" type="button">重新连接页面</button></section>
+    <section id="session-panel">
+      <h2>连接本机管理服务</h2>
+      <p id="session-hint">正在连接本机服务，无需账号或密码。请在这台 Mac 的浏览器打开 127.0.0.1 管理地址。</p>
+      <button id="session-retry" type="button">重新连接页面</button>
+      <form id="session-login" hidden>
+        <h3>登录管理服务</h3>
+        <p>此地址启用了密码保护，请输入管理账号。</p>
+        <label>账号<input name="username" autocomplete="username" required></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="form-note" role="status"></p>
+        <button type="submit">登录</button>
+      </form>
+      <form id="session-setup" hidden>
+        <h3>初始化管理账号</h3>
+        <p>首次使用此地址。请填写 Mac 启动日志中 web-lan 目录 setup.json 里的初始化令牌，创建至少 12 位密码的管理账号。</p>
+        <label>初始化令牌<input name="token" autocomplete="off" required></label>
+        <label>账号<input name="username" autocomplete="username" required></label>
+        <label>密码（至少 12 位）<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <p class="form-note" role="status"></p>
+        <button type="submit">创建账号并登录</button>
+      </form>
+    </section>
     <div id="management" hidden>
       <section class="connection-summary" aria-labelledby="connection-summary-title">
         <div class="section-head"><div class="summary-title"><span class="status-dot" id="connection-dot" aria-hidden="true"></span><h2 id="connection-summary-title">当前连接</h2></div><div class="actions"><button id="refresh" class="secondary" type="button">↻ 刷新状态</button><button type="button" data-dialog="connection-dialog" aria-haspopup="dialog" aria-controls="connection-dialog">管理连接</button></div></div>

@@ -226,7 +226,7 @@ func TestSchemaTwoMigrationPreservesCredentialsAndUnknownDates(t *testing.T) {
 	s, dir, _ := testStore(t)
 	hub, _ := testHub(t, s, "home")
 	phone, _ := testPhone(t, s, hub)
-	if _, err := s.db.Exec("DROP TABLE grant_metadata; DROP TABLE enrollment_requests; DROP TABLE identity_metadata; PRAGMA user_version=2;"); err != nil {
+	if _, err := s.db.Exec("DROP TABLE sms_outgoing; DROP TABLE alert_push_endpoints; DROP TABLE grant_metadata; DROP TABLE enrollment_requests; DROP TABLE identity_metadata; PRAGMA user_version=2;"); err != nil {
 		t.Fatal(err)
 	}
 	s.Close()

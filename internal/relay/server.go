@@ -94,12 +94,15 @@ func NewServer(store *identity.Store, options ...Option) *Server {
 	mux := http.NewServeMux()
 	signals := newSignalBroker(store)
 	signals.push = config.push
+	smsSender, _ := config.push.(voippush.SMSSender)
+	smsRoutes(mux, store, smsSender)
+	outgoingSMSRoutes(mux, store)
 	s := &Server{signals: signals, config: config, started: time.Now().UTC()}
 	mux.HandleFunc("GET /v1/signaling", signals.serve)
 	(&moduleNameCatalog{hubs: make(map[string]moduleNameSnapshot)}).routes(mux, store)
 	limits := &limiter{entries: make(map[string]ipLimit), global: rate.NewLimiter(50, 100)}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		respond(w, http.StatusOK, map[string]any{"status": "ok", "version": 1, "capabilities": map[string]bool{"identity": true, "signaling": true, "outgoing_calls": true, "module_names": true, "voip_push": config.push != nil, "turn": config.turn != nil}})
+		respond(w, http.StatusOK, map[string]any{"status": "ok", "version": 1, "capabilities": map[string]bool{"identity": true, "signaling": true, "outgoing_calls": true, "module_names": true, "voip_push": config.push != nil, "sms_push": smsSender != nil, "sms_send": true, "turn": config.turn != nil}})
 	})
 
 	if config.enrollmentOrigin != "" && identity.HTTPSOrigin(config.enrollmentOrigin) {

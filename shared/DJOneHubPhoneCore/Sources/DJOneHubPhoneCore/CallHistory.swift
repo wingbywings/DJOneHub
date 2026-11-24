@@ -42,6 +42,11 @@ public struct CallHistory: Codable, Sendable {
     entries[i].result = String(result.prefix(128))
   }
   public mutating func clearCompleted() { entries.removeAll { $0.ended != nil } }
+  @discardableResult public mutating func deleteCompleted(_ id: UUID) -> Bool {
+    guard let index = entries.firstIndex(where: { $0.id == id }), entries[index].ended != nil else { return false }
+    entries.remove(at: index)
+    return true
+  }
   public static func restore(_ data: Data, now: Date = Date()) throws -> Self {
     guard data.count <= 262144 else { throw PhoneError.invalidData }
     var value = try JSONDecoder().decode(Self.self, from: data)

@@ -244,7 +244,7 @@ extension IdentityHTTP {
     return config
   }
 
-  public func registerPush(environment: String, token: String) async throws {
+  public func registerPush(environment: String, token: String, alerts: Bool = false) async throws {
     guard ["sandbox", "production"].contains(environment),
       token.isEmpty
         || (token.count >= 32 && token.count <= 1024 && token.count % 2 == 0
@@ -254,7 +254,7 @@ extension IdentityHTTP {
     guard let tokens = record.tokens else { throw PhoneError.denied }
     let body = try Wire.encoder().encode(["environment": environment, "token": token])
     let data = try await http.post(
-      origin: Wire.origin(record.relay), path: "/v1/push", body: body,
+      origin: Wire.origin(record.relay), path: alerts ? "/v1/push/alerts" : "/v1/push", body: body,
       accessToken: tokens.access_token)
     struct Result: Decodable { let registered: Bool }
     guard try Wire.decoder().decode(Result.self, from: data).registered == !token.isEmpty else {
@@ -262,4 +262,17 @@ extension IdentityHTTP {
     }
   }
 
+}
+
+extension PhoneIdentity {
+  public func sendSMS(_ request: OutgoingSMS) async throws -> OutgoingSMSResult {
+    try request.validate()
+    let record = try await credentials()
+    guard let tokens = record.tokens, tokens.principal.modules.contains(request.module_id) else { throw PhoneError.denied }
+    let data = try await http.post(origin: Wire.origin(record.relay), path: "/v1/sms/outgoing",
+      body: Wire.encoder().encode(request), accessToken: tokens.access_token)
+    let result = try Wire.decoder().decode(OutgoingSMSResult.self, from: data)
+    try result.validate(request: request, principal: tokens.principal)
+    return result
+  }
 }

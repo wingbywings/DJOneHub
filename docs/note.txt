@@ -1,3 +1,83 @@
+## DJOneHub安装
+
+```sh
+cd /Users/yuyi/Documents/Code/DJOneHub
+sh scripts/package-macos-arm64.sh module-names-20261013
+```
+
+
+```sh
+cd /Users/yuyi/Documents/Code/DJOneHub/dist/release/DJOneHub-macOS-arm64-module-names-20261013
+./install
+djonehub start
+```
+
+
+## relay安装
+
+### 本地编译
+
+```sh
+cd /Users/yuyi/Documents/Code/DJOneHub
+python3 scripts/package-relay-apns.py
+scp dist/djonehub-relay-apns-source.tar.gz \
+  dist/djonehub-relay-apns-source.tar.gz.sha256 \
+  root@47.108.184.34:/root/
+```
+
+### relay服务器上
+
+```sh
+cd /root
+sha256sum -c djonehub-relay-apns-source.tar.gz.sha256
+DJ_RELAY_WORK=$(mktemp -d /root/djonehub-relay-build.XXXXXX)
+tar -xzf /root/djonehub-relay-apns-source.tar.gz -C "$DJ_RELAY_WORK"
+cd "$DJ_RELAY_WORK/djonehub-relay-apns"
+```
+
+```sh
+DJ_GO=/opt/djonehub/go/bin/go
+env -u GOROOT GOTOOLCHAIN=local "$DJ_GO" version
+gcc --version
+mkdir -p build
+env -u GOROOT GOTOOLCHAIN=local CGO_ENABLED=1 "$DJ_GO" build \
+  -trimpath -o build/djonehub-relay ./cmd/djonehub-relay
+```
+
+```sh
+if sudo systemctl cat djonehub-relay-admin >/dev/null 2>&1; then
+  sudo systemctl disable --now djonehub-relay-admin
+fi
+```
+
+```sh
+DJ_APNS_WORK=$(sudo mktemp -d /root/djonehub-apns-input.XXXXXX)
+sudo install -o root -g root -m 600 /etc/djonehub/apns.json "$DJ_APNS_WORK/apns.json"
+sudo bash scripts/upgrade-relay-apns.sh \
+  --apns-config "$DJ_APNS_WORK/apns.json" --go-bin "$DJ_GO"
+```
+
+
+```sh
+sudo rm -- "$DJ_APNS_WORK/apns.json"
+sudo rmdir -- "$DJ_APNS_WORK"
+```
+
+
+```sh
+sudo install -d -o djonehub -g djonehub -m 700 /var/lib/djonehub-relay-admin
+sudo install -d -m 755 /etc/systemd/system/djonehub-relay.service.d
+sudo install -m 644 deploy/remote-call/50-integrated-admin.conf.example \
+  /etc/systemd/system/djonehub-relay.service.d/50-integrated-admin.conf
+sudo systemctl daemon-reload
+sudo systemctl restart djonehub-relay
+sudo systemctl status djonehub-relay --no-pager -l
+```
+
+
+
+## 旧
+
 ## 安装
 
 sudo bash scripts/install-relay-centos8.sh \

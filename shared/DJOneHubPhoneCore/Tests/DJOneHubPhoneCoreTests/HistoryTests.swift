@@ -37,6 +37,35 @@ final class HistoryTests: XCTestCase {
     XCTAssertEqual(h.entries.count, 100)
     XCTAssertTrue(h.entries.allSatisfy { $0.ended == nil })
   }
+
+  func testDeletingOneCompletedCallPersistsAndKeepsOtherCallsToSameNumber() throws {
+    var history = CallHistory()
+    let deleted = UUID(), kept = UUID(), active = UUID()
+    let start = Date(timeIntervalSince1970: 100)
+    for id in [deleted, kept, active] {
+      history.begin(id: id, module: "m", display: "10086", outgoing: true, now: start)
+    }
+    history.finish(id: deleted, result: "已挂断", now: start.addingTimeInterval(10))
+    history.finish(id: kept, result: "已挂断", now: start.addingTimeInterval(20))
+    XCTAssertTrue(history.deleteCompleted(deleted))
+    XCTAssertEqual(history.entries.map(\.id), [active, kept])
+    history.finish(id: deleted, result: "late")
+    history.connected(id: deleted)
+    let restored = try CallHistory.restore(JSONEncoder().encode(history))
+    XCTAssertEqual(restored.entries.map(\.id), [active, kept])
+    XCTAssertEqual(restored.entries.first(where: { $0.id == kept })?.ended, start.addingTimeInterval(20))
+  }
+
+  func testDeletingActiveOrMissingCallLeavesHistoryUntouched() {
+    var history = CallHistory()
+    let active = UUID()
+    history.begin(id: active, module: "m", display: "10086", outgoing: false)
+    history.connected(id: active)
+    let previous = history.entries
+    XCTAssertFalse(history.deleteCompleted(active))
+    XCTAssertFalse(history.deleteCompleted(UUID()))
+    XCTAssertEqual(history.entries, previous)
+  }
 }
 
 extension HistoryTests {

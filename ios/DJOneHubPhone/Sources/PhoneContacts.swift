@@ -15,6 +15,11 @@ struct PhoneContact: Codable, Identifiable, Equatable {
   @Published private(set) var error = ""
   private let url: URL
   private var writable = true
+  private var deletedNumbers: Set<String> = []
+  private struct Saved: Codable {
+    var contacts: [PhoneContact]
+    var deletedNumbers: Set<String>
+  }
 
   init(url: URL? = nil) {
     self.url = url ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -23,9 +28,16 @@ struct PhoneContact: Codable, Identifiable, Equatable {
     do {
       let file = try FileHandle(forReadingFrom: self.url)
       defer { try? file.close() }
-      let data = try file.read(upToCount: 262145) ?? Data()
-      guard data.count <= 262144 else { throw PhoneError.invalidData }
-      let contacts = try JSONDecoder().decode([PhoneContact].self, from: data)
+      let data = try file.read(upToCount: 1_048_577) ?? Data()
+      guard data.count <= 1_048_576 else { throw PhoneError.invalidData }
+      let decoder = JSONDecoder()
+      let contacts: [PhoneContact]
+      if let record = try? decoder.decode(Saved.self, from: data) {
+        contacts = record.contacts
+        guard record.deletedNumbers.count <= 10_000,
+          record.deletedNumbers.allSatisfy({ PhoneCall.dialNumber($0) == $0 }) else { throw PhoneError.invalidData }
+        deletedNumbers = record.deletedNumbers
+      } else { contacts = try decoder.decode([PhoneContact].self, from: data) }
       guard contacts.count <= 500, Set(contacts.map(\.number)).count == contacts.count,
         contacts.allSatisfy({ PhoneCall.dialNumber($0.number) == $0.number && !$0.name.isEmpty && $0.name.count <= 64 })
       else { throw PhoneError.invalidData }
@@ -39,7 +51,8 @@ struct PhoneContact: Codable, Identifiable, Equatable {
   func all(history: CallHistory) -> [PhoneContact] {
     var byNumber = Dictionary(uniqueKeysWithValues: saved.map { ($0.number, $0) })
     for entry in history.entries {
-      guard let number = PhoneCall.dialNumber(entry.display), byNumber[number] == nil else { continue }
+      guard let number = PhoneCall.dialNumber(entry.display), byNumber[number] == nil,
+        !deletedNumbers.contains(number) else { continue }
       byNumber[number] = PhoneContact(name: number, number: number)
     }
     return byNumber.values.sorted {
@@ -63,18 +76,27 @@ struct PhoneContact: Codable, Identifiable, Equatable {
     var next = saved.filter { $0.number != number && $0.number != oldNumber }
     next.append(PhoneContact(name: contact.name.trimmingCharacters(in: .whitespacesAndNewlines), number: number, favorite: contact.favorite))
     guard next.count <= 500 else { error = "最多可保存 500 位联系人"; return false }
-    return commit(next)
+    return commit(next, deleting: deletedNumbers.subtracting([number]))
   }
 
-  private func commit(_ next: [PhoneContact]) -> Bool {
+  @discardableResult func delete(_ number: String) -> Bool {
+    guard writable, let number = PhoneCall.dialNumber(number) else { return false }
+    let deleted = deletedNumbers.union([number])
+    guard deleted.count <= 10_000 else { error = "删除记录已达上限"; return false }
+    return commit(saved.filter { $0.number != number }, deleting: deleted)
+  }
+
+  private func commit(_ next: [PhoneContact], deleting: Set<String>) -> Bool {
     do {
       try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-      try JSONEncoder().encode(next).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+      try JSONEncoder().encode(Saved(contacts: next, deletedNumbers: deleting))
+        .write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
       var file = url
       var values = URLResourceValues()
       values.isExcludedFromBackup = true
       try file.setResourceValues(values)
       saved = next
+      deletedNumbers = deleting
       error = ""
       return true
     } catch {
@@ -91,6 +113,7 @@ struct PhoneContactsView: View {
   @State private var query = ""
   @State private var editing: PhoneContact?
   @State private var adding = false
+  @State private var deleting: PhoneContact?
   var allowsDial = true
 
   private var all: [PhoneContact] { contacts.all(history: runtime.history) }
@@ -100,8 +123,8 @@ struct PhoneContactsView: View {
   }
 
   var body: some View {
-    ScrollView {
-      VStack(spacing: 12) {
+    List {
+      Group {
         HStack {
           PageHeading(title: "联系人", subtitle: "给家人打个电话吧")
           RoundIconButton(icon: "plus", label: "添加联系人") { adding = true }
@@ -129,6 +152,10 @@ struct PhoneContactsView: View {
                     Text(contact.name).font(.system(size: 12, weight: .semibold)).lineLimit(1).frame(width: 64)
                   }
                 }.buttonStyle(PhonePressStyle()).accessibilityLabel(allowsDial ? "呼叫\(contact.name)" : contact.name)
+                  .contextMenu {
+                    Button("编辑联系人", systemImage: "pencil") { editing = contact }
+                    Button("删除联系人", systemImage: "trash", role: .destructive) { deleting = contact }
+                  }
               }
             }.padding(.vertical, 5).padding(.horizontal, 4)
           }.scrollIndicators(.hidden)
@@ -139,36 +166,47 @@ struct PhoneContactsView: View {
           EmptyPhoneState(icon: "person.crop.circle.badge.plus", title: all.isEmpty ? "还没有联系人" : "没有匹配的联系人",
                           message: all.isEmpty ? "点击右上角添加家人，通话记录中的号码也会显示在这里。" : "试试其他姓名或号码")
         }
-        LazyVStack(spacing: 10) {
-          ForEach(filtered) { contact in
-            HStack(spacing: 12) {
-              Button { editing = contact } label: {
-                HStack(spacing: 12) {
-                  PhoneAvatar(name: contact.name)
-                  VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 5) {
-                      Text(contact.name).font(.system(size: 16, weight: .bold)).lineLimit(1)
-                      if contact.favorite {
-                        Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(PhoneTheme.amber)
-                      }
+        ForEach(filtered) { contact in
+          HStack(spacing: 12) {
+            Button { editing = contact } label: {
+              HStack(spacing: 12) {
+                PhoneAvatar(name: contact.name)
+                VStack(alignment: .leading, spacing: 4) {
+                  HStack(spacing: 5) {
+                    Text(contact.name).font(.system(size: 16, weight: .bold)).lineLimit(1)
+                    if contact.favorite {
+                      Image(systemName: "star.fill").font(.system(size: 10)).foregroundStyle(PhoneTheme.amber)
                     }
-                    Text(contact.number).font(.system(size: 12)).foregroundStyle(PhoneTheme.secondary).lineLimit(1)
-                  }.frame(maxWidth: .infinity, alignment: .leading)
-                }.contentShape(Rectangle())
-              }.buttonStyle(PhonePressStyle()).accessibilityLabel("编辑联系人 \(contact.name)")
-              if allowsDial {
-                RoundIconButton(icon: "phone.fill", label: "呼叫\(contact.name)", color: PhoneTheme.green,
-                                background: PhoneTheme.greenSoft) { dial(contact.number, nil) }
-              }
-            }.padding(14).phoneGlass(radius: 20)
-          }
+                  }
+                  Text(contact.number).font(.system(size: 12)).foregroundStyle(PhoneTheme.secondary).lineLimit(1)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+              }.contentShape(Rectangle())
+            }.buttonStyle(PhonePressStyle()).accessibilityLabel("编辑联系人 \(contact.name)")
+            if allowsDial {
+              RoundIconButton(icon: "phone.fill", label: "呼叫\(contact.name)", color: PhoneTheme.green,
+                              background: PhoneTheme.greenSoft) { dial(contact.number, nil) }
+            }
+          }.padding(14).phoneGlass(radius: 20)
+            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+              Button("删除", systemImage: "trash", role: .destructive) { contacts.delete(contact.number) }
+            }
+            .contextMenu {
+              Button("编辑联系人", systemImage: "pencil") { editing = contact }
+              Button("删除联系人", systemImage: "trash", role: .destructive) { deleting = contact }
+            }
         }
         if !contacts.error.isEmpty { Text(contacts.error).font(.caption).foregroundStyle(PhoneTheme.red) }
         Text("联系人仅保存在此 iPhone").font(.caption).foregroundStyle(PhoneTheme.secondary).padding(.vertical, 10)
-      }.padding(.horizontal, 22).padding(.bottom, 18)
-    }.scrollIndicators(.hidden).scrollDismissesKeyboard(.interactively)
+      }.listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }.listStyle(.plain).scrollContentBackground(.hidden)
+      .scrollIndicators(.hidden).scrollDismissesKeyboard(.interactively)
       .sheet(isPresented: $adding) { ContactEditor(contacts: contacts, contact: nil) }
       .sheet(item: $editing) { ContactEditor(contacts: contacts, contact: $0) }
+      .confirmationDialog("删除联系人？", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
+        if let deleting { Button("删除\(deleting.name)", role: .destructive) { contacts.delete(deleting.number) } }
+      } message: { Text("删除本机联系人，通话记录会保留。") }
       .onChange(of: runtime.callUUID) { _, value in
         if value != nil && allowsDial { adding = false; editing = nil }
       }
@@ -182,6 +220,7 @@ private struct ContactEditor: View {
   @State private var name = ""
   @State private var number = ""
   @State private var favorite = true
+  @State private var deleting = false
 
   var body: some View {
     NavigationStack {
@@ -199,6 +238,10 @@ private struct ContactEditor: View {
               Divider()
               Toggle("常用联系人", isOn: $favorite).tint(PhoneTheme.green)
             }.padding(20).phoneGlass()
+            if contact != nil {
+              Button("删除联系人", role: .destructive) { deleting = true }
+                .frame(maxWidth: .infinity).padding(.vertical, 10)
+            }
             if !contacts.error.isEmpty { Text(contacts.error).font(.caption).foregroundStyle(PhoneTheme.red) }
             Text("仅保存在此 iPhone，相同号码会合并为一位联系人。")
               .font(.caption).foregroundStyle(PhoneTheme.secondary)
@@ -214,6 +257,11 @@ private struct ContactEditor: View {
           }
         }
     }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).preferredColorScheme(.light)
+      .confirmationDialog("删除联系人？", isPresented: $deleting, titleVisibility: .visible) {
+        if let contact {
+          Button("删除\(contact.name)", role: .destructive) { if contacts.delete(contact.number) { dismiss() } }
+        }
+      } message: { Text("删除本机联系人，通话记录会保留。") }
       .onAppear { name = contact?.name ?? ""; number = contact?.number ?? ""; favorite = contact?.favorite ?? true }
   }
 }

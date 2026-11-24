@@ -3,6 +3,8 @@
 import hashlib
 from pathlib import Path
 import tarfile
+import subprocess
+import sys
 
 root = Path(__file__).resolve().parent.parent
 output = root / "dist/djonehub-relay-apns-source.tar.gz"
@@ -18,6 +20,11 @@ entries = ["go.mod", "go.sum", "cmd/djonehub-relay", "cmd/djonehub-relay-admin",
            "docs/remote-iphone-auto-connect.md",
            "docs/REMOTE_APNS_UPGRADE.md", "docs/REMOTE_RELAY_WEB_ADMIN_DEPLOY.md", "docs/REMOTE_OPERATIONS_GUIDE.md",
            "docs/REMOTE_WEB_PAIRING_PLAN.md", "docs/REMOTE_WEB_OPERATIONS_GUIDE.md", "docs/remote-web-first-batch.md", "docs/remote-web-second-batch.md", "docs/remote-web-browser-acceptance.md", "docs/remote-web-display-batch.md", "docs/remote-calls-thirteenth-batch.md"]
+# Fail before replacing the bundle when migration and upgrade support drift.
+subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", str(root / "deploy/remote-call"), "-p", "test_upgrade_apns.py"], check=True)
+for required in ("deploy/remote-call/upgrade_apns.py", "scripts/upgrade-relay-apns.sh", "docs/REMOTE_APNS_UPGRADE.md", "internal/relay/identity/store.go"):
+    if not (root / required).is_file():
+        raise SystemExit("Required upgrade source missing: " + required)
 files = []
 for entry in entries:
     path = root / entry

@@ -102,7 +102,7 @@ func TestVoiceAgentCallsSearchThroughDeviceRoute(t *testing.T) {
 		fallback: newDemoApp(),
 	}
 	response := httptest.NewRecorder()
-	hub.routes(webAssets).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/devices/device-search/voice-agent/calls?limit=1&q="+url.QueryEscape("设备内"), nil))
+	hub.routes(webAssets, nil).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/devices/device-search/voice-agent/calls?limit=1&q="+url.QueryEscape("设备内"), nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"call_id":"device-call"`) || !strings.Contains(response.Body.String(), `"total":1`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -211,7 +211,7 @@ func TestVoiceAgentCallRecordingSupportsRangeThroughDeviceRoute(t *testing.T) {
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/devices/device-range/voice-agent/calls/call-range-1/recording", nil)
 	request.Header.Set("Range", "bytes=0-7")
-	hub.routes(webAssets).ServeHTTP(response, request)
+	hub.routes(webAssets, nil).ServeHTTP(response, request)
 	if response.Code != http.StatusPartialContent || !bytes.Equal(response.Body.Bytes(), wav[:8]) {
 		t.Fatalf("range status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.Bytes())
 	}

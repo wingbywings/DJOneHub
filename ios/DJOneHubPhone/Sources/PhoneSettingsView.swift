@@ -79,7 +79,7 @@ struct PhoneSettingsView: View {
             SettingsRow(icon: "info.circle", title: "联调诊断", subtitle: "查看本次通话的调试日志", color: .blue)
           }
         }.padding(.horizontal, 14).phoneGlass().buttonStyle(PhonePressStyle())
-        Text("可通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。\n后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
+        Text("可通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。\nHub 开启 SIM 的 APP 接听后，短信通知自动接入 APP，Bark 提示暂停；请允许系统通知。\n后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
           .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center).lineSpacing(4).padding(.top, 4)
         Text("DJOneHub Phone · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
           .font(.system(size: 11)).foregroundStyle(PhoneTheme.muted)

@@ -16,7 +16,9 @@ import (
 	"github.com/iniwex5/vohive/internal/remotehub"
 	"github.com/iniwex5/vohive/internal/remotemedia"
 	"github.com/iniwex5/vohive/internal/remotemedia/opus"
+	"github.com/iniwex5/vohive/internal/smsout"
 	"github.com/iniwex5/vohive/internal/turncred"
+	"github.com/iniwex5/vohive/internal/voippush"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -32,7 +34,21 @@ type remoteHubService struct {
 	resume   func(context.Context, callsignal.Message) (*callsignal.Client, error)
 	refresh  func(context.Context) (string, error)
 	ice      func(context.Context, string) (turncred.Credentials, error)
+	sms      func(context.Context, voippush.SMS) error
+	stopSMS  context.CancelFunc
 	activate func()
+}
+
+type remoteHubHooks struct {
+	moduleNames func([]string) []identity.ModuleChoice
+	sendSMS     func(context.Context, smsout.Request) smsout.Result
+}
+
+func (s *remoteHubService) Close() {
+	if s.stopSMS != nil {
+		s.stopSMS()
+	}
+	s.Manager.Close()
 }
 
 // An explicit integration entry point until background-call device validation is complete.
@@ -55,7 +71,7 @@ func startRemoteHub(ctx context.Context, profile, nativeFile string, incoming fu
 	}
 	return service, err
 }
-func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, store *relayprofile.Store, incoming func(context.Context, remotehub.Connection, callsignal.Message), moduleNames ...func([]string) []identity.ModuleChoice) (*remoteHubService, error) {
+func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, store *relayprofile.Store, incoming func(context.Context, remotehub.Connection, callsignal.Message), hooks ...remoteHubHooks) (*remoteHubService, error) {
 	if profile == "" || nativeFile == "" || !opus.Available() {
 		return nil, relayprofile.ErrInvalid
 	}
@@ -69,9 +85,12 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 		return nil, errors.New("remote profile requires operator recovery")
 	}
 	ready := make(chan struct{})
+	smsContext, stopSMS := context.WithCancel(ctx)
+	var smsOnce sync.Once
 	var once sync.Once
 	var accessMu sync.RWMutex
 	var access string
+	var smsOptions relayclient.Options
 	setAccess := func(value string) { accessMu.Lock(); access = value; accessMu.Unlock() }
 	refreshAccess := func(ctx context.Context) (string, error) {
 		token, err := store.RefreshAccess(ctx, profile)
@@ -81,15 +100,23 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 		return token, err
 	}
 	startNames := func(config callsignal.ClientConfig, client *callsignal.Client) {
-		setAccess(config.AccessToken)
-		if len(moduleNames) == 0 || moduleNames[0] == nil {
+		accessMu.Lock()
+		access = config.AccessToken
+		smsOptions = relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig}
+		accessMu.Unlock()
+		if len(hooks) > 0 && hooks[0].sendSMS != nil {
+			smsOnce.Do(func() {
+				go receiveOutgoingSMS(smsContext, status.RelayURL, relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig}, func() string { accessMu.RLock(); defer accessMu.RUnlock(); return access }, hooks[0].sendSMS)
+			})
+		}
+		if len(hooks) == 0 || hooks[0].moduleNames == nil {
 			return
 		}
 		// Use the service lifetime even when the socket resumes an active call.
 		go publishRemoteModuleNames(ctx, client.Done(), status.RelayURL,
 			relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig},
 			func() string { accessMu.RLock(); defer accessMu.RUnlock(); return access },
-			func() []identity.ModuleChoice { return moduleNames[0](status.Principal.Modules) })
+			func() []identity.ModuleChoice { return hooks[0].moduleNames(status.Principal.Modules) })
 	}
 	manager := remotehub.Start(ctx, remotehub.Config{
 		RecoverCalls: remoteSignalResume,
@@ -120,7 +147,26 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 		Refresh:  refreshAccess,
 		Incoming: incoming,
 	})
-	return &remoteHubService{Manager: manager, activate: func() { once.Do(func() { close(ready) }) },
+	return &remoteHubService{Manager: manager, stopSMS: stopSMS,
+		sms: func(request context.Context, sms voippush.SMS) error {
+			// Use the current socket credential without competing with call refresh.
+			accessMu.RLock()
+			token, options := access, smsOptions
+			accessMu.RUnlock()
+			if token == "" || ctx.Err() != nil {
+				return callsignal.ErrConnection
+			}
+			client, err := relayclient.New(status.RelayURL, options)
+			if err != nil {
+				return err
+			}
+			defer client.Close()
+			request, cancel := context.WithCancel(request)
+			defer cancel()
+			stop := context.AfterFunc(ctx, cancel)
+			defer stop()
+			return client.SendSMS(request, token, sms)
+		}, activate: func() { once.Do(func() { close(ready) }) },
 		resume: func(ctx context.Context, binding callsignal.Message) (*callsignal.Client, error) {
 			config, err := store.ConnectionConfig(ctx, profile)
 			if err != nil {

@@ -84,12 +84,72 @@ const operatorNames = new Map([
   ["46015", "中国广电"],
 ]);
 
-async function api(path, options = {}) {
-  const response = await fetch(routedAPIPath(path), {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
+// On the loopback listener no session exists and these helpers resolve without
+// a dialog. A password-protected LAN deployment answers 401 for the API until
+// the browser logs in; api() then retries the failed request once.
+let webSessionCSRF = "";
+let webSessionPromise = null;
+async function rawSession(path, options = {}) {
+  const response = await fetch(path, { ...options, credentials: "same-origin", headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
   const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+function showLoginDialog(configured) {
+  const modal = $("#login-modal"), form = $("#login-form");
+  $("#login-title").textContent = configured ? "登录管理服务" : "初始化管理账号";
+  $("#login-intro").textContent = configured ? "此地址启用了密码保护，请输入管理账号后继续。" : "首次在此地址使用，请用启动日志中 web-lan 目录 setup.json 里的初始化令牌创建账号。";
+  $("#login-token-field").hidden = configured;
+  $("#login-submit").textContent = configured ? "登录" : "创建账号并登录";
+  $("#login-notice").textContent = "";
+  form.reset();
+  modal.hidden = false;
+  return new Promise(resolve => {
+    const close = value => { modal.hidden = true; form.onsubmit = null; $("#login-cancel").onclick = null; resolve(value); };
+    $("#login-cancel").onclick = () => close(null);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      $("#login-notice").textContent = "";
+      try {
+        const body = Object.fromEntries(new FormData(form));
+        await rawSession("/api/remote-management/session/" + (configured ? "login" : "setup"), { method: "POST", body: JSON.stringify(body) });
+        close(true);
+      } catch (error) { $("#login-notice").textContent = error.message; }
+    };
+  });
+}
+async function ensureWebSession() {
+  if (webSessionCSRF) return webSessionCSRF;
+  if (!webSessionPromise) webSessionPromise = (async () => {
+    let session = await rawSession("/api/remote-management/session/status");
+    if (!session.authenticated && session.local_no_password) {
+      session = await rawSession("/api/remote-management/session/local", { method: "POST", body: "{}" });
+    }
+    if (!session.authenticated) {
+      if (!(await showLoginDialog(session.configured))) throw new Error("登录已取消");
+      session = await rawSession("/api/remote-management/session/status");
+    }
+    webSessionCSRF = session.csrf || "";
+    return webSessionCSRF;
+  })();
+  try { return await webSessionPromise; } finally { webSessionPromise = null; }
+}
+
+async function api(path, options = {}) {
+  const request = extraHeaders => fetch(routedAPIPath(path), {
+    ...options,
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...(options.headers || {}), ...extraHeaders },
+  });
+  let response = await request();
+  let data = await response.json().catch(() => ({}));
+  if (response.status === 401 || response.status === 403 && data.error === "csrf_required") {
+    const csrf = await ensureWebSession().catch(() => null);
+    if (csrf !== null) {
+      response = await request(csrf ? { "X-DJOneHub-CSRF": csrf } : {});
+      data = await response.json().catch(() => ({}));
+    }
+  }
   if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
@@ -426,8 +486,11 @@ function renderBarkSettings(kind, settings) {
   $(`#${prefix}-bark-api-url`).value = settings?.api_url || "";
   $(`#${prefix}-bark-alias`).value = settings?.alias || "";
   $(`#${prefix}-bark-message-template`).value = settings?.message_template || "";
-  $(`#${prefix}-bark-summary`).textContent = enabled ? "已启用" : (settings?.api_url ? "已停用" : "未配置");
-  $(`#${prefix}-bark-status`).textContent = enabled
+  const paused = settings?.paused_by_app === true;
+  $(`#${prefix}-bark-summary`).textContent = paused ? "APP 接管 · 已暂停" : enabled ? "已启用" : (settings?.api_url ? "已停用" : "未配置");
+  $(`#${prefix}-bark-status`).textContent = paused
+    ? "DJ电话通 APP 接听已启用，SIM 短信通知已转入 APP，Bark 自动提示已暂停；关闭 APP 接听后恢复原配置。"
+    : enabled
     ? `${label} Bark 转发已启用。`
     : `${label} Bark 转发当前未启用。`;
 }
@@ -796,8 +859,12 @@ async function loadRemoteSettings() {
       session = await api('/api/remote-management/session/local', { method: 'POST', body: '{}' });
       if (device !== activeDeviceID || attempt !== remoteLoadID) return;
     }
-    if (!session.authenticated) { $('#remote-status').textContent = '本机管理会话不可用，请打开远程接听与配对页重试'; return; }
-    remoteManagementCSRF = session.csrf;
+    if (!session.authenticated) {
+      try { remoteManagementCSRF = await ensureWebSession(); }
+      catch { $('#remote-status').textContent = '本机管理会话不可用，请打开远程接听与配对页重试'; return; }
+    } else {
+      remoteManagementCSRF = session.csrf;
+    }
     const profiles = await api('/api/remote-management/profiles');
     if (device !== activeDeviceID || attempt !== remoteLoadID) return;
     if (!profiles.active_profile) { $('#remote-status').textContent = '请先在远程管理页连接已登记的 Mac 配置'; return; }
@@ -838,7 +905,7 @@ $("#remote-form").addEventListener("submit", async (event) => {
   $("#remote-fields").disabled = true;
   try {
     await managementJob('/routes', { module: device, config });
-    if (device === activeDeviceID && attempt === remoteLoadID) { notice("远程接听设置已保存"); await loadRemoteSettings(); }
+    if (device === activeDeviceID && attempt === remoteLoadID) { notice("远程接听设置已保存"); await Promise.all([loadRemoteSettings(), loadBarkSettings("sms"), loadBarkSettings("call")]); }
   } catch (error) {
     if (device === activeDeviceID && attempt === remoteLoadID) {
       notice(error.message);

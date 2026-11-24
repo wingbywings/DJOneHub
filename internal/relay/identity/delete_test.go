@@ -28,6 +28,9 @@ func TestDeleteRevokedPhoneCleansCredentialsAndPreservesHub(t *testing.T) {
 	if err = s.SetPushEndpoint(ctx, rotated.AccessToken, "sandbox", strings.Repeat("a", 64)); err != nil {
 		t.Fatal(err)
 	}
+	if err = s.SetAlertPushEndpoint(ctx, rotated.AccessToken, "sandbox", strings.Repeat("b", 64)); err != nil {
+		t.Fatal(err)
+	}
 	if err = s.AdminRevokeTenant(ctx, "home", phone.Principal.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +41,7 @@ func TestDeleteRevokedPhoneCleansCredentialsAndPreservesHub(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatal(count, err)
 	}
-	for _, table := range []string{"access_tokens", "refresh_used", "challenges", "push_endpoints", "identity_metadata", "identities"} {
+	for _, table := range []string{"access_tokens", "refresh_used", "challenges", "push_endpoints", "alert_push_endpoints", "identity_metadata", "identities"} {
 		column := "identity_id"
 		if table == "identity_metadata" || table == "identities" {
 			column = "id"

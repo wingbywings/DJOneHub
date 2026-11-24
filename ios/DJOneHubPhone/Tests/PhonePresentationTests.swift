@@ -127,6 +127,38 @@ import XCTest
     XCTAssertEqual(try Data(contentsOf: url), original)
   }
 
+  func testDeletedFavoriteDoesNotReturnFromHistoryAndCanBeAddedAgain() throws {
+    let url = storageURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let contact = PhoneContact(name: "妈妈", number: "13800138000", favorite: true)
+    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    // Migrate the original array storage when deleting.
+    try JSONEncoder().encode([contact]).write(to: url)
+    let store = PhoneContactsStore(url: url)
+    var history = CallHistory()
+    history.begin(id: UUID(), module: "voice", display: contact.number, outgoing: true)
+    XCTAssertTrue(store.delete(contact.number))
+    XCTAssertTrue(store.saved.isEmpty)
+    XCTAssertTrue(store.all(history: history).isEmpty)
+    let restarted = PhoneContactsStore(url: url)
+    XCTAssertTrue(restarted.all(history: history).isEmpty)
+    XCTAssertEqual(history.entries.count, 1)
+    XCTAssertTrue(restarted.save(contact))
+    XCTAssertEqual(PhoneContactsStore(url: url).all(history: history), [contact])
+  }
+
+  func testFailedContactDeletionKeepsFavorite() throws {
+    let url = storageURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    let store = PhoneContactsStore(url: url)
+    let contact = PhoneContact(name: "妈妈", number: "13800138000", favorite: true)
+    XCTAssertTrue(store.save(contact))
+    try FileManager.default.removeItem(at: url.deletingLastPathComponent())
+    try Data("not a directory".utf8).write(to: url.deletingLastPathComponent())
+    XCTAssertFalse(store.delete(contact.number))
+    XCTAssertEqual(store.saved, [contact])
+  }
+
   func testMissedFilterExcludesActiveOutgoingAndDeclinedCalls() {
     let start = Date(timeIntervalSince1970: 1000)
     var history = CallHistory()

@@ -312,7 +312,7 @@ func (s *Store) AdminDeleteRevokedTenant(ctx context.Context, tenant, id string)
 		return 0, err
 	}
 	// These are fixed internal table names; all user input remains bound values.
-	for _, table := range []string{"access_tokens", "refresh_used", "challenges", "push_endpoints", "identity_metadata"} {
+	for _, table := range []string{"access_tokens", "refresh_used", "challenges", "push_endpoints", "alert_push_endpoints", "sms_outgoing", "identity_metadata"} {
 		column := "identity_id"
 		if table == "identity_metadata" {
 			column = "id"

@@ -193,7 +193,7 @@ func (s *Store) initialize() error {
 	if err := tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 3 {
+	if version > 5 {
 		return errors.New("unsupported relay identity schema")
 	}
 	if version == 0 {
@@ -230,6 +230,18 @@ PRAGMA user_version=3;`); err != nil {
 			return err
 		}
 	}
+	if version < 4 {
+		if _, err = tx.Exec(`CREATE TABLE alert_push_endpoints(identity_id TEXT PRIMARY KEY REFERENCES identities(id), environment TEXT NOT NULL, token TEXT NOT NULL, registration TEXT NOT NULL, updated INTEGER NOT NULL, UNIQUE(environment,token)); PRAGMA user_version=4;`); err != nil {
+			return err
+		}
+	}
+
+	if version < 5 {
+		if _, err = tx.Exec(`CREATE TABLE sms_outgoing(identity_id TEXT NOT NULL REFERENCES identities(id), id TEXT NOT NULL, hub_id TEXT NOT NULL, module_id TEXT NOT NULL, digest TEXT NOT NULL, phone TEXT NOT NULL, message TEXT NOT NULL, created INTEGER NOT NULL, request_time TEXT NOT NULL, state TEXT NOT NULL, segments INTEGER NOT NULL, code TEXT NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY(identity_id,id)); CREATE INDEX sms_outgoing_queue ON sms_outgoing(hub_id,state,created); PRAGMA user_version=5;`); err != nil {
+			return err
+		}
+	}
+
 	return tx.Commit()
 }
 func (s *Store) transaction(ctx context.Context) (*sql.Tx, error) { return s.db.BeginTx(ctx, nil) }

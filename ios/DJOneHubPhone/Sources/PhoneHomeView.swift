@@ -2,12 +2,13 @@ import DJOneHubPhoneCore
 import SwiftUI
 
 enum PhoneTab: String, CaseIterable {
-  case dialer = "拨号", contacts = "联系人", recents = "通话记录", settings = "设置"
+  case dialer = "拨号", contacts = "联系人", recents = "通话记录", sms = "短信", settings = "设置"
   var icon: String {
     switch self {
     case .dialer: return "square.grid.2x2"
     case .contacts: return "person"
     case .recents: return "clock"
+    case .sms: return "message"
     case .settings: return "gearshape"
     }
   }
@@ -15,6 +16,7 @@ enum PhoneTab: String, CaseIterable {
 
 struct PhoneHomeView: View {
   @ObservedObject var runtime: PhoneRuntime
+  @ObservedObject private var inbox = PhoneSMSInbox.shared
   @StateObject private var contacts = PhoneContactsStore()
   @State private var tab: PhoneTab = .dialer
   @State private var clearingHistory = false
@@ -32,6 +34,8 @@ struct PhoneHomeView: View {
           PhoneContactsView(runtime: runtime, contacts: contacts, dial: prepareDial)
         case .recents:
           PhoneRecentsView(runtime: runtime, contacts: contacts, clear: { clearingHistory = true }, dial: prepareDial)
+        case .sms:
+          PhoneSMSView(runtime: runtime)
         case .settings:
           PhoneSettingsView(runtime: runtime, clearHistory: { clearingHistory = true })
         }
@@ -47,6 +51,9 @@ struct PhoneHomeView: View {
     }
     .confirmationDialog("清除本机已结束的通话记录？", isPresented: $clearingHistory, titleVisibility: .visible) {
       Button("清除记录", role: .destructive) { runtime.clearHistory() }
+    }
+    .onChange(of: inbox.openedNotification, initial: true) { _, value in
+      if value != nil { tab = .sms; inbox.openedNotification = nil }
     }
     .onChange(of: runtime.callUUID) { _, value in
       if value != nil { clearingHistory = false }

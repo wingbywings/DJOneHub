@@ -1,5 +1,5 @@
-// Package voippush sends incoming-call wakeups. APNs acceptance is never an
-// acknowledgement that CallKit reported, or that the user answered, a call.
+// Package voippush sends incoming-call wakeups and regular SMS alerts. APNs
+// acceptance is never an acknowledgement of delivery or of an answered call.
 package voippush
 
 import (
@@ -141,23 +141,32 @@ func (c *Client) Send(ctx context.Context, token string, invite callsignal.Messa
 	if len(payload) > 5120 {
 		return Result{}, ErrDelivery
 	}
+	ctx, cancel := context.WithDeadline(ctx, call.Deadline)
+	defer cancel()
+	return c.sendPayload(ctx, token, payload, "voip", c.config.BundleID+".voip", "0", invite.CallUUID, "")
+}
+
+func (c *Client) sendPayload(ctx context.Context, token string, payload []byte, pushType, topic, expiry, id, collapse string) (Result, error) {
 	jwt, err := c.authorization(time.Now())
 	if err != nil {
 		return Result{}, err
 	}
-	ctx, cancel := context.WithDeadline(ctx, call.Deadline)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", c.endpoint+"/3/device/"+token, bytes.NewReader(payload))
 	if err != nil {
 		return Result{}, ErrDelivery
 	}
 	req.Header.Set("Authorization", "bearer "+jwt)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("apns-topic", c.config.BundleID+".voip")
-	req.Header.Set("apns-push-type", "voip")
+	req.Header.Set("apns-topic", topic)
+	req.Header.Set("apns-push-type", pushType)
 	req.Header.Set("apns-priority", "10")
-	req.Header.Set("apns-expiration", "0")
-	req.Header.Set("apns-id", invite.CallUUID)
+	req.Header.Set("apns-expiration", expiry)
+	if id != "" {
+		req.Header.Set("apns-id", id)
+	}
+	if collapse != "" {
+		req.Header.Set("apns-collapse-id", collapse)
+	}
 	// No retry or collapse: an uncertain send must not create another call UI.
 	response, err := c.http.Do(req)
 	if err != nil {

@@ -118,7 +118,7 @@ func newWebFixtureAt(t *testing.T, origin string) *webFixture {
 	b.deviceID = "module_b"
 	f.hub.devices["module_a"] = &managedUSBDevice{ID: "module_a", Alias: "同名模块", State: "ready", Runtime: a}
 	f.hub.devices["module_b"] = &managedUSBDevice{ID: "module_b", Alias: "同名模块", State: "ready", Runtime: b}
-	m, err := newRemoteWebManager(context.Background(), f.hub, filepath.Join(t.TempDir(), "management"), f.origin, "fixture-native-control", func() (*relayprofile.Store, error) { f.factoryCalls.Add(1); return f.store, nil })
+	m, err := newRemoteWebManager(context.Background(), f.hub, filepath.Join(t.TempDir(), "management"), f.origin, "fixture-native-control", func() (*relayprofile.Store, error) { f.factoryCalls.Add(1); return f.store, nil }, []string{"localhost"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func newWebFixtureAt(t *testing.T, origin string) *webFixture {
 		manager := remotehub.Start(ctx, remotehub.Config{Connect: func(ctx context.Context) (remotehub.Connection, error) { return newWebConnection(), nil }, Refresh: func(context.Context) (string, error) { return "fixture", nil }})
 		return &remoteHubService{Manager: manager}, nil
 	}
-	f.handler = f.hub.routes(webAssets)
+	f.handler = f.hub.routes(webAssets, nil)
 	response := f.request("POST", remoteWebAPI+"/session/local", map[string]string{}, false)
 	if response.Code != 200 {
 		t.Fatal(response.Body.String())

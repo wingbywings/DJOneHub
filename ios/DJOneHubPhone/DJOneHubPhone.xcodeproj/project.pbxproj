@@ -14,6 +14,7 @@
 		32766E9F353B49A04735FB22 /* PhoneApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34B7FCEC7F129BFA04BD25FB /* PhoneApp.swift */; };
 		42E67618ACE4A84676F0199D /* PhoneMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3BA716FFDC9EDE75C4DB0A1E /* PhoneMedia.swift */; };
 		48C873F64E7257BF9993F168 /* PhoneCallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 413207D3AF16D412DE40968F /* PhoneCallView.swift */; };
+		6877594CD9BBDB4FD3A85C42 /* PhoneSMSOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA0A5B4BDBE9AB80F96F6D95 /* PhoneSMSOutbox.swift */; };
 		832755465506D5E3BEF76CB1 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 7936BDEAAC3A0CDE110DE896 /* WebRTC */; };
 		89FBAFC337F14D81F6D68230 /* Services.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65FC78B3625FC45CEB39F5DE /* Services.swift */; };
 		9217833E73161B4B9D3C1612 /* PhoneRingbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FD078FA47FFDF42778406B /* PhoneRingbackTests.swift */; };
@@ -24,9 +25,11 @@
 		B4B018FFB3739CBF98A731BA /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 78CD26B5898C04868DC0E051 /* WebRTC */; };
 		BCAD571C6409EB5AD16B1186 /* PhoneHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D47B976D981AA146C968B5FF /* PhoneHomeView.swift */; };
 		BD846D8715BDE3416D9FF53F /* PhoneMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */; };
+		BF2A5FFF93765B01322AE9EC /* PhoneSMSOutboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE98C9930428236AE3BC95F4 /* PhoneSMSOutboxTests.swift */; };
 		C204A2A74B32C71C2C3EFC30 /* DJOneHubPhoneCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5EE66CA1217CD52901D0DAE2 /* DJOneHubPhoneCore */; };
 		CE3C286BDD31295CC0526366 /* PhonePresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C6153C2CED7B462832F0357 /* PhonePresentationTests.swift */; };
 		E6485DD3419F77FEA7DCBFB9 /* DJOneHubPhoneCore in Frameworks */ = {isa = PBXBuildFile; productRef = 8D7BB9ED4D3C26764209DD7D /* DJOneHubPhoneCore */; };
+		F31406557F02C144A458DAC1 /* PhoneSMSInbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = A60553A57D74380BA204F923 /* PhoneSMSInbox.swift */; };
 		FCA4F595A404A2484A70D142 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E4631392821970D824EC86ED /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -56,11 +59,14 @@
 		95FEF65866ED052FD351E7C4 /* DJOneHubPhoneTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = DJOneHubPhoneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		9B5A7B562C2DE8B64C83ACDE /* DJOneHubPhoneCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = DJOneHubPhoneCore; path = ../../shared/DJOneHubPhoneCore; sourceTree = SOURCE_ROOT; };
 		9C6153C2CED7B462832F0357 /* PhonePresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhonePresentationTests.swift; sourceTree = "<group>"; };
+		A60553A57D74380BA204F923 /* PhoneSMSInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSMSInbox.swift; sourceTree = "<group>"; };
 		AEE37E045423FBAFE9E531E5 /* DJOneHubPhone.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DJOneHubPhone.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CE98C9930428236AE3BC95F4 /* PhoneSMSOutboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSMSOutboxTests.swift; sourceTree = "<group>"; };
 		D47B976D981AA146C968B5FF /* PhoneHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneHomeView.swift; sourceTree = "<group>"; };
 		DD7771AF9D9B1A1DDDE6A70B /* PhoneTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneTheme.swift; sourceTree = "<group>"; };
 		E4631392821970D824EC86ED /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F2F6476DBD07ABBAAF64800E /* PhoneContacts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneContacts.swift; sourceTree = "<group>"; };
+		FA0A5B4BDBE9AB80F96F6D95 /* PhoneSMSOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneSMSOutbox.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +106,7 @@
 				37004776C8941C06CA0FA16E /* PhoneMediaTests.swift */,
 				9C6153C2CED7B462832F0357 /* PhonePresentationTests.swift */,
 				03FD078FA47FFDF42778406B /* PhoneRingbackTests.swift */,
+				CE98C9930428236AE3BC95F4 /* PhoneSMSOutboxTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -126,6 +133,8 @@
 				33191E2B65706BA08933EB0B /* PhoneRingback.swift */,
 				150FB4D0737B5CA057C34C3C /* PhoneRuntime.swift */,
 				496A4EB10DF3BD19EB3F67F1 /* PhoneSettingsView.swift */,
+				A60553A57D74380BA204F923 /* PhoneSMSInbox.swift */,
+				FA0A5B4BDBE9AB80F96F6D95 /* PhoneSMSOutbox.swift */,
 				DD7771AF9D9B1A1DDDE6A70B /* PhoneTheme.swift */,
 				65FC78B3625FC45CEB39F5DE /* Services.swift */,
 			);
@@ -258,6 +267,7 @@
 				BD846D8715BDE3416D9FF53F /* PhoneMediaTests.swift in Sources */,
 				CE3C286BDD31295CC0526366 /* PhonePresentationTests.swift in Sources */,
 				9217833E73161B4B9D3C1612 /* PhoneRingbackTests.swift in Sources */,
+				BF2A5FFF93765B01322AE9EC /* PhoneSMSOutboxTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -274,6 +284,8 @@
 				01CABBB38A0AA6B811983984 /* PhoneRecentsView.swift in Sources */,
 				99310B19D81933FACA10F5C7 /* PhoneRingback.swift in Sources */,
 				18858716DE2D02D5918AEBAA /* PhoneRuntime.swift in Sources */,
+				F31406557F02C144A458DAC1 /* PhoneSMSInbox.swift in Sources */,
+				6877594CD9BBDB4FD3A85C42 /* PhoneSMSOutbox.swift in Sources */,
 				1A88F81019D59774E7FA9FFE /* PhoneSettingsView.swift in Sources */,
 				0E1E4F8B4062A01A239E80F5 /* PhoneTheme.swift in Sources */,
 				89FBAFC337F14D81F6D68230 /* Services.swift in Sources */,

@@ -41,13 +41,18 @@ if [[ -e /etc/systemd/system/djonehub-relay.service.d/30-apns.conf ]]; then
 fi
 [[ -x /usr/local/bin/djonehub-relay && -f /var/lib/djonehub-relay/identities.sqlite ]] || die 'Existing Relay binary/database missing.'
 work=$(mktemp -d /var/tmp/djonehub-apns-build.XXXXXX)
-backup='' stopped=false
+backup='' stopped=false installation_started=false
 cleanup() {
   result=$?
   if [[ $result != 0 && $stopped == true ]]; then
     systemctl stop djonehub-relay || true
     echo "Upgrade incomplete. Relay left stopped. Private recovery directory: $backup" >&2
-    echo 'Use the recovery instructions; do not start an old binary on a migrated database.' >&2
+    if [[ $installation_started == false ]]; then
+      echo 'Failure occurred before installation; this attempt did not replace the binary/configuration or run a schema migration.' >&2
+      echo 'See docs/REMOTE_APNS_UPGRADE.md for restarting the unchanged installed service.' >&2
+    else
+      echo 'Use docs/REMOTE_APNS_UPGRADE.md; do not start an old binary on a migrated database.' >&2
+    fi
   fi
   rm -rf -- "$work"
 }
@@ -62,6 +67,7 @@ fi
 echo '[1/5] Building new Relay before stopping the existing service...'
 (cd "$root_dir" && CGO_ENABLED=1 "$go_bin" build -trimpath -o "$work/djonehub-relay" ./cmd/djonehub-relay)
 "$work/djonehub-relay" check-apns --apns-config "$apns_source"
+python3 "$root_dir/deploy/remote-call/upgrade_apns.py" preflight /var/lib/djonehub-relay/identities.sqlite
 echo '[2/5] Stopping Relay and creating a consistent private backup...'
 backup=$(mktemp -d /var/lib/djonehub-apns-backup.XXXXXX)
 cp -p /usr/local/bin/djonehub-relay "$backup/djonehub-relay"
@@ -74,6 +80,7 @@ systemctl stop djonehub-relay
 [[ $(systemctl show djonehub-relay -p MainPID --value) == 0 ]] || die 'Relay process has not stopped.'
 python3 "$root_dir/deploy/remote-call/upgrade_apns.py" backup /var/lib/djonehub-relay/identities.sqlite "$backup/identities.sqlite"
 echo '[3/5] Installing the provider configuration and APNs service override...'
+installation_started=true
 install -o djonehub -g djonehub -m 600 "$apns_source" /etc/djonehub/apns.json.new
 mv /etc/djonehub/apns.json.new /etc/djonehub/apns.json
 install -m 755 "$work/djonehub-relay" /usr/local/bin/djonehub-relay.new
@@ -93,7 +100,7 @@ for attempt in $(seq 1 10); do
 done
 [[ $healthy == true ]] || die 'Updated Relay health check failed.'
 systemctl is-active --quiet djonehub-relay || die 'Relay is not active.'
-echo '[5/5] Upgrade complete. Local Relay advertises voip_push=true.'
+echo '[5/5] Upgrade complete. Local Relay advertises voip_push=true, sms_push=true, sms_send=true.'
 echo "Private pre-upgrade backup: $backup"
 echo 'Next check public /healthz, enable background calls in the iPhone App, then test a real incoming call.'
 stopped=false

@@ -75,6 +75,9 @@ input[type=checkbox] { flex-shrink: 0; width: 16px; height: 16px; margin: 4px 0;
 input[type=file] { font-size: 12px; }
 label { display: block; margin: 16px 0; font-size: 13px; font-weight: 550; }
 label small { margin-top: 6px; font-weight: 400; }
+#session-panel form { margin-top: 20px; padding: 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+#session-panel form h3 { margin: 0 0 4px; font-size: 15px; }
+.form-note { min-height: 18px; margin: 8px 0 0; color: var(--danger); font-size: 12px; }
 .check { display: flex; align-items: flex-start; gap: 10px; }
 small { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .mono { font: 12px/1.6 ui-monospace, SFMono-Regular, monospace; color: var(--muted); overflow-wrap: anywhere; }

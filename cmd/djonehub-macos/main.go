@@ -102,6 +102,7 @@ type app struct {
 	smsMu          sync.RWMutex
 	sms            []receivedSMS
 	smsSendMu      sync.Mutex
+	smsSubmit      func(string, string) (int, error) // optional hardware adapter for tests
 	smsReassembler *smscodec.Reassembler
 
 	smsPollInterval  time.Duration
@@ -136,6 +137,7 @@ type app struct {
 	remoteSessionMu   sync.Mutex
 	remoteSession     *remoteSessionHandle
 	remoteAttemptUUID string                            // guarded by callMu
+	remoteSMSDispatch func(receivedSMS, string)         // set before polling
 	remoteDispatch    func(context.Context, callRecord) // set before polling
 
 	remoteConnectionState func() string // set before polling
@@ -698,7 +700,7 @@ func (a *app) mergeSMS(messages []receivedSMS) (newCount int, total int) {
 	total = len(a.sms)
 	a.smsMu.Unlock()
 	for _, item := range newMessages {
-		a.forwardSMSBark(item)
+		a.forwardSMSNotification(item)
 	}
 	return newCount, total
 }
@@ -1478,10 +1480,14 @@ func (a *app) sendTextSMS(phone, message string) (int, error) {
 	if a.modem == nil {
 		return a.sendUSBATSMS(phone, message)
 	}
+	pdus, _, err := smscodec.BuildSubmitTPDUsWithOptions(phone, message, smsSubmitOptions(message))
+	if err != nil {
+		return 0, err
+	}
 	if err := a.modem.SendSMSWithOptions(phone, message, smsSubmitOptions(message)); err != nil {
 		return 0, err
 	}
-	return 1, nil
+	return len(pdus), nil
 }
 
 func (a *app) sendUSBATSMS(phone, message string) (int, error) {

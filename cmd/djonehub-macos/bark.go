@@ -366,7 +366,7 @@ func (a *app) currentBarkSettings() (barkSettings, error) {
 }
 
 func (a *app) forwardSMSBark(message receivedSMS) {
-	if strings.HasPrefix(message.Sender, "已发送至 ") {
+	if a.appNotificationTarget() != "" || strings.HasPrefix(message.Sender, "已发送至 ") {
 		return
 	}
 	settings, err := a.currentBarkSettings()
@@ -383,7 +383,7 @@ func (a *app) forwardSMSBark(message receivedSMS) {
 }
 
 func (a *app) forwardCallBark(call callRecord) {
-	if !call.Missed && !call.AIHandled {
+	if a.appNotificationTarget() != "" || (!call.Missed && !call.AIHandled) {
 		return
 	}
 	settings, err := a.currentBarkSettings()
@@ -400,6 +400,9 @@ func (a *app) forwardCallBark(call callRecord) {
 }
 
 func (a *app) sendBarkAsync(settings barkChannelSettings, content, label string) {
+	if a.appNotificationTarget() != "" {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	if err := sendBarkNotification(ctx, a.barkHTTPClient, settings, content); err != nil {
@@ -431,7 +434,7 @@ func (a *app) getBarkChannelSettings(w http.ResponseWriter, kind barkChannelKind
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, selectBarkChannel(settings, kind))
+	writeJSON(w, http.StatusOK, a.barkStatus(selectBarkChannel(settings, kind)))
 }
 
 func (a *app) saveBarkChannelSettings(w http.ResponseWriter, r *http.Request, kind barkChannelKind) {
@@ -462,7 +465,7 @@ func (a *app) saveBarkChannelSettings(w http.ResponseWriter, r *http.Request, ki
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":  barkChannelLabel(kind) + " Bark 通知配置已保存",
-		"settings": channel,
+		"settings": a.barkStatus(channel),
 	})
 }
 

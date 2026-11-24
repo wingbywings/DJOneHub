@@ -162,6 +162,11 @@ The server only listens on localhost by default. Open:
 http://127.0.0.1:7575
 ```
 
+`localhost` works as well, and extra Host aliases (for names mapped to 127.0.0.1
+in `/etc/hosts`) plus an optional password-protected LAN listener can be enabled
+through `~/Library/Application Support/DJOneHub/web-access.json`; see
+`docs/REMOTE_WEB_OPERATIONS_GUIDE.md` for the format.
+
 ## Demo without hardware
 
 To explore the management page before buying the module, run:
