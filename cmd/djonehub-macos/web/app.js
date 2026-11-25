@@ -233,6 +233,7 @@ async function refreshActiveDevice() {
   currentCallState = null;
   lastSMSCount = null;
   networkTrafficPrevious = null;
+  lastRemoteRoute = { enabled: false, recovery: false };
   voiceAgentFormDirty = false;
   voiceAgentLoadedDevice = null;
   renderedVoiceAgentCallsSignature = "";
@@ -956,6 +957,7 @@ let remoteLoadID = 0;
 let remoteLoadedDevice = null;
 let remoteManagementCSRF = "";
 let remoteValidPhones = [];
+let lastRemoteRoute = { enabled: false, recovery: false };
 async function managementJob(path, body) {
   const response = await fetch('/api/remote-management' + path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': remoteManagementCSRF }, body: JSON.stringify(body) });
   const initial = await response.json();
@@ -1015,6 +1017,10 @@ async function loadRemoteSettings() {
     renderRemotePhones(remoteValidPhones, config.target_installation_id);
     remoteLoadedDevice = device;
     $("#remote-fields").disabled = Boolean(state.active_route) || Boolean(state.recovery?.recovery_required);
+    lastRemoteRoute = {
+      enabled: Boolean(config.enabled),
+      recovery: Boolean(state.recovery?.recovery_required),
+    };
     $("#remote-status").textContent = state.recovery?.recovery_required
       ? "有待核对的模块通话，请先在本机处理"
       : state.effective_route === "agent" ? "AI 接听中 · 不通知 iPhone"
@@ -1022,8 +1028,8 @@ async function loadRemoteSettings() {
       : `推送到 iPhone · Hub：${state.online_transport?.state || "未知"}`;
     setAnswerRouteBadge({
       agentEnabled: state.effective_route === "agent",
-      remoteEnabled: Boolean(config.enabled),
-      recovery: Boolean(state.recovery?.recovery_required),
+      remoteEnabled: lastRemoteRoute.enabled,
+      recovery: lastRemoteRoute.recovery,
     });
   } catch (error) {
     if (device === activeDeviceID && attempt === remoteLoadID) $("#remote-status").textContent = `读取失败：${error.message}`;
@@ -1080,9 +1086,11 @@ async function loadVoiceAgentStatus({ forcePopulate = false } = {}) {
       : (state.enabled
         ? `AI 接听中 · ${state.provider || "未选择"}${state.reconnect_count ? ` · 重连 ${state.reconnect_count} 次` : ""}`
         : "当前使用本地麦克风；启用 AI 时不通知 iPhone。");
-    if (state.enabled) {
-      setAnswerRouteBadge({ agentEnabled: true, remoteEnabled: false });
-    }
+    setAnswerRouteBadge({
+      agentEnabled: Boolean(state.enabled),
+      remoteEnabled: lastRemoteRoute.enabled || Boolean($("#remote-enabled")?.checked),
+      recovery: lastRemoteRoute.recovery,
+    });
     renderVoiceAgentProviders(status);
   } catch (error) {
     $("#voice-agent-status").textContent = `Voice Agent 状态读取失败：${error.message}`;
@@ -2170,6 +2178,8 @@ async function loadESIM() {
     status.textContent = `读取失败：${error.message}`;
     list.textContent = error.message;
     setESIMHealthPolling(false);
+  } finally {
+    list.setAttribute("aria-busy", "false");
   }
 }
 
