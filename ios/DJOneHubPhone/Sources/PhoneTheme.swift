@@ -1,3 +1,4 @@
+import DJOneHubPhoneCore
 import SwiftUI
 
 enum PhoneTheme {
@@ -63,6 +64,20 @@ enum PhoneLineRoute: Equatable {
     case .ai: return PhoneTheme.violet
     case .phone: return PhoneTheme.green
     case .unknown: return PhoneTheme.muted
+    }
+  }
+
+  /// Map Hub `effective_route` for this installation. Remote aimed at another
+  /// phone stays `.unknown` so we never claim this App answers that line.
+  static func fromHub(_ entry: ModuleRoutes.Entry, installationID: String) -> PhoneLineRoute? {
+    guard entry.known, let route = entry.route else { return nil }
+    switch route {
+    case .agent: return .ai
+    case .remote:
+      let target = entry.target_installation_id ?? ""
+      if target.isEmpty || target == installationID { return .phone }
+      return .unknown
+    case .local: return .unknown
     }
   }
 }

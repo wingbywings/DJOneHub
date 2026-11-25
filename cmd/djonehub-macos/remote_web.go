@@ -75,7 +75,7 @@ func newRemoteWebManager(parent context.Context, hub *usbDeviceHub, dir, origin,
 	ctx, cancel := context.WithCancel(parent)
 	m := &remoteWebManager{auth: auth, catalog: catalog, hub: hub, ctx: ctx, cancel: cancel, factory: factory, nativeFile: nativeFile, jobs: map[string]*remoteWebJob{}}
 	m.connect = func(ctx context.Context, id string, store *relayprofile.Store) (*remoteHubService, error) {
-		return startRemoteHubWithStore(ctx, id, nativeFile, store, hub.remoteDial, remoteHubHooks{moduleNames: hub.remoteModuleNames, sendSMS: hub.sendRemoteSMS})
+		return startRemoteHubWithStore(ctx, id, nativeFile, store, hub.remoteDial, remoteHubHooks{moduleNames: hub.remoteModuleNames, moduleRoutes: hub.remoteModuleRoutes, sendSMS: hub.sendRemoteSMS})
 	}
 	return m, nil
 }

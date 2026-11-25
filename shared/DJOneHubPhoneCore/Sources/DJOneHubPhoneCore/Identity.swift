@@ -230,6 +230,19 @@ extension IdentityHTTP {
     return try Wire.decoder().decode(ModuleNames.self, from: data).validated(principal: tokens.principal)
   }
 
+  public func moduleRoutes() async throws -> [String: ModuleRoutes.Entry] {
+    // Same read-only credential contract as moduleNames — never invent AI labels.
+    guard let record = try status(), record.phase == "ready", let tokens = record.tokens else {
+      throw PhoneError.unavailable
+    }
+    try tokens.validate()
+    let data = try await http.post(
+      origin: Wire.origin(record.relay), path: "/v1/module-routes", body: Data("{}".utf8),
+      accessToken: tokens.access_token)
+    guard data.count <= 65536 else { throw PhoneError.invalidData }
+    return try Wire.decoder().decode(ModuleRoutes.self, from: data).validated(principal: tokens.principal)
+  }
+
   public func ice(module: String) async throws -> ICECredentials {
     let record = try await credentials()
     guard let tokens = record.tokens, tokens.principal.modules.contains(module) else {

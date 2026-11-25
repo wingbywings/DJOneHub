@@ -199,6 +199,7 @@ public enum CallFailure: String, Sendable {
 }
 public enum CallEffect {
   case reportIncoming(Binding, String)
+  case dialAccepted(Binding)
   case acceptOffer(Binding, String, Bool)
   case acceptRestartOffer(Binding, String, UInt64)
   case candidate(Binding, [String: Scalar])
@@ -324,6 +325,8 @@ public enum CallEffect {
       else { return }
       binding = b
       dialAcknowledged = true
+      // Hub accepted this outbound dial — only then may App infer `.phone` for the line.
+      effect(.dialAccepted(b))
       return
     }
     if m.type == "invite", m.payload["direction"]?.string == "outgoing" {

@@ -87,7 +87,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   /// Known per-line answer routes. Missing keys stay `.unknown` — never invent global AI.
   @Published private(set) var lineRoutes: [String: PhoneLineRoute] = [:]
   private var moduleNamesTask: Task<Void, Never>?
+  private var moduleRoutesTask: Task<Void, Never>?
   private static let moduleNamesCacheKey = "moduleNamesCache"
+  private static let moduleRoutesCacheKey = "moduleRoutesCache"
   func moduleName(for id: String) -> String {
     ModuleLineDisplay.name(for: id, names: moduleNames, modules: modules)
   }
@@ -99,12 +101,27 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     guard !id.isEmpty, lineRoutes[id] != route else { return }
     lineRoutes[id] = route
   }
+  private func applyHubRoutes(_ entries: [String: ModuleRoutes.Entry], installationID: String) {
+    var next = lineRoutes.filter { modules.contains($0.key) }
+    for (id, entry) in entries where modules.contains(id) {
+      guard let route = PhoneLineRoute.fromHub(entry, installationID: installationID) else { continue }
+      next[id] = route
+    }
+    lineRoutes = next
+  }
   private func restoreModuleNames(_ record: StoredIdentity?) {
     guard let record, let principal = record.tokens?.principal,
       let data = UserDefaults.standard.data(forKey: Self.moduleNamesCacheKey),
       let names = try? ModuleNameCache.restore(data, relay: record.relay, principal: principal)
     else { moduleNames = [:]; return }
     moduleNames = names
+  }
+  private func restoreModuleRoutes(_ record: StoredIdentity?) {
+    guard let record, let principal = record.tokens?.principal,
+      let data = UserDefaults.standard.data(forKey: Self.moduleRoutesCacheKey),
+      let entries = try? ModuleRouteCache.restore(data, relay: record.relay, principal: principal)
+    else { return }
+    applyHubRoutes(entries, installationID: principal.id)
   }
   private func syncModuleNames(connection id: UUID, credentials: StoredIdentity) {
     moduleNamesTask?.cancel()
@@ -121,6 +138,25 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
             UserDefaults.standard.set(data, forKey: Self.moduleNamesCacheKey)
           }
         } catch { /* Old or temporarily unavailable Relays keep the last known names. */ }
+        do { try await Task.sleep(for: .seconds(15)) } catch { return }
+      }
+    }
+  }
+  private func syncModuleRoutes(connection id: UUID, credentials: StoredIdentity) {
+    moduleRoutesTask?.cancel()
+    moduleRoutesTask = Task { [weak self] in
+      while !Task.isCancelled {
+        guard let self, self.connectionID == id else { return }
+        do {
+          let entries = try await self.identity.moduleRoutes()
+          guard !Task.isCancelled, self.connectionID == id, let principal = credentials.tokens?.principal else { return }
+          // Pull failure / unavailable must not invent AI; applyHubRoutes only writes known entries.
+          self.applyHubRoutes(entries, installationID: principal.id)
+          let cache = ModuleRouteCache(relay: credentials.relay, principal: principal, routes: entries)
+          if let data = try? JSONEncoder().encode(cache) {
+            UserDefaults.standard.set(data, forKey: Self.moduleRoutesCacheKey)
+          }
+        } catch { /* Old Relays or offline Hub keep invite/dial inferences and cache. */ }
         do { try await Task.sleep(for: .seconds(15)) } catch { return }
       }
     }
@@ -428,6 +464,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       modules = record?.tokens?.principal.modules ?? []
       lineRoutes = lineRoutes.filter { modules.contains($0.key) }
       restoreModuleNames(record)
+      restoreModuleRoutes(record)
       PhoneSMSInbox.shared.bind(identity: identity, environment: pushEnvironment)
       PhoneSMSOutbox.shared.bind(identity)
       if !modules.contains(selectedModule) { selectedModule = modules.first ?? "" }
@@ -449,6 +486,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       PhoneSMSInbox.shared.forget()
       PhoneSMSOutbox.shared.forget()
       UserDefaults.standard.removeObject(forKey: Self.moduleNamesCacheKey)
+      UserDefaults.standard.removeObject(forKey: Self.moduleRoutesCacheKey)
       lineRoutes = [:]
       reloadStatus()
       status = "本机凭据已清理，可重新导入配对文件"
@@ -522,6 +560,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     watchdog?.cancel()
     moduleNamesTask?.cancel()
     moduleNamesTask = nil
+    moduleRoutesTask?.cancel()
+    moduleRoutesTask = nil
     renewRequest = nil
     renewalStarted = nil
     pingStarted = nil
@@ -556,6 +596,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
         self.signalingEpoch = welcome.hub_epoch!
         self.online = true
         self.syncModuleNames(connection: id, credentials: credentials)
+        self.syncModuleRoutes(connection: id, credentials: credentials)
         self.status = recovering ? "正在核对通话状态" : "在线，等待来电"
         Task { [weak self] in
           guard let origin = try? Wire.origin(credentials.relay) else { return }
@@ -814,6 +855,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     watchdog = nil
     moduleNamesTask?.cancel()
     moduleNamesTask = nil
+    moduleRoutesTask?.cancel()
+    moduleRoutesTask = nil
     renewRequest = nil
     renewalStarted = nil
     pingStarted = nil
@@ -834,8 +877,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     saveHistory()
     callDisplay = number
     callModule = selectedModule
-    // Outbound via this phone ⇒ this line is routed to App, not Voice Agent.
-    noteLineRoute(selectedModule, .phone)
+    // Do not infer `.phone` here: Hub may reject with dial_not_allowed (AI / other target).
+    // Route is noted only after CallEffect.dialAccepted.
     callPhase = "dialing"
     outgoing = true
     muted = false
@@ -907,6 +950,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   }
   private func handle(_ effect: CallEffect) {
     switch effect {
+    case .dialAccepted(let b):
+      // Hub confirmed outbound dial on this installation ⇒ this line is App/human.
+      noteLineRoute(b.moduleID, .phone)
     case .reportIncoming(let b, let display):
       let caller = IncomingCaller(display: display)
       outgoing = false

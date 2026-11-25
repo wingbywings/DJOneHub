@@ -463,6 +463,11 @@ final class PhoneTests: XCTestCase {
     let b = ack.binding!
     call.receive(ack)
     XCTAssertEqual(call.binding, b)
+    XCTAssertTrue(
+      effects.contains {
+        if case .dialAccepted(let accepted) = $0 { return accepted == b }
+        return false
+      }, "Hub dial acceptance must emit dialAccepted before invite/offer")
     var m = invite(uuid.uuidString.lowercased())
     m.hub_epoch = "hub_epoch"
     m.payload["direction"] = .string("outgoing")

@@ -63,6 +63,17 @@ type RouteSnapshot struct {
 	CallerDisplay        string `json:"caller_display,omitempty"`
 }
 
+// ModuleRouteEntry is the Hub→Relay→App per-line answer-route snapshot.
+// When Known is false, App must not invent AI labeling for that line.
+type ModuleRouteEntry struct {
+	ID                   string `json:"id"`
+	EffectiveRoute       string `json:"effective_route"`
+	Known                bool   `json:"known"`
+	TargetInstallationID string `json:"target_installation_id,omitempty"`
+	AIEnabled            bool   `json:"ai_enabled"`
+	RemoteEnabled        bool   `json:"remote_enabled"`
+}
+
 // SelectRoute never treats provider health or remote availability as a reason
 // to cross between AI and remote answering. Failures stay in the chosen route.
 func SelectRoute(aiEnabled bool, aiRevision uint64, remote RemoteConfig) RouteSnapshot {
