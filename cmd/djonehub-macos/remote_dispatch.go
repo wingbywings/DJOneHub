@@ -40,8 +40,9 @@ type remoteHubService struct {
 }
 
 type remoteHubHooks struct {
-	moduleNames func([]string) []identity.ModuleChoice
-	sendSMS     func(context.Context, smsout.Request) smsout.Result
+	moduleNames  func([]string) []identity.ModuleChoice
+	moduleRoutes func([]string) []callcontrol.ModuleRouteEntry
+	sendSMS      func(context.Context, smsout.Request) smsout.Result
 }
 
 func (s *remoteHubService) Close() {
@@ -109,14 +110,17 @@ func startRemoteHubWithStore(ctx context.Context, profile, nativeFile string, st
 				go receiveOutgoingSMS(smsContext, status.RelayURL, relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig}, func() string { accessMu.RLock(); defer accessMu.RUnlock(); return access }, hooks[0].sendSMS)
 			})
 		}
-		if len(hooks) == 0 || hooks[0].moduleNames == nil {
-			return
+		opts := relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig}
+		token := func() string { accessMu.RLock(); defer accessMu.RUnlock(); return access }
+		if len(hooks) > 0 && hooks[0].moduleNames != nil {
+			// Use the service lifetime even when the socket resumes an active call.
+			go publishRemoteModuleNames(ctx, client.Done(), status.RelayURL, opts, token,
+				func() []identity.ModuleChoice { return hooks[0].moduleNames(status.Principal.Modules) })
 		}
-		// Use the service lifetime even when the socket resumes an active call.
-		go publishRemoteModuleNames(ctx, client.Done(), status.RelayURL,
-			relayclient.Options{AllowInsecureLoopback: config.AllowInsecureLoopback, TLSConfig: config.TLSConfig},
-			func() string { accessMu.RLock(); defer accessMu.RUnlock(); return access },
-			func() []identity.ModuleChoice { return hooks[0].moduleNames(status.Principal.Modules) })
+		if len(hooks) > 0 && hooks[0].moduleRoutes != nil {
+			go publishRemoteModuleRoutes(ctx, client.Done(), status.RelayURL, opts, token,
+				func() []callcontrol.ModuleRouteEntry { return hooks[0].moduleRoutes(status.Principal.Modules) })
+		}
 	}
 	manager := remotehub.Start(ctx, remotehub.Config{
 		RecoverCalls: remoteSignalResume,

@@ -273,7 +273,7 @@ struct PhoneSettingsView: View {
     if knownAI {
       return "仅启用 Voice Agent 的线路显示「\(PhoneTheme.routeAI)」且不会通知本机；其余走「\(PhoneTheme.routePhone)」/「\(PhoneTheme.routeApp)」。仅此线路由 AI 接听，其余走 App。"
     }
-    return "接听方式按线路在 Hub 配置。本机已确认可用来电的线路显示「\(PhoneTheme.routePhone)」；尚未同步到的线路显示「以 Hub 为准」，不会用全局「AI 接听中」误标全部线路。"
+    return "接听方式按线路在 Hub 配置。Hub 同步后显示「\(PhoneTheme.routeAI)」或「\(PhoneTheme.routePhone)」；尚未同步到的线路显示「以 Hub 为准」，不会用全局「AI 接听中」误标全部线路。"
   }
 
   private var diagnosticsView: some View {

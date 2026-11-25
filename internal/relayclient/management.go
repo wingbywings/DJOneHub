@@ -2,9 +2,11 @@ package relayclient
 
 import (
 	"context"
+	"net/http"
+
+	"github.com/iniwex5/vohive/internal/callcontrol"
 	"github.com/iniwex5/vohive/internal/callsignal"
 	"github.com/iniwex5/vohive/internal/relay/identity"
-	"net/http"
 )
 
 func (c *Client) ManagedInstallations(ctx context.Context, access string) ([]identity.ManagedIdentity, error) {
@@ -79,6 +81,19 @@ func (c *Client) PublishModuleNames(ctx context.Context, access string, modules 
 		Updated bool `json:"updated"`
 	}
 	if err := c.request(ctx, http.MethodPut, "/v1/module-names", access, map[string]any{"modules": modules}, &result); err != nil {
+		return err
+	}
+	if !result.Updated {
+		return ErrRequest
+	}
+	return nil
+}
+
+func (c *Client) PublishModuleRoutes(ctx context.Context, access string, modules []callcontrol.ModuleRouteEntry) error {
+	var result struct {
+		Updated bool `json:"updated"`
+	}
+	if err := c.request(ctx, http.MethodPut, "/v1/module-routes", access, map[string]any{"modules": modules}, &result); err != nil {
 		return err
 	}
 	if !result.Updated {
