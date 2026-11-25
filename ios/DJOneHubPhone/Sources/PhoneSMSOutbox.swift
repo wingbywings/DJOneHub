@@ -346,7 +346,9 @@ struct PhoneSMSOutgoingList: View {
         title: "暂无发件记录",
         message: "点击新短信，使用 Hub 上的 SIM 发送。发件记录仅保存在本机，与 Web 模块收件箱不同。",
         actionTitle: outbox.ready ? "写新短信" : nil,
-        action: outbox.ready ? edit : nil
+        action: outbox.ready ? {
+          if outbox.startDraft(module: runtime.selectedModule) { edit() }
+        } : nil
       )
     }
     ForEach(entries) { entry in

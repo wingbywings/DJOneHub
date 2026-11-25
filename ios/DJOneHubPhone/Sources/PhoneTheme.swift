@@ -126,7 +126,8 @@ extension View {
 
   @ViewBuilder
   func phonePreferredColorScheme(_ appearance: String) -> some View {
-    preferredColorScheme(PhoneAppearance(rawValue: appearance)?.preferredColorScheme ?? .light)
+    // Fallback only for unknown raw values; keep `.system`'s nil so SwiftUI follows the device.
+    preferredColorScheme((PhoneAppearance(rawValue: appearance) ?? .light).preferredColorScheme)
   }
 }
 
