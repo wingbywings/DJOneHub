@@ -2,11 +2,10 @@ import DJOneHubPhoneCore
 import SwiftUI
 
 enum PhoneTab: String, CaseIterable {
-  case dialer = "拨号", contacts = "联系人", recents = "通话记录", sms = "短信", settings = "设置"
+  case dialer = "拨号", recents = "记录", sms = "短信", settings = "设置"
   var icon: String {
     switch self {
-    case .dialer: return "square.grid.2x2"
-    case .contacts: return "person"
+    case .dialer: return "circle.grid.3x3.fill"
     case .recents: return "clock"
     case .sms: return "message"
     case .settings: return "gearshape"
@@ -21,42 +20,55 @@ struct PhoneHomeView: View {
   @State private var tab: PhoneTab = .dialer
   @State private var clearingHistory = false
   @State private var presentingCall = false
+  @State private var showingContacts = false
   @AppStorage("preferredDialModule") private var preferredModule = ""
+  @AppStorage("phoneAppearance") private var appearance = PhoneAppearance.light.rawValue
+  @ScaledMetric(relativeTo: .caption2) private var tabIconSize: CGFloat = 20
+  @ScaledMetric(relativeTo: .caption2) private var tabBarHeight: CGFloat = 68
+
+  private var pairing: PhonePairingPresentation {
+    PhonePairingPresentation(paired: runtime.paired, online: runtime.online, identityReady: runtime.identityReady)
+  }
 
   var body: some View {
     ZStack {
       AppBackground()
       Group {
-        switch tab {
-        case .dialer:
-          DialerView(runtime: runtime) { tab = .settings }
-        case .contacts:
-          PhoneContactsView(runtime: runtime, contacts: contacts, dial: prepareDial)
-        case .recents:
-          PhoneRecentsView(runtime: runtime, contacts: contacts, clear: { clearingHistory = true }, dial: prepareDial)
-        case .sms:
-          PhoneSMSView(runtime: runtime)
-        case .settings:
-          PhoneSettingsView(runtime: runtime, clearHistory: { clearingHistory = true })
+        if showingContacts {
+          PhoneContactsView(runtime: runtime, contacts: contacts, dial: prepareDial, onBack: { showingContacts = false })
+        } else {
+          switch tab {
+          case .dialer:
+            DialerView(runtime: runtime, openSettings: { tab = .settings }, openContacts: { showingContacts = true })
+          case .recents:
+            PhoneRecentsView(runtime: runtime, contacts: contacts, clear: { clearingHistory = true },
+                             dial: prepareDial, openContacts: { showingContacts = true })
+          case .sms:
+            PhoneSMSView(runtime: runtime)
+          case .settings:
+            PhoneSettingsView(runtime: runtime, clearHistory: { clearingHistory = true })
+          }
         }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    .safeAreaInset(edge: .bottom, spacing: 0) { tabBar }
+    .safeAreaInset(edge: .bottom, spacing: 0) {
+      if !showingContacts { tabBar }
+    }
     .fontDesign(.rounded).foregroundStyle(PhoneTheme.ink).tint(PhoneTheme.violet)
-    .preferredColorScheme(.light)
+    .phonePreferredColorScheme(appearance)
     .fullScreenCover(isPresented: $presentingCall) {
       PhoneCallView(runtime: runtime, contacts: contacts)
-        .preferredColorScheme(.light).interactiveDismissDisabled()
+        .phonePreferredColorScheme(appearance).interactiveDismissDisabled()
     }
     .confirmationDialog("清除本机已结束的通话记录？", isPresented: $clearingHistory, titleVisibility: .visible) {
       Button("清除记录", role: .destructive) { runtime.clearHistory() }
     }
     .onChange(of: inbox.openedNotification, initial: true) { _, value in
-      if value != nil { tab = .sms; inbox.openedNotification = nil }
+      if value != nil { showingContacts = false; tab = .sms; inbox.openedNotification = nil }
     }
     .onChange(of: runtime.callUUID) { _, value in
-      if value != nil { clearingHistory = false }
+      if value != nil { clearingHistory = false; showingContacts = false }
     }
     .task(id: runtime.callUUID) {
       guard runtime.callUUID != nil else { presentingCall = false; return }
@@ -76,6 +88,7 @@ struct PhoneHomeView: View {
     guard let number = PhoneCall.dialNumber(number) else { return }
     runtime.dialNumber = number
     if let module, runtime.modules.contains(module) { runtime.selectedModule = module }
+    showingContacts = false
     tab = .dialer
     if runtime.canDial { runtime.dialCall() }
   }
@@ -84,27 +97,37 @@ struct PhoneHomeView: View {
     HStack(spacing: 0) {
       ForEach(PhoneTab.allCases, id: \.self) { item in
         Button { tab = item } label: {
-          VStack(spacing: 4) {
-            Image(systemName: item.icon).font(.system(size: 22, weight: .medium))
-              .frame(width: 46, height: 32)
-              .background(tab == item ? PhoneTheme.violetSoft : .clear, in: RoundedRectangle(cornerRadius: 14))
-            Text(item.rawValue).font(.system(size: 11, weight: .semibold))
+          VStack(spacing: 3) {
+            Image(systemName: item.icon).font(.system(size: tabIconSize, weight: .medium))
+              .frame(width: 42, height: 28)
+              .background(tab == item ? PhoneTheme.violetSoft : .clear, in: RoundedRectangle(cornerRadius: 12))
+            Text(item.rawValue).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
           }.foregroundStyle(tab == item ? PhoneTheme.violet : PhoneTheme.muted)
-            .frame(maxWidth: .infinity).frame(height: 80).contentShape(Rectangle())
+            .frame(maxWidth: .infinity).frame(height: tabBarHeight).contentShape(Rectangle())
         }.buttonStyle(PhonePressStyle())
           .accessibilityAddTraits(tab == item ? [.isSelected] : [])
+          .accessibilityLabel(item.rawValue)
       }
-    }.phoneGlass(radius: 30, strong: true).padding(.horizontal, 14).padding(.bottom, 4)
+    }
+    .phoneGlass(radius: 28, strong: true)
+    .padding(.horizontal, 14).padding(.bottom, 2)
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel("标签栏")
   }
 }
 
 struct DialerView: View {
   @ObservedObject var runtime: PhoneRuntime
-  var settings: () -> Void
+  var openSettings: () -> Void
+  var openContacts: () -> Void
   @State private var inputMessage = ""
 
+  private var pairing: PhonePairingPresentation {
+    PhonePairingPresentation(paired: runtime.paired, online: runtime.online, identityReady: runtime.identityReady)
+  }
+
   private var hint: String {
-    if !runtime.paired { return "先在设置中配对 Hub，即可开始通话" }
+    if !runtime.paired { return "先配对 Hub，即可开始通话" }
     if !runtime.identityReady { return "配对凭据需要处理，请查看设置" }
     if runtime.working { return "正在连接，请稍候…" }
     if !runtime.online {
@@ -122,40 +145,67 @@ struct DialerView: View {
 
   var body: some View {
     GeometryReader { geometry in
-      let compact = geometry.size.height < 610
+      let compact = geometry.size.height < 640
       ScrollView {
         VStack(spacing: 0) {
-          HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-              Text("拨号").font(.system(size: 24, weight: .heavy, design: .rounded)).accessibilityAddTraits(.isHeader)
+          HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+              Text("拨号").font(.title2.weight(.heavy)).fontDesign(.rounded).accessibilityAddTraits(.isHeader)
               if !compact {
                 Text("高清音质 · 安心通话").font(.system(size: 12)).foregroundStyle(PhoneTheme.secondary)
               }
             }
             Spacer(minLength: 0)
-            Button(action: settings) {
+            RoundIconButton(icon: "person", label: "联系人", size: 40, action: openContacts)
+            Button(action: openSettings) {
               HStack(spacing: 7) {
-                Circle().fill(runtime.online ? PhoneTheme.green : PhoneTheme.muted.opacity(0.5))
-                  .frame(width: 8, height: 8)
-                Text(runtime.online ? "已连接 · 在线" : runtime.working ? "连接中…" : "未连接")
-                  .font(.system(size: 12, weight: .semibold))
+                Circle().fill(pairing.color).frame(width: 8, height: 8)
+                Text(runtime.working ? "连接中…" : pairing.title)
+                  .font(.system(size: 12, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
               }.foregroundStyle(PhoneTheme.secondary).padding(.horizontal, 12).padding(.vertical, 9)
                 .phoneGlass(radius: 30)
-            }.buttonStyle(PhonePressStyle()).accessibilityLabel("连接状态，打开设置")
-          }.padding(.top, 12)
+            }.buttonStyle(PhonePressStyle())
+              .accessibilityLabel("连接状态，打开设置")
+              .accessibilityValue(runtime.working ? "连接中" : pairing.shortValue)
+          }.padding(.top, compact ? 6 : 12)
 
-          Spacer(minLength: compact ? 8 : 24)
-          VStack(spacing: compact ? 8 : 12) {
+          if !runtime.paired {
+            VStack(spacing: 12) {
+              Text("尚未配对 Hub").font(.system(size: 18, weight: .heavy))
+              Text("扫码或导入配对文件后，即可拨号与接听。")
+                .font(.subheadline).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center)
+              Button(action: openSettings) {
+                Text("去配对").font(.system(size: 16, weight: .bold)).foregroundStyle(.white)
+                  .frame(maxWidth: .infinity).padding(.vertical, 14)
+                  .background(PhoneTheme.coral, in: Capsule())
+              }.buttonStyle(PhonePressStyle())
+            }
+            .padding(18).phoneGlass(radius: 24).padding(.top, compact ? 12 : 20)
+          }
+
+          Spacer(minLength: compact ? 4 : 16)
+          VStack(spacing: compact ? 6 : 12) {
             Text(runtime.dialNumber.isEmpty ? "输入电话号码" : runtime.dialNumber)
-              .font(.system(size: runtime.dialNumber.isEmpty ? 26 : 34, weight: .bold, design: .rounded))
+              .font(.system(size: runtime.dialNumber.isEmpty ? 24 : (compact ? 30 : 34), weight: .bold, design: .rounded))
               .foregroundStyle(runtime.dialNumber.isEmpty ? PhoneTheme.muted : PhoneTheme.ink)
-              .lineLimit(1).minimumScaleFactor(0.45).frame(maxWidth: .infinity).frame(minHeight: compact ? 34 : 46)
+              .lineLimit(1).minimumScaleFactor(0.45).frame(maxWidth: .infinity).frame(minHeight: compact ? 30 : 46)
               .accessibilityLabel("电话号码").accessibilityValue(runtime.dialNumber.isEmpty ? "空" : runtime.dialNumber)
-            LineMenu(runtime: runtime)
-            PhoneKeypad(compact: compact, press: append, longPressZero: {
-              if runtime.dialNumber.isEmpty { append("+") }
-              else if runtime.dialNumber == "0" { runtime.dialNumber = "+" }
-            }).padding(.horizontal, 8)
+            if runtime.paired {
+              LineMenu(runtime: runtime)
+            }
+            ZStack {
+              PhoneKeypad(compact: compact || !runtime.paired, press: append, longPressZero: {
+                if runtime.dialNumber.isEmpty { append("+") }
+                else if runtime.dialNumber == "0" { runtime.dialNumber = "+" }
+              }).padding(.horizontal, 8)
+                .allowsHitTesting(runtime.paired)
+                .opacity(runtime.paired ? 1 : 0.35)
+              if !runtime.paired {
+                Color.clear.contentShape(Rectangle())
+                  .onTapGesture(perform: openSettings)
+                  .accessibilityLabel("先去设置配对")
+              }
+            }
             HStack(spacing: 22) {
               PasteButton(payloadType: String.self) { strings in
                 guard let value = strings.first, let number = PhoneCall.dialNumber(value) else {
@@ -166,6 +216,7 @@ struct DialerView: View {
                 inputMessage = ""
               }.labelStyle(.iconOnly).tint(PhoneTheme.secondary)
                 .buttonBorderShape(.capsule).accessibilityLabel("粘贴电话号码")
+                .disabled(!runtime.paired)
               Button { runtime.dialCall() } label: {
                 Label("呼叫", systemImage: "phone.fill").font(.system(size: 19, weight: .bold))
                   .foregroundStyle(.white).padding(.horizontal, 34).frame(height: compact ? 54 : 62)
@@ -186,8 +237,8 @@ struct DialerView: View {
                 .multilineTextAlignment(.center).padding(10).frame(maxWidth: .infinity).phoneGlass(radius: 16)
             }
           }
-          Spacer(minLength: compact ? 8 : 16)
-        }.padding(.horizontal, 22).frame(minHeight: geometry.size.height)
+          Spacer(minLength: compact ? 4 : 12)
+        }.padding(.horizontal, PhoneLayout.contentInset).frame(minHeight: geometry.size.height)
       }.scrollIndicators(.hidden)
     }
   }

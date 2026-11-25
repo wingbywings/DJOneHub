@@ -19,6 +19,7 @@ struct PhoneRecentsView: View {
   @ObservedObject var contacts: PhoneContactsStore
   var clear: () -> Void
   var dial: (String, String?) -> Void
+  var openContacts: (() -> Void)? = nil
   @State private var missedOnly = false
 
   private var groups: [(date: Date, entries: [CallHistory.Entry])] {
@@ -30,14 +31,25 @@ struct PhoneRecentsView: View {
   var body: some View {
     List {
       Group {
-        PageHeading(title: "通话记录", subtitle: "仅保存在此 iPhone")
+        HStack(alignment: .top, spacing: 10) {
+          PageHeading(title: "通话记录", subtitle: "仅保存在此 iPhone")
+          if let openContacts {
+            RoundIconButton(icon: "person", label: "联系人", size: 40, action: openContacts)
+              .padding(.top, 14)
+          }
+        }
         HStack(spacing: 4) {
           filterButton("全部", missed: false)
           filterButton("未接", missed: true)
         }.padding(4).phoneGlass(radius: 30)
         if groups.isEmpty {
-          EmptyPhoneState(icon: "clock", title: missedOnly ? "没有未接来电" : "暂无通话记录",
-                          message: "你的通话记录会显示在这里")
+          EmptyPhoneState(
+            icon: "clock",
+            title: missedOnly ? "没有未接来电" : "暂无通话记录",
+            message: missedOnly ? "未接来电会显示在这里" : "拨出或接听后，记录会出现在这里",
+            actionTitle: openContacts == nil ? nil : "查看联系人",
+            action: openContacts
+          )
         }
         ForEach(groups, id: \.date) { group in
           SectionCaption(title: dayTitle(group.date))
@@ -53,7 +65,7 @@ struct PhoneRecentsView: View {
               .frame(maxWidth: .infinity).padding(.vertical, 15).background(PhoneTheme.redSoft, in: Capsule())
           }.buttonStyle(PhonePressStyle()).padding(.top, 12)
         }
-      }.listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
+      }.listRowInsets(PhoneLayout.listRowInsets)
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
     }.listStyle(.plain).scrollContentBackground(.hidden).scrollIndicators(.hidden)

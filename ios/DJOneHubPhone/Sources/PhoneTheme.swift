@@ -11,14 +11,82 @@ enum PhoneTheme {
   static let red = Color(hex: 0xFF5C5C)
   static let redSoft = Color(hex: 0xFFEDED)
   static let amber = Color(hex: 0xFFB020)
+  static let amberSoft = Color(hex: 0xFFF4E0)
   static let shadow = Color(hex: 0x5D3F82)
   static let coral = gradient(0xFF9A5A, 0xFF5C74)
   static let accept = gradient(0x4ED99A, 0x1FB87A)
   static let decline = gradient(0xFF7E6B, 0xF4445A)
   static let connection = gradient(0x8B6FF0, 0xFF6C8C)
 
+  /// Shared route badge copy with Web management UI.
+  static let routeAI = "AI 接听中"
+  static let routePhone = "推送到 iPhone"
+
   static func gradient(_ first: UInt32, _ last: UInt32) -> LinearGradient {
     LinearGradient(colors: [Color(hex: first), Color(hex: last)], startPoint: .topLeading, endPoint: .bottomTrailing)
+  }
+}
+
+enum PhoneLayout {
+  static let contentInset: CGFloat = 18
+  static var listRowInsets: EdgeInsets {
+    EdgeInsets(top: 6, leading: contentInset, bottom: 6, trailing: contentInset)
+  }
+}
+
+enum PhoneAppearance: String, CaseIterable, Identifiable {
+  case light, system
+  var id: String { rawValue }
+  var title: String {
+    switch self {
+    case .light: return "浅色"
+    case .system: return "跟随系统"
+    }
+  }
+  var preferredColorScheme: ColorScheme? {
+    switch self {
+    case .light: return .light
+    case .system: return nil
+    }
+  }
+}
+
+/// Four-state pairing semantics aligned with Web (colors differ by surface).
+enum PhonePairingPresentation {
+  case unpaired, pairedOffline, online, credentialError
+
+  init(paired: Bool, online: Bool, identityReady: Bool) {
+    if paired && !identityReady { self = .credentialError }
+    else if online { self = .online }
+    else if paired { self = .pairedOffline }
+    else { self = .unpaired }
+  }
+
+  var title: String {
+    switch self {
+    case .unpaired: return "未配对"
+    case .pairedOffline: return "已配对 · 离线"
+    case .online: return "在线"
+    case .credentialError: return "凭据异常"
+    }
+  }
+
+  var shortValue: String {
+    switch self {
+    case .unpaired: return "离线"
+    case .pairedOffline: return "已配对离线"
+    case .online: return "在线"
+    case .credentialError: return "凭据异常"
+    }
+  }
+
+  var color: Color {
+    switch self {
+    case .unpaired: return PhoneTheme.muted
+    case .pairedOffline: return PhoneTheme.amber
+    case .online: return PhoneTheme.green
+    case .credentialError: return PhoneTheme.red
+    }
   }
 }
 
@@ -55,15 +123,21 @@ extension View {
   func phoneGlass(radius: CGFloat = 28, strong: Bool = false) -> some View {
     modifier(GlassSurface(radius: radius, strong: strong))
   }
+
+  @ViewBuilder
+  func phonePreferredColorScheme(_ appearance: String) -> some View {
+    preferredColorScheme(PhoneAppearance(rawValue: appearance)?.preferredColorScheme ?? .light)
+  }
 }
 
 struct PhonePressStyle: ButtonStyle {
   @Environment(\.isEnabled) private var enabled
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   func makeBody(configuration: Configuration) -> some View {
     configuration.label
       .opacity(enabled ? (configuration.isPressed ? 0.75 : 1) : 0.55)
-      .scaleEffect(configuration.isPressed ? 0.96 : 1)
-      .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
+      .scaleEffect(!reduceMotion && configuration.isPressed ? 0.96 : 1)
+      .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: configuration.isPressed)
   }
 }
 
@@ -72,7 +146,7 @@ struct PageHeading: View {
   var subtitle: String
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
-      Text(title).font(.system(size: 32, weight: .heavy, design: .rounded)).accessibilityAddTraits(.isHeader)
+      Text(title).font(.largeTitle.weight(.heavy)).fontDesign(.rounded).accessibilityAddTraits(.isHeader)
       Text(subtitle).font(.subheadline).foregroundStyle(PhoneTheme.secondary)
     }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10).padding(.bottom, 8)
   }
@@ -98,21 +172,22 @@ struct LineChip: View {
 
 struct LineMenu: View {
   @ObservedObject var runtime: PhoneRuntime
+  var labelPrefix = "线路"
   var body: some View {
     Menu {
-      Picker("拨号线路", selection: $runtime.selectedModule) {
+      Picker("选择线路", selection: $runtime.selectedModule) {
         ForEach(runtime.modules, id: \.self) { id in Text(runtime.moduleName(for: id)).tag(id) }
       }
     } label: {
       HStack(spacing: 6) {
         Image(systemName: "terminal")
-        Text(runtime.selectedModule.isEmpty ? "暂无可用线路" : "线路：\(runtime.moduleName(for: runtime.selectedModule))").lineLimit(1)
+        Text(runtime.selectedModule.isEmpty ? "暂无可用线路" : "\(labelPrefix)：\(runtime.moduleName(for: runtime.selectedModule))").lineLimit(1)
         Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
       }
       .font(.system(size: 13, weight: .bold)).foregroundStyle(PhoneTheme.violet)
       .padding(.horizontal, 14).padding(.vertical, 8).background(PhoneTheme.violetSoft, in: Capsule())
     }.disabled(runtime.modules.isEmpty || runtime.callUUID != nil)
-      .accessibilityLabel("选择拨号线路")
+      .accessibilityLabel("选择线路（Hub 当前模块）")
   }
 }
 
@@ -157,12 +232,45 @@ struct EmptyPhoneState: View {
   var icon: String
   var title: String
   var message: String
+  var actionTitle: String? = nil
+  var action: (() -> Void)? = nil
   var body: some View {
     VStack(spacing: 12) {
       Image(systemName: icon).font(.system(size: 36, weight: .light)).foregroundStyle(PhoneTheme.violet)
       Text(title).font(.headline)
       Text(message).font(.subheadline).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center)
+      if let actionTitle, let action {
+        Button(action: action) {
+          Text(actionTitle).font(.system(size: 15, weight: .bold)).foregroundStyle(.white)
+            .padding(.horizontal, 22).padding(.vertical, 12)
+            .background(PhoneTheme.coral, in: Capsule())
+        }.buttonStyle(PhonePressStyle()).padding(.top, 4)
+      }
     }.frame(maxWidth: .infinity).padding(.vertical, 34).padding(.horizontal, 22).phoneGlass()
+  }
+}
+
+struct PhoneActionBanner: View {
+  var title: String
+  var message: String
+  var buttonTitle: String
+  var tint: Color = PhoneTheme.red
+  var soft: Color = PhoneTheme.redSoft
+  var action: () -> Void
+  var body: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 8) {
+        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(tint)
+        Text(title).font(.system(size: 15, weight: .bold)).foregroundStyle(PhoneTheme.ink)
+      }
+      Text(message).font(.system(size: 12)).foregroundStyle(PhoneTheme.secondary).fixedSize(horizontal: false, vertical: true)
+      Button(action: action) {
+        Text(buttonTitle).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+          .frame(maxWidth: .infinity).padding(.vertical, 11)
+          .background(tint, in: Capsule())
+      }.buttonStyle(PhonePressStyle())
+    }.padding(14).frame(maxWidth: .infinity, alignment: .leading)
+      .background(soft, in: RoundedRectangle(cornerRadius: 20))
   }
 }
 

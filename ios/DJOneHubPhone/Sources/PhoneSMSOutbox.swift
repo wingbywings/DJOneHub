@@ -272,11 +272,32 @@ struct PhoneSMSComposeView: View {
   var body: some View {
     NavigationStack {
       Form {
-        Section("发送线路") {
-          Picker("SIM", selection: $outbox.draft.module) {
-            ForEach(runtime.modules, id: \.self) { id in Text(runtime.moduleName(for: id)).tag(id) }
+        Section {
+          Menu {
+            Picker("线路", selection: $outbox.draft.module) {
+              ForEach(runtime.modules, id: \.self) { id in Text(runtime.moduleName(for: id)).tag(id) }
+            }
+          } label: {
+            HStack(spacing: 6) {
+              Image(systemName: "terminal")
+              Text(outbox.draft.module.isEmpty ? "选择发送线路" : "线路：\(runtime.moduleName(for: outbox.draft.module))")
+                .lineLimit(1)
+              Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
+              Spacer(minLength: 0)
+            }
+            .font(.system(size: 14, weight: .bold)).foregroundStyle(PhoneTheme.violet)
+            .padding(.horizontal, 14).padding(.vertical, 10)
+            .background(PhoneTheme.violetSoft, in: Capsule())
           }
-          Text("需在 Hub 开启该线路的 APP 接听，并将目标设为此手机。").font(.caption).foregroundStyle(.secondary)
+          .disabled(runtime.modules.isEmpty)
+          .accessibilityLabel("选择发送线路")
+          .onChange(of: outbox.draft.module) { _, module in
+            if runtime.modules.contains(module) { runtime.selectedModule = module }
+          }
+          Text("对应 Hub「当前模块」。需设为「\(PhoneTheme.routePhone)」且目标为本机，才能发送。")
+            .font(.caption).foregroundStyle(.secondary)
+        } header: {
+          Text("发送线路")
         }
         Section("收件人") {
           TextField("手机号或运营商服务号码", text: $outbox.draft.phone).keyboardType(.phonePad)
@@ -320,7 +341,13 @@ struct PhoneSMSOutgoingList: View {
   var edit: () -> Void
   var body: some View {
     if outbox.visibleEntries.isEmpty {
-      EmptyPhoneState(icon: "paperplane", title: "暂无发件记录", message: "点击新短信，使用 Hub 上的 SIM 发送")
+      EmptyPhoneState(
+        icon: "paperplane",
+        title: "暂无发件记录",
+        message: "点击新短信，使用 Hub 上的 SIM 发送。发件记录仅保存在本机，与 Web 模块收件箱不同。",
+        actionTitle: outbox.ready ? "写新短信" : nil,
+        action: outbox.ready ? edit : nil
+      )
     }
     ForEach(entries) { entry in
         VStack(alignment: .leading, spacing: 8) {
