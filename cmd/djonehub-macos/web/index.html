@@ -21,57 +21,78 @@
     </div>
     <div class="header-actions">
       <label class="device-picker" for="device-select">
-        <span>当前模块</span>
-        <select id="device-select" aria-label="选择要管理的大疆 4G 模块">
+        <span>线路 / 模块</span>
+        <select id="device-select" aria-label="选择要管理的大疆 4G 模块（线路）">
           <option value="">正在发现模块…</option>
         </select>
       </label>
-      <button id="rename-device" class="secondary compact" type="button" disabled>重命名</button>
-      <div class="theme-switch" role="group" aria-label="网页外观">
-        <button class="theme-option" type="button" data-theme-option="light" aria-pressed="false">浅色</button>
-        <button class="theme-option" type="button" data-theme-option="dark" aria-pressed="false">深色</button>
-        <button class="theme-option" type="button" data-theme-option="auto" aria-pressed="true">自动</button>
-      </div>
-      <button id="workmode-sms" class="secondary compact" type="button">短信模式</button>
-      <button id="workmode-network" class="secondary compact" type="button">上网模式</button>
       <button id="refresh" class="compact icon-button" title="刷新状态" aria-label="刷新状态">↻</button>
+      <div class="header-more">
+        <button id="header-more-toggle" class="secondary compact" type="button" aria-expanded="false" aria-controls="header-more-menu" aria-haspopup="true">更多</button>
+        <div id="header-more-menu" class="header-more-menu" hidden role="menu" aria-label="次要操作">
+          <button id="rename-device" class="secondary compact menu-item" type="button" role="menuitem" disabled>重命名线路</button>
+          <div class="theme-switch" role="group" aria-label="网页外观">
+            <button class="theme-option" type="button" data-theme-option="light" aria-pressed="false">浅色</button>
+            <button class="theme-option" type="button" data-theme-option="dark" aria-pressed="false">深色</button>
+            <button class="theme-option" type="button" data-theme-option="auto" aria-pressed="true">自动</button>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
 
   <main class="app-main">
     <section class="overview" aria-label="设备状态">
       <div class="overview-heading"><span>模块概览</span><small>本地 USB 控制</small></div>
-      <div class="status-grid">
+      <div class="workmode-bar" aria-label="当前工作模式">
+        <div class="workmode-current">
+          <span>当前模式</span>
+          <strong id="workmode-capsule">读取中…</strong>
+        </div>
+        <div class="workmode-actions">
+          <button id="workmode-sms" class="secondary compact" type="button">切到短信模式</button>
+          <button id="workmode-network" class="secondary compact" type="button">切到上网模式</button>
+        </div>
+      </div>
+      <div class="status-grid status-grid-health">
       <div><span>运营商</span><strong id="operator">--</strong></div>
       <div><span>信号</span><strong id="signal">--</strong></div>
       <div><span>网络</span><strong id="network-mode">--</strong></div>
       <div><span>SIM</span><strong id="sim">--</strong></div>
       <div><span>工作模式</span><strong id="work-mode">--</strong></div>
-      <div><span>当前下载</span><strong id="traffic-rx-rate">--</strong></div>
-      <div><span>当前上传</span><strong id="traffic-tx-rate">--</strong></div>
-      <div><span>本次下载流量</span><strong id="traffic-session-rx">--</strong></div>
-      <div><span>本次上传流量</span><strong id="traffic-session-tx">--</strong></div>
-      <div><span>本次总流量</span><strong id="traffic-session-total">--</strong></div>
       </div>
+      <details class="fold-panel traffic-fold">
+        <summary><span>本次会话流量</span><small>仅在网络管理时更有用</small></summary>
+        <div class="status-grid status-grid-traffic">
+          <div><span>当前下载</span><strong id="traffic-rx-rate">--</strong></div>
+          <div><span>当前上传</span><strong id="traffic-tx-rate">--</strong></div>
+          <div><span>本次下载流量</span><strong id="traffic-session-rx">--</strong></div>
+          <div><span>本次上传流量</span><strong id="traffic-session-tx">--</strong></div>
+          <div><span>本次总流量</span><strong id="traffic-session-total">--</strong></div>
+        </div>
+      </details>
     </section>
     <section id="hardware-details" class="hardware-details" hidden></section>
     <p id="workmode-status" class="inline-status" hidden></p>
 
-    <nav class="task-nav" aria-label="功能导航">
-      <button class="tab active" data-view="sms"><span>短信</span><small>收件箱</small></button>
-      <button class="tab" data-view="calls"><span>来电</span><small>通话记录</small></button>
-      <button class="tab" data-view="esim"><span>eSIM/卡片</span><small>Profile</small></button>
-      <button class="tab" data-view="network"><span>网络</span><small>4G USB</small></button>
-      <button class="tab" data-view="at"><span>AT 调试</span><small>诊断</small></button>
-      <a class="tab" href="/remote/"><span>远程接听与配对</span><small>注册与手机管理</small></a>
+    <nav class="task-nav" role="tablist" aria-label="功能导航">
+      <button class="tab active" role="tab" id="tab-sms" data-view="sms" aria-selected="true" aria-controls="sms"><span>短信</span><small>收件箱</small></button>
+      <button class="tab" role="tab" id="tab-calls" data-view="calls" aria-selected="false" aria-controls="calls"><span>来电</span><small>通话记录</small></button>
+      <button class="tab" role="tab" id="tab-esim" data-view="esim" aria-selected="false" aria-controls="esim"><span>eSIM/卡片</span><small>Profile</small></button>
+      <button class="tab" role="tab" id="tab-network" data-view="network" aria-selected="false" aria-controls="network"><span>网络</span><small>4G USB</small></button>
+      <button class="tab" role="tab" id="tab-at" data-view="at" aria-selected="false" aria-controls="at"><span>AT 调试</span><small>诊断</small></button>
+      <a class="tab tab-external" href="/remote/" aria-current="false"><span>远程接听与配对</span><small>新页面 · 注册与手机</small></a>
     </nav>
 
-    <section id="sms" class="view active">
-      <div class="view-intro"><div><span class="section-kicker">SIM MESSAGES</span><h2>短信收件箱</h2></div><p>自动轮询当前 SIM 与模块短信存储。</p></div>
-      <form id="send-form" class="toolbar">
+    <section id="sms" class="view active" role="tabpanel" aria-labelledby="tab-sms">
+      <div class="view-intro"><div><span class="section-kicker">短信</span><h2>短信收件箱</h2></div><p>本页为模块 SIM 收件箱；App 短信需开启「推送到 iPhone」后才同步。</p></div>
+      <form id="send-form" class="toolbar send-toolbar">
         <input id="phone" type="tel" placeholder="接收号码" autocomplete="tel" required>
-        <input id="message" type="text" placeholder="短信内容" maxlength="1000" required>
-        <button type="submit">发送</button>
+        <div class="send-message-field">
+          <input id="message" type="text" placeholder="短信内容" maxlength="1000" required aria-describedby="sms-char-count">
+          <small id="sms-char-count" class="char-count">还可输入 1000 字</small>
+        </div>
+        <button id="send-sms" type="submit">发送</button>
       </form>
       <details id="sms-bark-settings-panel" class="fold-panel notification-panel">
         <summary><span>短信 Bark 通知</span><small id="sms-bark-summary">未配置</small></summary>
@@ -90,11 +111,19 @@
             <input id="sms-bark-alias" type="text" maxlength="80" autocomplete="off" placeholder="例如：备用卡">
             <small>在消息模板中使用 <code>{alias}</code> 或 <code>{alias_prefix}</code>。</small>
           </label>
-          <label class="settings-field settings-field-wide">
-            <span>短信消息模板</span>
-            <textarea id="sms-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}来自 {sender}：{content}"></textarea>
-            <small>可用变量：<code>{sender}</code>、<code>{content}</code>、<code>{code}</code>、<code>{timestamp}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
-          </label>
+          <details class="bark-advanced settings-field-wide">
+            <summary>高级模板</summary>
+            <div class="bark-preset-row" role="group" aria-label="短信模板预设">
+              <button type="button" class="secondary compact bark-preset" data-bark="sms" data-template="{alias_prefix}来自 {sender}：{content}">简洁</button>
+              <button type="button" class="secondary compact bark-preset" data-bark="sms" data-template="{alias_prefix}{sender}：{content}&#10;验证码：{code}&#10;时间：{timestamp}">含验证码</button>
+              <button type="button" class="secondary compact bark-preset" data-bark="sms" data-template="{alias_prefix}[{timestamp}] {sender}&#10;{content}">时间戳</button>
+            </div>
+            <label class="settings-field settings-field-wide">
+              <span>短信消息模板</span>
+              <textarea id="sms-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}来自 {sender}：{content}"></textarea>
+              <small>可用变量：<code>{sender}</code>、<code>{content}</code>、<code>{code}</code>、<code>{timestamp}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
+            </label>
+          </details>
           <div class="settings-actions">
             <button id="test-sms-bark" class="secondary" type="button">发送测试通知</button>
             <button type="submit">保存配置</button>
@@ -105,25 +134,20 @@
       <div class="section-heading">
         <h2>收件箱</h2>
         <div class="heading-actions">
-          <button id="clear-module-sms" class="secondary danger" type="button">清空模块旧短信</button>
           <button id="refresh-sms" class="secondary" type="button">读取短信</button>
+          <span class="action-sep" aria-hidden="true"></span>
+          <button id="clear-module-sms" class="secondary danger" type="button">清空模块旧短信</button>
         </div>
       </div>
       <p id="sms-status" class="inline-status">尚未读取短信</p>
-      <div id="sms-list" class="list empty">暂无短信</div>
+      <div id="sms-list" class="list empty" aria-busy="false">暂无短信</div>
     </section>
 
-    <section id="calls" class="view">
-      <div id="calls-overview-intro" class="view-intro"><div><span class="section-kicker">CALL CENTER</span><h2>来电</h2></div><p>按需展开通话功能，重要状态会直接显示在模块摘要中。</p></div>
-      <div id="call-module-list" class="call-module-list">
-      <details id="call-monitor-panel" class="call-feature-panel">
-        <summary class="call-feature-summary">
-          <span class="call-feature-icon monitor-icon" aria-hidden="true"></span>
-          <span class="call-feature-copy"><strong>来电监控</strong><small>接听控制、语音准备与 AI 通话能力</small></span>
-          <span id="call-monitor-status" class="call-feature-status">尚未读取来电状态</span>
-        </summary>
-        <div class="call-feature-content">
-      <div id="active-call" class="active-call-card" hidden>
+    <section id="calls" class="view" role="tabpanel" aria-labelledby="tab-calls">
+      <div id="calls-overview-intro" class="view-intro"><div><span class="section-kicker">通话</span><h2>来电</h2></div><p>进行中通话置顶；接听路由与记录按组展开。</p></div>
+
+      <div id="active-call" class="active-call-card active-call-pinned" hidden>
+        <div class="active-call-route-badge" id="active-call-route" hidden></div>
         <span id="active-call-label">正在来电</span>
         <strong id="active-call-number">未知号码</strong>
         <small id="active-call-time"></small>
@@ -144,13 +168,24 @@
           </div>
         </div>
       </div>
+
+      <div id="call-module-list" class="call-module-list">
+      <div class="call-group" data-group="ops">
+        <h3 class="call-group-title">通话操作</h3>
+      <details id="call-monitor-panel" class="call-feature-panel" open>
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon monitor-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>来电监控</strong><small>接听控制、语音准备与后台监听</small></span>
+          <span id="call-monitor-status" class="call-feature-status">尚未读取来电状态</span>
+        </summary>
+        <div class="call-feature-content">
       <div class="call-content-heading">
         <span>后台监听保持运行，无需展开此模块。</span>
         <button id="refresh-calls" class="secondary compact" type="button">刷新状态</button>
       </div>
       <section class="voice-setup-card" aria-labelledby="voice-setup-title">
         <div>
-          <span class="section-kicker">VOICE READINESS</span>
+          <span class="section-kicker">语音</span>
           <h3 id="voice-setup-title">语音通话准备</h3>
           <p id="voice-setup-summary" class="inline-status">正在检查模块配置与语音运行时...</p>
           <small id="voice-setup-detail"></small>
@@ -161,12 +196,54 @@
           <button id="install-voice-runtime" class="secondary" type="button" hidden>安装语音运行时</button>
         </div>
       </section>
-      <details id="remote-settings-panel" class="call-submodule">
-        <summary><span class="call-feature-copy"><strong>iPhone 远程接听</strong><small id="remote-status">展开后读取当前模块设置</small></span></summary>
-        <p>启用 AI 接听时，本模块只走 AI，不会通知远程 iPhone。通话过程中不能更改接听路由。</p>
+      <details id="voice-agent-transcript-panel" class="call-submodule agent-transcript-panel">
+        <summary>
+          <span class="call-feature-copy"><strong>实时转写与运行事件</strong><small id="voice-agent-stream-status">尚未连接事件流</small></span>
+        </summary>
+        <div class="call-submodule-content">
+          <div class="call-content-heading">
+            <span>仅显示当前运行期内的实时事件。</span>
+            <button id="clear-live-transcript" class="secondary compact" type="button">清空面板</button>
+          </div>
+          <div id="voice-agent-transcript" class="agent-transcript empty">通话接通并启用 Agent 后，将在这里显示实时转写。</div>
+        </div>
+      </details>
+        </div>
+      </details>
+
+      <details id="manual-dial-panel" class="call-feature-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon dial-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>手动拨号</strong><small>使用当前模块发起语音通话</small></span>
+          <span class="call-feature-status">实验性</span>
+        </summary>
+        <div class="call-feature-content">
+      <form id="dial-form" class="dial-form">
+        <label for="dial-number">电话号码</label>
+        <div class="dial-input-row">
+          <input id="dial-number" type="tel" inputmode="tel" autocomplete="tel" maxlength="40" placeholder="输入电话号码">
+          <button id="dial-call" type="submit">拨打</button>
+        </div>
+        <small>模块侧 D4/UAC 路由与 Mac 麦克风/扬声器宿主会在通话接通后自动启动；真机验收完成前此功能仍标记为实验性。</small>
+      </form>
+        </div>
+      </details>
+      </div>
+
+      <div class="call-group" data-group="routing">
+        <h3 class="call-group-title">接听路由（远程 / AI）</h3>
+        <p id="answer-route-badge" class="route-badge" role="status">读取本线路接听路由…</p>
+      <details id="remote-settings-panel" class="call-feature-panel">
+        <summary class="call-feature-summary">
+          <span class="call-feature-icon monitor-icon" aria-hidden="true"></span>
+          <span class="call-feature-copy"><strong>iPhone 远程接听</strong><small>推送到 iPhone · App 来电与短信</small></span>
+          <span id="remote-status" class="call-feature-status">展开后读取当前模块设置</span>
+        </summary>
+        <div class="call-feature-content">
+        <p>仅作用于当前线路：本线路启用 AI 时不通知 iPhone。通话过程中不能更改接听路由。</p>
         <form id="remote-form">
           <fieldset id="remote-fields" class="agent-settings-grid" disabled>
-            <label class="agent-toggle"><input id="remote-enabled" type="checkbox"><span>启用此模块的远程接听</span></label>
+            <label class="agent-toggle"><input id="remote-enabled" type="checkbox"><span>本线路推送到 iPhone</span></label>
             <label>目标 iPhone<select id="remote-installation"><option value="">先登录远程管理并读取已配对手机</option></select></label>
             <label>响铃超时（秒）<input id="remote-timeout" type="number" min="10" max="90" required value="45"></label>
             <label>来电显示<select id="remote-display"><option value="number">电话号码</option><option value="module">仅模块</option></select></label>
@@ -176,18 +253,20 @@
         <button id="remote-refresh" type="button" class="secondary">重新读取</button>
         <p>打开<a href="/remote/">远程接听与配对</a>完成 Mac 注册、手机扫码、备注和撤销。这里仅列出当前连接配置中有效且覆盖此模块的手机。</p>
         <p>启用后，此 SIM 的新短信自动通知到 DJ电话通 APP，短信与来电 Bark 自动提示暂停；关闭后恢复原有 Bark 配置。请在 iPhone 上允许 APP 通知。</p>
+        </div>
       </details>
 
-      <details id="voice-agent-settings-panel" class="call-submodule">
-        <summary class="agent-settings-summary">
+      <details id="voice-agent-settings-panel" class="call-feature-panel">
+        <summary class="call-feature-summary agent-settings-summary">
+          <span class="call-feature-icon ai-history-icon" aria-hidden="true"></span>
           <span class="call-feature-copy"><strong id="voice-agent-title">智能语音接听与拨号</strong><small id="voice-agent-status">正在读取 Voice Agent 状态...</small></span>
           <span id="voice-agent-connection" class="agent-status-badge">人工模式</span>
         </summary>
-        <div class="call-submodule-content">
+        <div class="call-feature-content">
         <form id="voice-agent-form" class="agent-settings-grid">
           <label class="checkbox-field agent-switch">
             <input id="voice-agent-enabled" type="checkbox">
-            <span><strong>启用 AI 媒体模式</strong><small>关闭后立即回退到本地麦克风和扬声器。</small></span>
+            <span><strong>本线路启用 AI 媒体模式</strong><small>仅当前线路生效；关闭后回退本地麦克风。启用后本线路不通知 iPhone。</small></span>
           </label>
           <label class="settings-field">
             <span>主 Provider</span>
@@ -197,6 +276,13 @@
               <option value="minimax">MiniMax 级联</option>
             </select>
           </label>
+          <label class="settings-field settings-field-wide">
+            <span>角色与通话指令</span>
+            <textarea id="voice-agent-instructions" maxlength="12000" rows="5" placeholder="你是电话客服，请先确认来意，再用简洁自然的中文回答。"></textarea>
+          </label>
+          <details class="agent-advanced settings-field-wide">
+            <summary>高级设置（降级 / STT / 延迟）</summary>
+            <div class="agent-settings-grid agent-advanced-grid">
           <label class="settings-field">
             <span>故障降级 Provider</span>
             <select id="voice-agent-fallback-provider">
@@ -234,14 +320,12 @@
             <span>STT 模型</span>
             <input id="voice-agent-stt-model" type="text" maxlength="160" autocomplete="off" placeholder="qwen3-asr-flash-realtime 或 gpt-live-transcribe">
           </label>
-          <label class="settings-field settings-field-wide">
-            <span>角色与通话指令</span>
-            <textarea id="voice-agent-instructions" maxlength="12000" rows="5" placeholder="你是电话客服，请先确认来意，再用简洁自然的中文回答。"></textarea>
-          </label>
           <label class="settings-field">
             <span>自动接听延迟（毫秒）</span>
             <input id="voice-agent-auto-answer-delay" type="number" min="250" max="30000" step="50" value="1200">
           </label>
+            </div>
+          </details>
           <div class="settings-actions agent-settings-actions">
             <button id="voice-agent-manual" class="secondary" type="button">切回人工模式</button>
             <button type="submit">保存 Agent Profile</button>
@@ -254,39 +338,10 @@
         </div>
         </div>
       </details>
-      <details id="voice-agent-transcript-panel" class="call-submodule agent-transcript-panel">
-        <summary>
-          <span class="call-feature-copy"><strong>实时转写与运行事件</strong><small id="voice-agent-stream-status">尚未连接事件流</small></span>
-        </summary>
-        <div class="call-submodule-content">
-          <div class="call-content-heading">
-            <span>仅显示当前运行期内的实时事件。</span>
-            <button id="clear-live-transcript" class="secondary compact" type="button">清空面板</button>
-          </div>
-          <div id="voice-agent-transcript" class="agent-transcript empty">通话接通并启用 Agent 后，将在这里显示实时转写。</div>
-        </div>
-      </details>
-        </div>
-      </details>
+      </div>
 
-      <details id="manual-dial-panel" class="call-feature-panel">
-        <summary class="call-feature-summary">
-          <span class="call-feature-icon dial-icon" aria-hidden="true"></span>
-          <span class="call-feature-copy"><strong>手动拨号</strong><small>使用当前模块发起语音通话</small></span>
-          <span class="call-feature-status">实验性</span>
-        </summary>
-        <div class="call-feature-content">
-      <form id="dial-form" class="dial-form">
-        <label for="dial-number">电话号码</label>
-        <div class="dial-input-row">
-          <input id="dial-number" type="tel" inputmode="tel" autocomplete="tel" maxlength="40" placeholder="输入电话号码">
-          <button id="dial-call" type="submit">拨打</button>
-        </div>
-        <small>模块侧 D4/UAC 路由与 Mac 麦克风/扬声器宿主会在通话接通后自动启动；真机验收完成前此功能仍标记为实验性。</small>
-      </form>
-        </div>
-      </details>
-
+      <div class="call-group" data-group="records">
+        <h3 class="call-group-title">记录与通知</h3>
       <details id="call-bark-settings-panel" class="call-feature-panel notification-panel">
         <summary class="call-feature-summary">
           <span class="call-feature-icon notification-icon" aria-hidden="true"></span>
@@ -309,11 +364,19 @@
             <input id="call-bark-alias" type="text" maxlength="80" autocomplete="off" placeholder="例如：电话卡">
             <small>在消息模板中使用 <code>{alias}</code> 或 <code>{alias_prefix}</code>。</small>
           </label>
-          <label class="settings-field settings-field-wide">
-            <span>来电消息模板</span>
-            <textarea id="call-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}{status}：{number}&#10;时间：{started_at}"></textarea>
-            <small>可用变量：<code>{status}</code>（未接来电或 AI 已接听）、<code>{number}</code>、<code>{started_at}</code>、<code>{ended_at}</code>、<code>{duration}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
-          </label>
+          <details class="bark-advanced settings-field-wide">
+            <summary>高级模板</summary>
+            <div class="bark-preset-row" role="group" aria-label="来电模板预设">
+              <button type="button" class="secondary compact bark-preset" data-bark="call" data-template="{alias_prefix}{status}：{number}&#10;时间：{started_at}">标准</button>
+              <button type="button" class="secondary compact bark-preset" data-bark="call" data-template="{alias_prefix}{status} {number}">一行</button>
+              <button type="button" class="secondary compact bark-preset" data-bark="call" data-template="{alias_prefix}{status}：{number}&#10;开始：{started_at}&#10;结束：{ended_at}&#10;时长：{duration}">完整</button>
+            </div>
+            <label class="settings-field settings-field-wide">
+              <span>来电消息模板</span>
+              <textarea id="call-bark-message-template" maxlength="4000" spellcheck="false" rows="4" placeholder="{alias_prefix}{status}：{number}&#10;时间：{started_at}"></textarea>
+              <small>可用变量：<code>{status}</code>（未接来电或 AI 已接听）、<code>{number}</code>、<code>{started_at}</code>、<code>{ended_at}</code>、<code>{duration}</code>、<code>{alias}</code>、<code>{alias_prefix}</code>。</small>
+            </label>
+          </details>
           <div class="settings-actions">
             <button id="test-call-bark" class="secondary" type="button">发送测试通知</button>
             <button type="submit">保存配置</button>
@@ -331,7 +394,7 @@
         </summary>
         <div class="call-feature-content">
           <div class="call-content-heading"><span>按时间从近到远排列。</span><button id="refresh-call-history" class="secondary compact" type="button">刷新记录</button></div>
-          <div id="call-history" class="list empty">暂无记录</div>
+          <div id="call-history" class="list empty" aria-busy="false">暂无记录</div>
         </div>
       </details>
 
@@ -362,11 +425,12 @@
         </div>
       </details>
       </div>
+      </div>
 
       <section id="voice-agent-call-detail" class="agent-call-detail-page" aria-labelledby="voice-agent-call-detail-title" hidden>
         <button id="back-to-voice-agent-calls" class="detail-back-button" type="button">← 返回 AI 通话记录</button>
         <div class="agent-call-detail-heading">
-          <div><span class="section-kicker">AI CALL DETAIL</span><h2 id="voice-agent-call-detail-title">通话详情</h2></div>
+          <div><span class="section-kicker">详情</span><h2 id="voice-agent-call-detail-title">通话详情</h2></div>
           <span id="voice-agent-call-detail-status" class="agent-status-badge">已结束</span>
         </div>
         <div id="voice-agent-call-detail-meta" class="agent-call-detail-meta"></div>
@@ -381,8 +445,8 @@
       </section>
     </section>
 
-    <section id="esim" class="view">
-      <div class="view-intro"><div><span class="section-kicker">EUICC MANAGER</span><h2>eSIM / 卡片</h2></div><p>管理卡内 Profile，并核对模块实际接管状态。</p></div>
+    <section id="esim" class="view" role="tabpanel" aria-labelledby="tab-esim">
+      <div class="view-intro"><div><span class="section-kicker">eSIM</span><h2>eSIM / 卡片</h2></div><p>管理卡内 Profile，并核对模块实际接管状态。</p></div>
       <div class="section-heading">
         <h2>eSIM Profile</h2>
         <button id="refresh-esim" class="secondary">刷新</button>
@@ -402,7 +466,7 @@
       </details>
 
       <details id="esim-profile-panel" class="profile-panel" open>
-        <summary class="profile-panel-heading"><span class="profile-panel-title"><span class="section-kicker">INSTALLED PROFILES</span><strong>已安装的 Profile</strong></span><small>启用、改名或删除卡内 Profile。</small></summary>
+        <summary class="profile-panel-heading"><span class="profile-panel-title"><span class="section-kicker">已安装</span><strong>已安装的 Profile</strong></span><small>启用、改名或删除卡内 Profile。</small></summary>
         <div class="profile-panel-content">
         <details class="fold-panel">
           <summary><span>卡片概览</span><small>卡类型、固件、EID</small></summary>
@@ -420,13 +484,13 @@
             <div id="esim-phonebook-result" class="phonebook-result" hidden></div>
           </div>
         </details>
-        <div id="esim-list" class="list empty">尚未读取 eUICC/eSIM 卡片</div>
+        <div id="esim-list" class="list empty" aria-busy="false">尚未读取 eUICC/eSIM 卡片</div>
         </div>
       </details>
     </section>
 
-    <section id="network" class="view">
-      <div class="view-intro"><div><span class="section-kicker">USB NETWORK</span><h2>网络诊断</h2></div><p>检查蜂窝注册、USB 网卡与默认出口。</p></div>
+    <section id="network" class="view" role="tabpanel" aria-labelledby="tab-network">
+      <div class="view-intro"><div><span class="section-kicker">网络</span><h2>网络诊断</h2></div><p>检查蜂窝注册、USB 网卡与默认出口。</p></div>
       <div class="section-heading">
         <h2>网络诊断</h2>
         <button id="refresh-network" class="secondary" type="button">刷新</button>
@@ -438,22 +502,24 @@
         <button id="check-4g-route" class="secondary" type="button">检测 4G 出口</button>
         <button id="check-proxy-route" class="secondary" type="button">检测代理</button>
       </div>
-      <div id="network-checks" class="list empty">尚未检测</div>
+      <div id="network-checks" class="list empty" aria-busy="false">尚未检测</div>
       <h2 class="subheading">USB 网卡模式</h2>
-      <div class="control-panel">
+      <div class="control-panel mode-panel">
         <button id="usbnet-mode-0" class="secondary" type="button">模式 0 · 短信/管理</button>
         <button id="usbnet-mode-1" class="secondary" type="button">模式 1 · 4G 网卡</button>
         <button id="usbnet-mode-2" class="secondary" type="button">模式 2 · 实验</button>
         <button id="usbnet-mode-3" class="secondary" type="button">模式 3 · 实验</button>
+      </div>
+      <div class="control-panel danger-panel">
         <button id="reboot-module" class="secondary danger" type="button">重启模块</button>
       </div>
-      <p class="inline-status">模式 0 适合短信和 AT 管理；模式 1 是目前确认可用的 USB 网卡模式。切换 usbnet 后通常需要重启模块。</p>
+      <p class="inline-status">模式 0 适合短信和 AT 管理；模式 1 是目前确认可用的 USB 网卡模式。切换 usbnet 后通常需要重启模块；切换会触发 USB 重枚举，页面可能短暂断开。</p>
       <h2 class="subheading">macOS 网络接口</h2>
-      <div id="network-interfaces" class="list empty">尚未读取接口</div>
+      <div id="network-interfaces" class="list empty" aria-busy="false">尚未读取接口</div>
     </section>
 
-    <section id="at" class="view">
-      <div class="view-intro"><div><span class="section-kicker">ADVANCED DIAGNOSTICS</span><h2>AT 调试</h2></div><p>直接向模块发送 AT 指令。</p></div>
+    <section id="at" class="view" role="tabpanel" aria-labelledby="tab-at">
+      <div class="view-intro"><div><span class="section-kicker">诊断</span><h2>AT 调试</h2></div><p>直接向模块发送 AT 指令。</p></div>
       <form id="at-form" class="toolbar">
         <input id="at-command" type="text" value="AT+CSQ" spellcheck="false" required>
         <button type="submit">执行</button>
@@ -462,8 +528,8 @@
     </section>
   </main>
 
-  <div id="app-modal" class="modal-backdrop" hidden>
-    <form id="modal-form" class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <dialog id="app-modal" class="app-dialog" aria-labelledby="modal-title">
+    <form id="modal-form" method="dialog">
       <div class="modal-heading">
         <h2 id="modal-title">确认操作</h2>
         <button id="modal-close" class="secondary modal-close" type="button" aria-label="关闭">×</button>
@@ -472,12 +538,12 @@
       <div id="modal-fields" class="modal-fields"></div>
       <div class="modal-actions">
         <button id="modal-cancel" class="secondary" type="button">取消</button>
-        <button id="modal-confirm" type="submit">确定</button>
+        <button id="modal-confirm" type="submit" value="confirm">确定</button>
       </div>
     </form>
-  </div>
-  <div id="login-modal" class="modal-backdrop" hidden>
-    <form id="login-form" class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="login-title">
+  </dialog>
+  <dialog id="login-modal" class="app-dialog" aria-labelledby="login-title">
+    <form id="login-form" method="dialog">
       <div class="modal-heading">
         <h2 id="login-title">登录管理服务</h2>
       </div>
@@ -490,11 +556,14 @@
       <p id="login-notice" class="modal-message"></p>
       <div class="modal-actions">
         <button id="login-cancel" class="secondary" type="button">取消</button>
-        <button id="login-submit" type="submit">登录</button>
+        <button id="login-submit" type="submit" value="confirm">登录</button>
       </div>
     </form>
+  </dialog>
+  <div id="notice" role="status" aria-live="polite" hidden>
+    <span id="notice-text"></span>
+    <button id="notice-dismiss" type="button" class="notice-dismiss" aria-label="关闭提示" hidden>×</button>
   </div>
-  <div id="notice" role="status" aria-live="polite"></div>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -100,13 +100,20 @@ function showLoginDialog(configured) {
   $("#login-title").textContent = configured ? "登录管理服务" : "初始化管理账号";
   $("#login-intro").textContent = configured ? "此地址启用了密码保护，请输入管理账号后继续。" : "首次在此地址使用，请用启动日志中 web-lan 目录 setup.json 里的初始化令牌创建账号。";
   $("#login-token-field").hidden = configured;
+  $("#login-token-field").querySelector("input").required = !configured;
   $("#login-submit").textContent = configured ? "登录" : "创建账号并登录";
   $("#login-notice").textContent = "";
   form.reset();
-  modal.hidden = false;
   return new Promise(resolve => {
-    const close = value => { modal.hidden = true; form.onsubmit = null; $("#login-cancel").onclick = null; resolve(value); };
+    const close = value => {
+      if (modal.open) modal.close();
+      form.onsubmit = null;
+      $("#login-cancel").onclick = null;
+      document.body.classList.remove("modal-open");
+      resolve(value);
+    };
     $("#login-cancel").onclick = () => close(null);
+    modal.addEventListener("cancel", (event) => { event.preventDefault(); close(null); }, { once: true });
     form.onsubmit = async event => {
       event.preventDefault();
       $("#login-notice").textContent = "";
@@ -116,6 +123,12 @@ function showLoginDialog(configured) {
         close(true);
       } catch (error) { $("#login-notice").textContent = error.message; }
     };
+    document.body.classList.add("modal-open");
+    modal.showModal();
+    setTimeout(() => {
+      const focusTarget = configured ? form.querySelector("input[name=username]") : form.querySelector("input[name=token]");
+      focusTarget?.focus();
+    }, 0);
   });
 }
 async function ensureWebSession() {
@@ -220,6 +233,7 @@ async function refreshActiveDevice() {
   currentCallState = null;
   lastSMSCount = null;
   networkTrafficPrevious = null;
+  lastRemoteRoute = { enabled: false, recovery: false };
   voiceAgentFormDirty = false;
   voiceAgentLoadedDevice = null;
   renderedVoiceAgentCallsSignature = "";
@@ -242,24 +256,47 @@ async function refreshActiveDevice() {
   if ($("#calls").classList.contains("active")) connectVoiceAgentEvents();
 }
 
-function notice(message) {
+function notice(message, sticky = false) {
   const el = $("#notice");
-  el.textContent = message;
+  const text = $("#notice-text");
+  const dismiss = $("#notice-dismiss");
+  const isError = sticky === true || sticky === "error";
+  text.textContent = message;
+  el.hidden = false;
+  el.classList.toggle("error", isError);
   el.classList.add("show");
+  dismiss.hidden = !isError;
   clearTimeout(notice.timer);
-  notice.timer = setTimeout(() => el.classList.remove("show"), 2600);
+  if (!isError) {
+    notice.timer = setTimeout(() => {
+      el.classList.remove("show");
+      el.classList.remove("error");
+    }, 2600);
+  }
 }
+$("#notice-dismiss")?.addEventListener("click", () => {
+  const el = $("#notice");
+  el.classList.remove("show", "error");
+  el.hidden = true;
+  clearTimeout(notice.timer);
+});
 
 let modalResolve = null;
+let modalReturnFocus = null;
 
 function closeModal(result = null) {
   const modal = $("#app-modal");
-  modal.hidden = true;
+  if (modal.open) modal.close();
   document.body.classList.remove("modal-open");
+  const focusBack = modalReturnFocus;
+  modalReturnFocus = null;
   if (modalResolve) {
     const resolve = modalResolve;
     modalResolve = null;
     resolve(result);
+  }
+  if (focusBack && typeof focusBack.focus === "function") {
+    try { focusBack.focus({ preventScroll: true }); } catch (_) {}
   }
 }
 
@@ -269,6 +306,7 @@ function showModal({ title, message = "", fields = [], confirmLabel = "确定", 
   const messageElement = $("#modal-message");
   const fieldsElement = $("#modal-fields");
   const confirmButton = $("#modal-confirm");
+  modalReturnFocus = document.activeElement;
   $("#modal-title").textContent = title;
   messageElement.textContent = message;
   messageElement.hidden = !message;
@@ -289,8 +327,8 @@ function showModal({ title, message = "", fields = [], confirmLabel = "确定", 
   }));
   confirmButton.textContent = confirmLabel;
   confirmButton.className = danger ? "danger modal-danger" : "";
-  modal.hidden = false;
   document.body.classList.add("modal-open");
+  modal.showModal();
   const firstInput = fieldsElement.querySelector("input");
   setTimeout(() => (firstInput || confirmButton).focus(), 0);
   return new Promise((resolve) => { modalResolve = resolve; });
@@ -302,16 +340,124 @@ $("#modal-form").addEventListener("submit", (event) => {
   event.currentTarget.querySelectorAll(".modal-fields input").forEach((input) => {
     values[input.name] = input.value.trim();
   });
-  closeModal(values);
+  closeModal(Object.keys(values).length ? values : true);
 });
 $("#modal-cancel").addEventListener("click", () => closeModal(null));
 $("#modal-close").addEventListener("click", () => closeModal(null));
+$("#app-modal").addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeModal(null);
+});
 $("#app-modal").addEventListener("click", (event) => {
   if (event.target === event.currentTarget) closeModal(null);
 });
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !$("#app-modal").hidden) closeModal(null);
+
+const headerMoreToggle = $("#header-more-toggle");
+const headerMoreMenu = $("#header-more-menu");
+headerMoreToggle?.addEventListener("click", () => {
+  const open = headerMoreMenu.hidden;
+  headerMoreMenu.hidden = !open;
+  headerMoreToggle.setAttribute("aria-expanded", String(open));
 });
+document.addEventListener("click", (event) => {
+  if (!headerMoreMenu || headerMoreMenu.hidden) return;
+  if (event.target.closest(".header-more")) return;
+  headerMoreMenu.hidden = true;
+  headerMoreToggle?.setAttribute("aria-expanded", "false");
+});
+
+function renderEmptyState(target, { title, detail, actionLabel, onAction, className = "list" }) {
+  target.className = `${className} empty empty-state`;
+  target.setAttribute("aria-busy", "false");
+  const titleEl = document.createElement("strong");
+  titleEl.className = "empty-title";
+  titleEl.textContent = title;
+  const detailEl = document.createElement("p");
+  detailEl.textContent = detail;
+  target.replaceChildren(titleEl, detailEl);
+  if (actionLabel && typeof onAction === "function") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary";
+    button.textContent = actionLabel;
+    button.addEventListener("click", onAction);
+    target.append(button);
+  }
+}
+
+function updateSMSCharCount() {
+  const input = $("#message");
+  const counter = $("#sms-char-count");
+  if (!input || !counter) return;
+  const remaining = Math.max(0, (input.maxLength || 1000) - input.value.length);
+  const approxSegments = Math.max(1, Math.ceil(Math.max(input.value.length, 1) / 70));
+  counter.textContent = input.value.length
+    ? `还可输入 ${remaining} 字 · 约 ${approxSegments} 段`
+    : `还可输入 ${remaining} 字`;
+}
+$("#message")?.addEventListener("input", updateSMSCharCount);
+updateSMSCharCount();
+
+document.querySelectorAll(".bark-preset").forEach((button) => {
+  button.addEventListener("click", () => {
+    const kind = button.dataset.bark;
+    const template = button.dataset.template || "";
+    const field = kind === "call" ? $("#call-bark-message-template") : $("#sms-bark-message-template");
+    if (field) field.value = template;
+  });
+});
+
+function setAnswerRouteBadge({ agentEnabled = false, remoteEnabled = false, recovery = false } = {}) {
+  const badge = $("#answer-route-badge");
+  if (!badge) return;
+  badge.classList.remove("ai", "iphone", "manual");
+  if (recovery) {
+    badge.textContent = "本线路 · 待核对通话";
+    badge.classList.add("manual");
+    return;
+  }
+  if (agentEnabled) {
+    badge.textContent = "本线路 · AI 接听";
+    badge.classList.add("ai");
+    return;
+  }
+  if (remoteEnabled) {
+    badge.textContent = "本线路 · 推送到 iPhone";
+    badge.classList.add("iphone");
+    return;
+  }
+  badge.textContent = "本线路 · 本机人工";
+  badge.classList.add("manual");
+}
+
+function syncActiveCallRouteBadge({ agentEnabled = false, remoteEnabled = false } = {}) {
+  const badge = $("#active-call-route");
+  if (!badge) return;
+  if (agentEnabled) {
+    badge.hidden = false;
+    badge.textContent = "本线路 · AI";
+    return;
+  }
+  if (remoteEnabled) {
+    badge.hidden = false;
+    badge.textContent = "本线路 · 推送到 iPhone";
+    return;
+  }
+  badge.hidden = false;
+  badge.textContent = "本线路 · 本机人工";
+}
+
+function workModeLockButtons() {
+  return [
+    $("#workmode-sms"),
+    $("#workmode-network"),
+    $("#usbnet-mode-0"),
+    $("#usbnet-mode-1"),
+    $("#usbnet-mode-2"),
+    $("#usbnet-mode-3"),
+    $("#reboot-module"),
+  ].filter(Boolean);
+}
 
 async function copySMSCode(code) {
   try {
@@ -408,6 +554,8 @@ async function loadStatus() {
       ? displayWorkMode(status.usbnet_mode)
       : displayWorkMode(null);
     setValue("#work-mode", workMode.label, workMode.tone);
+    const capsule = $("#workmode-capsule");
+    if (capsule) capsule.textContent = workMode.label;
     $("#device-summary").textContent =
       status.hardware_status || [status.imei, status.firmware].filter(Boolean).join(" · ") || "模块初始化中";
     renderHardwareDetails(status);
@@ -434,11 +582,16 @@ async function loadSMS() {
     }
     lastSMSCount = messages.length;
     if (!messages.length) {
-      list.className = "list empty";
-      list.textContent = "暂无短信";
+      renderEmptyState(list, {
+        title: "暂无短信",
+        detail: "这是当前线路的模块 SIM 收件箱，与 App 短信列表不同。可点击下方读取模块存储。",
+        actionLabel: "读取短信",
+        onAction: () => $("#refresh-sms")?.click(),
+      });
       return;
     }
     list.className = "list";
+    list.setAttribute("aria-busy", "false");
     list.replaceChildren(...messages.map((message) => {
       const row = document.createElement("article");
       row.className = "item";
@@ -577,11 +730,16 @@ function renderCallHistory(history) {
   const rows = Array.isArray(history) ? history : [];
   $("#call-history-count").textContent = `${rows.length} 条`;
   if (!rows.length) {
-    list.className = "list empty";
-    list.textContent = "暂无记录";
+    renderEmptyState(list, {
+      title: "暂无通话记录",
+      detail: "当前运行期内还没有来电或外呼。可刷新监听状态核对模块。",
+      actionLabel: "刷新状态",
+      onAction: () => $("#refresh-calls")?.click(),
+    });
     return;
   }
   list.className = "list";
+  list.setAttribute("aria-busy", "false");
   list.replaceChildren(...rows.map((call) => {
     const row = document.createElement("article");
     row.className = `item call-history-item${call.missed ? " missed" : ""}`;
@@ -816,6 +974,7 @@ let remoteLoadID = 0;
 let remoteLoadedDevice = null;
 let remoteManagementCSRF = "";
 let remoteValidPhones = [];
+let lastRemoteRoute = { enabled: false, recovery: false };
 async function managementJob(path, body) {
   const response = await fetch('/api/remote-management' + path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-DJOneHub-CSRF': remoteManagementCSRF }, body: JSON.stringify(body) });
   const initial = await response.json();
@@ -875,11 +1034,25 @@ async function loadRemoteSettings() {
     renderRemotePhones(remoteValidPhones, config.target_installation_id);
     remoteLoadedDevice = device;
     $("#remote-fields").disabled = Boolean(state.active_route) || Boolean(state.recovery?.recovery_required);
+    lastRemoteRoute = {
+      enabled: Boolean(config.enabled),
+      recovery: Boolean(state.recovery?.recovery_required),
+    };
+    const agentOn = state.effective_route === "agent";
     $("#remote-status").textContent = state.recovery?.recovery_required
-      ? "有待核对的模块通话，请先在本机处理"
-      : state.effective_route === "agent" ? "AI 接听优先，远程接听不会触发"
-      : !config.enabled ? "此模块未启用远程接听"
-      : `已启用 · Hub 连接：${state.online_transport?.state || "未知"}（实际接听以手机连接与推送状态为准）`;
+      ? "本线路有待核对通话，请先在本机处理"
+      : agentOn ? "本线路 · AI 接听（不通知 iPhone）"
+      : !config.enabled ? "本线路 · 本机人工"
+      : `本线路 · 推送到 iPhone · Hub：${state.online_transport?.state || "未知"}`;
+    setAnswerRouteBadge({
+      agentEnabled: agentOn,
+      remoteEnabled: lastRemoteRoute.enabled,
+      recovery: lastRemoteRoute.recovery,
+    });
+    syncActiveCallRouteBadge({
+      agentEnabled: agentOn,
+      remoteEnabled: lastRemoteRoute.enabled,
+    });
   } catch (error) {
     if (device === activeDeviceID && attempt === remoteLoadID) $("#remote-status").textContent = `读取失败：${error.message}`;
   }
@@ -928,13 +1101,21 @@ async function loadVoiceAgentStatus({ forcePopulate = false } = {}) {
     const badge = $("#voice-agent-connection");
     badge.className = `agent-status-badge${state.connected ? " connected" : (state.last_error ? " error" : "")}`;
     badge.textContent = state.connected
-      ? `已连接 · ${state.active_provider || state.provider}`
-      : (state.enabled ? "Agent 待机" : "人工模式");
+      ? `本线路 · AI · ${state.active_provider || state.provider}`
+      : (state.enabled ? "本线路 · AI · 待机" : "本线路 · 本机人工");
     $("#voice-agent-status").textContent = state.last_error
       ? `最近错误：${state.last_error}`
       : (state.enabled
-        ? `${state.provider || "未选择"} 已启用${state.reconnect_count ? ` · 本次通话重连 ${state.reconnect_count} 次` : ""}`
-        : "当前使用本地麦克风；保存启用后，活动通话会自动切换媒体。");
+        ? `本线路 · AI 接听 · ${state.provider || "未选择"}${state.reconnect_count ? ` · 重连 ${state.reconnect_count} 次` : ""}`
+        : "本线路使用本地麦克风；启用 AI 时仅本线路不通知 iPhone。");
+    const agentEnabled = Boolean(state.enabled);
+    const remoteEnabled = lastRemoteRoute.enabled || Boolean($("#remote-enabled")?.checked);
+    setAnswerRouteBadge({
+      agentEnabled,
+      remoteEnabled,
+      recovery: lastRemoteRoute.recovery,
+    });
+    syncActiveCallRouteBadge({ agentEnabled, remoteEnabled });
     renderVoiceAgentProviders(status);
   } catch (error) {
     $("#voice-agent-status").textContent = `Voice Agent 状态读取失败：${error.message}`;
@@ -1610,11 +1791,16 @@ async function loadNetwork() {
 
     const interfaces = Array.isArray(diag.mac_interfaces) ? diag.mac_interfaces : [];
     if (!interfaces.length) {
-      ifaceList.className = "list empty";
-      ifaceList.textContent = "未读取到网络接口";
+      renderEmptyState(ifaceList, {
+        title: "未读取到网络接口",
+        detail: "可刷新网络诊断，或先检测 4G 出口核对蜂窝侧是否已通。",
+        actionLabel: "检测 4G 出口",
+        onAction: () => $("#check-4g-route")?.click(),
+      });
       return;
     }
     ifaceList.className = "list";
+    ifaceList.setAttribute("aria-busy", "false");
     ifaceList.replaceChildren(...interfaces.map((item) => {
       const row = document.createElement("article");
       row.className = "item";
@@ -1705,10 +1891,13 @@ async function setUSBNetMode(mode) {
   const label = `模式 ${mode}`;
   const confirmed = await showModal({
     title: `切换到${label}`,
-    message: `将写入 usbnet=${mode}，重启模块后生效。`,
+    message: `将写入 usbnet=${mode}。切换后通常需要重启模块，USB 可能短暂断开；写入期间请勿重复操作。`,
     confirmLabel: "继续切换",
+    danger: true,
   });
   if (!confirmed) return;
+  const buttons = workModeLockButtons();
+  buttons.forEach((item) => { item.disabled = true; });
   try {
     const result = await api("/api/network/usbnet", {
       method: "POST",
@@ -1717,19 +1906,22 @@ async function setUSBNetMode(mode) {
     notice(`usbnet 已写入 ${result.mode}，请重启模块`);
     await loadNetwork();
   } catch (error) {
-    notice(error.message);
+    notice(error.message, true);
+  } finally {
+    buttons.forEach((item) => { item.disabled = false; });
   }
 }
 
 async function switchWorkMode(mode, label, button) {
   const confirmed = await showModal({
     title: `切换到${label}`,
-    message: `将写入 usbnet=${mode} 并重启模块，USB 会短暂断开。`,
+    message: `将写入 usbnet=${mode} 并重启模块。USB 会短暂断开，页面可能显示离线；切换期间请勿重复点击，也不要在 eSIM 写入过程中切换模式。`,
     confirmLabel: "确认切换",
+    danger: true,
   });
   if (!confirmed) return;
   const status = $("#workmode-status");
-  const buttons = [$("#workmode-sms"), $("#workmode-network")];
+  const buttons = workModeLockButtons();
   buttons.forEach((item) => { item.disabled = true; });
   status.hidden = false;
   status.textContent = `正在切到${label}...`;
@@ -1741,7 +1933,7 @@ async function switchWorkMode(mode, label, button) {
     status.textContent = `usbnet 已写入 ${result.mode}，正在重启模块...`;
     await api("/api/network/reboot-module", { method: "POST" });
     status.textContent = `${label}已写入，等待模块重新枚举后自动刷新。`;
-    notice(`${label}切换中`);
+    notice(`${label}切换中，请等待模块重新连接`);
     setTimeout(loadStatus, 8000);
     setTimeout(loadNetwork, 12000);
     setTimeout(() => {
@@ -1751,7 +1943,7 @@ async function switchWorkMode(mode, label, button) {
   } catch (error) {
     status.hidden = false;
     status.textContent = `${label}切换失败：${error.message}`;
-    notice(error.message);
+    notice(error.message, true);
     buttons.forEach((item) => { item.disabled = false; });
   }
 }
@@ -1759,17 +1951,29 @@ async function switchWorkMode(mode, label, button) {
 async function rebootModule() {
   const confirmed = await showModal({
     title: "重启模块",
-    message: "模块会重新枚举 USB，网页可能短暂断开。",
+    message: "模块会重新枚举 USB，网页可能短暂断开。重启期间请勿切换工作模式或写入 eSIM。",
     confirmLabel: "确认重启",
+    danger: true,
   });
   if (!confirmed) return;
+  const buttons = workModeLockButtons();
+  buttons.forEach((item) => { item.disabled = true; });
+  const status = $("#workmode-status");
+  status.hidden = false;
+  status.textContent = "正在重启模块…";
   try {
     await api("/api/network/reboot-module", { method: "POST" });
     notice("模块正在重启，稍后刷新状态");
     setTimeout(loadStatus, 8000);
     setTimeout(loadNetwork, 12000);
+    setTimeout(() => {
+      status.textContent = "重启完成后再确认模块状态。";
+      buttons.forEach((item) => { item.disabled = false; });
+    }, 13000);
   } catch (error) {
-    notice(error.message);
+    notice(error.message, true);
+    status.textContent = `重启失败：${error.message}`;
+    buttons.forEach((item) => { item.disabled = false; });
   }
 }
 
@@ -1787,6 +1991,7 @@ async function loadESIM() {
   profilePanel.hidden = false;
   phonebook.hidden = false;
   list.className = "list empty";
+  list.setAttribute("aria-busy", "true");
   list.textContent = "正在读取 eUICC";
   status.textContent = "正在通过 AT+CCHO/CGLA 读取 eUICC/eSIM 卡片";
   try {
@@ -1998,25 +2203,51 @@ async function loadESIM() {
     status.textContent = `读取失败：${error.message}`;
     list.textContent = error.message;
     setESIMHealthPolling(false);
+  } finally {
+    list.setAttribute("aria-busy", "false");
   }
 }
 
-document.querySelectorAll(".tab[data-view]").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab, .view").forEach((el) => el.classList.remove("active"));
-    tab.classList.add("active");
-    $(`#${tab.dataset.view}`).classList.add("active");
-    if (tab.dataset.view === "esim") loadESIM();
-    else setESIMHealthPolling(false);
-    if (tab.dataset.view === "network") loadNetwork();
-    if (tab.dataset.view === "calls") {
-      loadCalls();
-      loadBarkSettings("call");
-      loadVoiceAgentCalls();
-      connectVoiceAgentEvents();
-    } else {
-      closeVoiceAgentEvents();
-    }
+function activateTab(tab) {
+  if (!tab?.dataset?.view) return;
+  document.querySelectorAll(".tab[data-view]").forEach((el) => {
+    el.classList.remove("active");
+    el.setAttribute("aria-selected", "false");
+    el.tabIndex = -1;
+  });
+  document.querySelectorAll(".view").forEach((el) => el.classList.remove("active"));
+  tab.classList.add("active");
+  tab.setAttribute("aria-selected", "true");
+  tab.tabIndex = 0;
+  $(`#${tab.dataset.view}`).classList.add("active");
+  if (tab.dataset.view === "esim") loadESIM();
+  else setESIMHealthPolling(false);
+  if (tab.dataset.view === "network") loadNetwork();
+  if (tab.dataset.view === "calls") {
+    loadCalls();
+    loadBarkSettings("call");
+    loadRemoteSettings();
+    loadVoiceAgentCalls();
+    connectVoiceAgentEvents();
+  } else {
+    closeVoiceAgentEvents();
+  }
+}
+
+const taskTabs = Array.from(document.querySelectorAll(".tab[data-view]"));
+taskTabs.forEach((tab, index) => {
+  tab.tabIndex = tab.classList.contains("active") ? 0 : -1;
+  tab.addEventListener("click", () => activateTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowRight" && event.key !== "ArrowLeft" && event.key !== "Home" && event.key !== "End") return;
+    event.preventDefault();
+    let next = index;
+    if (event.key === "ArrowRight") next = (index + 1) % taskTabs.length;
+    if (event.key === "ArrowLeft") next = (index - 1 + taskTabs.length) % taskTabs.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = taskTabs.length - 1;
+    taskTabs[next].focus();
+    activateTab(taskTabs[next]);
   });
 });
 
@@ -2047,20 +2278,21 @@ $("#esim-download-form").addEventListener("submit", async (event) => {
 
 $("#send-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const button = event.submitter;
+  const button = event.submitter || $("#send-sms");
   const originalLabel = button.textContent;
   button.disabled = true;
-  button.textContent = "发送中";
+  button.textContent = "发送中…";
   try {
     const result = await api("/api/sms/send", {
       method: "POST",
       body: JSON.stringify({ phone: $("#phone").value, message: $("#message").value }),
     });
     $("#message").value = "";
+    updateSMSCharCount();
     const segments = Number(result.segments || 1);
     notice(segments > 1 ? `短信已发送（${segments} 个分片）` : "短信已发送");
   } catch (error) {
-    notice(error.message);
+    notice(error.message, true);
   } finally {
     button.disabled = false;
     button.textContent = originalLabel;
@@ -2270,6 +2502,7 @@ $("#refresh").addEventListener("click", async () => {
 $("#refresh-sms").addEventListener("click", async () => {
   const button = $("#refresh-sms");
   button.disabled = true;
+  $("#sms-list").setAttribute("aria-busy", "true");
   $("#sms-status").textContent = "正在读取短信...";
   try {
     const result = await api("/api/sms/refresh", { method: "POST" });
@@ -2278,9 +2511,10 @@ $("#refresh-sms").addEventListener("click", async () => {
     notice("短信读取完成");
   } catch (error) {
     $("#sms-status").textContent = `读取短信失败：${error.message}`;
-    notice(error.message);
+    notice(error.message, true);
   } finally {
     button.disabled = false;
+    $("#sms-list").setAttribute("aria-busy", "false");
   }
 });
 $("#clear-module-sms").addEventListener("click", async () => {
