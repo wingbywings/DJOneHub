@@ -84,10 +84,20 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   @Published private(set) var dialingSupported = false
   @Published private(set) var modules: [String] = []
   @Published private(set) var moduleNames: [String: String] = [:]
+  /// Known per-line answer routes. Missing keys stay `.unknown` — never invent global AI.
+  @Published private(set) var lineRoutes: [String: PhoneLineRoute] = [:]
   private var moduleNamesTask: Task<Void, Never>?
   private static let moduleNamesCacheKey = "moduleNamesCache"
   func moduleName(for id: String) -> String {
     ModuleLineDisplay.name(for: id, names: moduleNames, modules: modules)
+  }
+  func lineRoute(for id: String) -> PhoneLineRoute {
+    guard !id.isEmpty else { return .unknown }
+    return lineRoutes[id] ?? .unknown
+  }
+  private func noteLineRoute(_ id: String, _ route: PhoneLineRoute) {
+    guard !id.isEmpty, lineRoutes[id] != route else { return }
+    lineRoutes[id] = route
   }
   private func restoreModuleNames(_ record: StoredIdentity?) {
     guard let record, let principal = record.tokens?.principal,
@@ -356,6 +366,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       callUUID = uuid
       callDisplay = caller.display
       callModule = hint.binding.moduleID
+      noteLineRoute(hint.binding.moduleID, .phone)
       callPhase = "incoming"
     }
     let update = incomingCallUpdate(display: caller.display,
@@ -415,6 +426,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       identityReady = record?.phase == "ready" && record?.tokens != nil
       installation = record?.tokens?.principal.id ?? ""
       modules = record?.tokens?.principal.modules ?? []
+      lineRoutes = lineRoutes.filter { modules.contains($0.key) }
       restoreModuleNames(record)
       PhoneSMSInbox.shared.bind(identity: identity, environment: pushEnvironment)
       PhoneSMSOutbox.shared.bind(identity)
@@ -437,6 +449,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       PhoneSMSInbox.shared.forget()
       PhoneSMSOutbox.shared.forget()
       UserDefaults.standard.removeObject(forKey: Self.moduleNamesCacheKey)
+      lineRoutes = [:]
       reloadStatus()
       status = "本机凭据已清理，可重新导入配对文件"
     } catch { status = "无法清理本机凭据" }
@@ -821,6 +834,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     saveHistory()
     callDisplay = number
     callModule = selectedModule
+    // Outbound via this phone ⇒ this line is routed to App, not Voice Agent.
+    noteLineRoute(selectedModule, .phone)
     callPhase = "dialing"
     outgoing = true
     muted = false
@@ -903,6 +918,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
       }
       callDisplay = caller.display
       callModule = b.moduleID
+      // Invite reached this iPhone ⇒ only this line is App/human; never mark all lines AI.
+      noteLineRoute(b.moduleID, .phone)
       muted = false
       speaker = false
       connectedAt = nil
@@ -1172,7 +1189,7 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     case "ring_timeout": return "来电未接听"
     case "answer_timeout": return "对方未接听或模块音频未就绪"
     case "module_busy": return "模块正在通话，请稍后再拨"
-    case "dial_not_allowed": return "此模块未启用本机远程通话，或已配置 AI 接听"
+    case "dial_not_allowed": return "此线路未启用本机远程通话，或该线路已配置 AI 接听"
     case "module_unavailable": return "模块不在线"
     case "answer_failed": return "模块拨号或接听失败"
     case "peer_closed": return "远端连接已断开"

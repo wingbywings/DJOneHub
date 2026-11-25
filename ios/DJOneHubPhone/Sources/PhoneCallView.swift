@@ -34,6 +34,7 @@ struct PhoneCallView: View {
   @ObservedObject var runtime: PhoneRuntime
   @ObservedObject var contacts: PhoneContactsStore
   @State private var showingContacts = false
+  @AppStorage("phoneAppearance") private var appearance = PhoneAppearance.light.rawValue
 
   var body: some View {
     PhoneCallScreen(call: PhoneCallPresentation(runtime: runtime), name: contacts.name(for: runtime.callDisplay),
@@ -45,7 +46,7 @@ struct PhoneCallView: View {
             AppBackground()
             PhoneContactsView(runtime: runtime, contacts: contacts, dial: { _, _ in }, allowsDial: false)
           }.toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showingContacts = false } } }
-        }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).preferredColorScheme(.light)
+        }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).phonePreferredColorScheme(appearance)
       }
       .onChange(of: runtime.callUUID) { _, value in if value == nil { showingContacts = false } }
   }
@@ -83,7 +84,11 @@ struct PhoneCallScreen: View {
         AppBackground()
         ScrollView {
           VStack(spacing: 0) {
-            LineChip(title: "\(incoming ? "来电 · " : "")\(call.module.isEmpty ? "DJOneHub" : call.module)")
+            // Call reached this iPhone ⇒ this line is App/human route, never global AI.
+            LineChip(
+              title: "\(incoming ? "来电 · " : "")\(call.module.isEmpty ? "DJOneHub" : call.module)",
+              route: call.module.isEmpty ? .unknown : .phone
+            )
               .padding(.top, 16)
             PhoneAvatar(name: name, size: keyboard ? 72 : incoming ? 118 : 104).padding(.top, keyboard ? 18 : 30)
             Text(name).font(.system(size: incoming ? 30 : 27, weight: .heavy, design: .rounded))
@@ -91,13 +96,19 @@ struct PhoneCallScreen: View {
             if name != call.display {
               Text(call.display).font(.subheadline).foregroundStyle(PhoneTheme.secondary).padding(.top, 5)
             }
-            if let started = call.connectedAt {
+            if ending {
+              VStack(spacing: 10) {
+                Text("正在挂断…").font(.system(size: 18, weight: .bold)).foregroundStyle(PhoneTheme.red)
+                ProgressView().tint(PhoneTheme.violet)
+              }.padding(.top, 14).accessibilityElement(children: .combine)
+            } else if let started = call.connectedAt {
               Text(started, style: .timer).monospacedDigit().font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(PhoneTheme.secondary).padding(.top, 6).accessibilityLabel("通话时长")
+              if call.pending { ProgressView().tint(PhoneTheme.violet).padding(.top, 12) }
             } else {
               Text(state).font(.system(size: 15)).foregroundStyle(PhoneTheme.secondary).padding(.top, 6)
+              if call.pending { ProgressView().tint(PhoneTheme.violet).padding(.top, 12) }
             }
-            if ending || call.pending { ProgressView().tint(PhoneTheme.violet).padding(.top, 12) }
             if !call.result.isEmpty {
               Text(call.result).font(.caption).foregroundStyle(PhoneTheme.red).multilineTextAlignment(.center).padding(.top, 10)
             }
@@ -120,20 +131,28 @@ struct PhoneCallScreen: View {
                 PhoneKeypad(compact: true, press: { digit in
                   tones = String((tones + digit).suffix(32))
                   sendTone(digit)
-                }).disabled(call.dtmfPending || call.phase != "connected" || !call.controlsSupported)
+                }).disabled(call.dtmfPending || call.phase != "connected" || !call.controlsSupported || ending)
                 Button { keyboard = false } label: {
                   Label("收起键盘", systemImage: "chevron.down").font(.subheadline.bold()).padding(14)
-                }.padding(.bottom, 10)
+                }.padding(.bottom, 10).disabled(ending)
               } else {
+                // Real capabilities only: mute / keypad / speaker + contacts (A4).
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 18), count: 3), spacing: 20) {
                   control(title: call.muted ? "取消静音" : "静音", icon: call.muted ? "mic.slash.fill" : "mic",
                           selected: call.muted, disabled: controlsDisabled, action: mute)
-                  control(title: "键盘", icon: "square.grid.2x2", disabled: controlsDisabled || !call.controlsSupported) { keyboard = true }
-                  control(title: "扬声器", icon: "speaker.wave.2", selected: call.speaker, disabled: !connected || ending, action: speaker)
-                  control(title: "添加通话", icon: "plus", disabled: true) {}
-                  control(title: "视频", icon: "video", disabled: true) {}
-                  control(title: "联系人", icon: "person", disabled: ending) { showContacts() }
-                }.padding(.bottom, 26)
+                  control(title: "键盘", icon: "circle.grid.3x3", disabled: controlsDisabled || !call.controlsSupported) {
+                    keyboard = true
+                  }
+                  control(title: "扬声器", icon: "speaker.wave.2", selected: call.speaker,
+                          disabled: !connected || ending, action: speaker)
+                }
+                Button(action: showContacts) {
+                  Label("联系人", systemImage: "person")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(PhoneTheme.secondary)
+                    .padding(.horizontal, 18).padding(.vertical, 12)
+                    .phoneGlass(radius: 20)
+                }.buttonStyle(PhonePressStyle()).disabled(ending).padding(.top, 18).padding(.bottom, 26)
               }
               callAction(title: ending ? "正在挂断…" : call.outgoing && !connected ? "取消拨号" : "挂断",
                          icon: "phone.down.fill", gradient: PhoneTheme.decline, action: end)
@@ -157,7 +176,6 @@ struct PhoneCallScreen: View {
       }
     }.buttonStyle(PhonePressStyle()).disabled(disabled)
       .accessibilityAddTraits(selected ? [.isSelected] : [])
-      .accessibilityHint(title == "添加通话" || title == "视频" ? "当前服务暂不支持" : "")
   }
 
   private func callAction(title: String, icon: String, gradient: LinearGradient, action: @escaping () -> Void) -> some View {

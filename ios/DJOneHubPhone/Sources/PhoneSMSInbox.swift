@@ -5,7 +5,7 @@ import UserNotifications
 @MainActor final class PhoneSMSInbox: NSObject, ObservableObject, @preconcurrency UNUserNotificationCenterDelegate {
   static let shared = PhoneSMSInbox()
   @Published private(set) var messages: [SMSNotification] = []
-  @Published private(set) var status = "配对后自动接收已开启 APP 接听线路的短信通知"
+  @Published private(set) var status = "配对后自动接收「推送到 iPhone」线路的短信通知；与 Web 模块收件箱不是同一列表"
   @Published var openedNotification: String?
   private var identity: PhoneIdentity?
   private var principal: Principal?
@@ -109,7 +109,7 @@ import UserNotifications
         do {
           try await identity.registerPush(environment: self.environment, token: token, alerts: true)
           guard !Task.isCancelled, self.generation == current else { return }
-          self.status = "短信通知已接入；Hub 开启 APP 接听后自动暂停该 SIM 的 Bark 提示"
+          self.status = "短信通知已接入；Hub「推送到 iPhone」时自动暂停该 SIM 的 Bark 提示"
           return
         } catch {
           self.status = "短信通知接入失败，请检查 Relay 是否已升级及 APNs 配置"
@@ -189,7 +189,7 @@ import UserNotifications
     owner = ""; messages = []; deletedIDs = []; writable = true; save()
     UNUserNotificationCenter.current().removeAllDeliveredNotifications()
     UIApplication.shared.unregisterForRemoteNotifications()
-    status = "配对后自动接收已开启 APP 接听线路的短信通知"
+    status = "配对后自动接收「推送到 iPhone」线路的短信通知；与 Web 模块收件箱不是同一列表"
   }
 
   func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
@@ -240,100 +240,101 @@ struct PhoneSMSView: View {
   @State private var composing = false
   @State private var folder = Folder.inbox
   @State private var query = ""
-  @State private var page = 1
+  @State private var visibleLimit = PhoneSMSPage<SMSNotification>.size
 
-  private var incomingPage: PhoneSMSPage<SMSNotification> {
-    PhoneSMSPage(inbox.messages, query: query, page: page) {
+  private var incomingMatches: [SMSNotification] {
+    PhoneSMSPage(inbox.messages, query: query, page: 1) {
       [$0.sender, $0.displaySender, $0.content, $0.module_id, runtime.moduleName(for: $0.module_id)]
-    }
+    }.matches
   }
-  private var outgoingPage: PhoneSMSPage<PhoneSMSOutbox.Entry> {
-    PhoneSMSPage(outbox.visibleEntries, query: query, page: page) {
+  private var outgoingMatches: [PhoneSMSOutbox.Entry] {
+    PhoneSMSPage(outbox.visibleEntries, query: query, page: 1) {
       [$0.request.phone, $0.request.message, $0.request.module_id,
        runtime.moduleName(for: $0.request.module_id), $0.summary]
-    }
+    }.matches
   }
-  private var draftsPage: PhoneSMSPage<PhoneSMSOutbox.SavedDraft> {
-    PhoneSMSPage(outbox.draftEntries, query: query, page: page) {
+  private var draftMatches: [PhoneSMSOutbox.SavedDraft] {
+    PhoneSMSPage(outbox.draftEntries, query: query, page: 1) {
       [$0.content.phone, $0.content.message, $0.content.module, runtime.moduleName(for: $0.content.module)]
-    }
+    }.matches
   }
   private var matchCount: Int {
     switch folder {
-    case .inbox: return incomingPage.matches.count
-    case .outgoing: return outgoingPage.matches.count
-    case .drafts: return draftsPage.matches.count
+    case .inbox: return incomingMatches.count
+    case .outgoing: return outgoingMatches.count
+    case .drafts: return draftMatches.count
     }
   }
-  private var pageCount: Int {
-    switch folder {
-    case .inbox: return incomingPage.count
-    case .outgoing: return outgoingPage.count
-    case .drafts: return draftsPage.count
-    }
-  }
-  private var currentPage: Int { min(page, pageCount) }
+  private var visibleIncoming: [SMSNotification] { Array(incomingMatches.prefix(visibleLimit)) }
+  private var visibleOutgoing: [PhoneSMSOutbox.Entry] { Array(outgoingMatches.prefix(visibleLimit)) }
+  private var visibleDrafts: [PhoneSMSOutbox.SavedDraft] { Array(draftMatches.prefix(visibleLimit)) }
+  private var canLoadMore: Bool { visibleLimit < matchCount }
 
   var body: some View {
-    ScrollViewReader { proxy in
-      List {
-        Group {
-          HStack {
-            Text("短信").font(.system(size: 24, weight: .heavy)).accessibilityAddTraits(.isHeader)
-            Spacer()
-            Button {
-              if outbox.startDraft(module: runtime.selectedModule) { composing = true }
-            } label: { Label("新短信", systemImage: "square.and.pencil") }
-              .disabled(!outbox.ready)
-          }.id("sms-list-top")
-          Picker("短信列表", selection: Binding(get: { folder }, set: { folder = $0; query = ""; page = 1 })) {
-            ForEach(Folder.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-          }.pickerStyle(.segmented)
-          HStack {
-            Image(systemName: "magnifyingglass").foregroundStyle(PhoneTheme.secondary)
-            TextField("搜索号码、正文或线路", text: Binding(get: { query }, set: { query = $0; page = 1 }))
-              .textInputAutocapitalization(.never).autocorrectionDisabled()
-              .submitLabel(.search)
-            if !query.isEmpty {
-              Button { query = ""; page = 1 } label: { Image(systemName: "xmark.circle.fill") }
-                .accessibilityLabel("清除搜索").buttonStyle(.borderless)
-            }
-          }.padding(12).phoneGlass(radius: 14)
-          if !outbox.error.isEmpty { Text(outbox.error).font(.caption).foregroundStyle(PhoneTheme.red) }
-          if matchCount == 0 && !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            EmptyPhoneState(icon: "magnifyingglass", title: "没有匹配的短信", message: "试试其他号码、正文或线路关键词")
+    List {
+      Group {
+        HStack {
+          Text("短信").font(.title2.weight(.heavy)).fontDesign(.rounded).accessibilityAddTraits(.isHeader)
+          Spacer()
+          Button {
+            if outbox.startDraft(module: runtime.selectedModule) { composing = true }
+          } label: { Label("新短信", systemImage: "square.and.pencil") }
+            .disabled(!outbox.ready)
+        }
+        Picker("短信列表", selection: Binding(get: { folder }, set: { folder = $0; query = ""; visibleLimit = PhoneSMSPage<SMSNotification>.size })) {
+          ForEach(Folder.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        }.pickerStyle(.segmented)
+        HStack {
+          Image(systemName: "magnifyingglass").foregroundStyle(PhoneTheme.secondary)
+          TextField("搜索号码、正文或线路", text: Binding(get: { query }, set: { query = $0; visibleLimit = PhoneSMSPage<SMSNotification>.size }))
+            .textInputAutocapitalization(.never).autocorrectionDisabled()
+            .submitLabel(.search)
+          if !query.isEmpty {
+            Button { query = ""; visibleLimit = PhoneSMSPage<SMSNotification>.size } label: { Image(systemName: "xmark.circle.fill") }
+              .accessibilityLabel("清除搜索").buttonStyle(.borderless)
           }
-          switch folder {
-          case .outgoing:
-            PhoneSMSOutgoingList(runtime: runtime, entries: outgoingPage.items) { composing = true }
-          case .drafts:
-            draftRows
-          case .inbox:
-            inboxRows
-          }
-          HStack {
-            Button("上一页") { page = currentPage - 1 }.disabled(currentPage <= 1)
-            Spacer()
-            Text("第 \(currentPage)/\(pageCount) 页 · 共 \(matchCount) 条")
-              .font(.caption).foregroundStyle(PhoneTheme.secondary)
-            Spacer()
-            Button("下一页") { page = currentPage + 1 }.disabled(currentPage >= pageCount)
-          }.buttonStyle(.borderless).padding(.vertical, 8)
-        }.listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
-          .listRowSeparator(.hidden)
-          .listRowBackground(Color.clear)
-      }.listStyle(.plain).scrollContentBackground(.hidden)
-        .scrollDismissesKeyboard(.interactively)
-        .onChange(of: page) { _, _ in proxy.scrollTo("sms-list-top", anchor: .top) }
-    }.sheet(isPresented: $composing) {
-      PhoneSMSComposeView(runtime: runtime, saved: { folder = .drafts; query = ""; page = 1 }) {
-        folder = .outgoing; query = ""; page = 1
-      }
-    }.onChange(of: pageCount) { _, count in page = min(page, count) }
-      .onChange(of: inbox.openedNotification, initial: true) { _, value in
+        }.padding(12).phoneGlass(radius: 14)
+        if !outbox.error.isEmpty { Text(outbox.error).font(.caption).foregroundStyle(PhoneTheme.red) }
+        if matchCount == 0 && !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          EmptyPhoneState(icon: "magnifyingglass", title: "没有匹配的短信", message: "试试其他号码、正文或线路关键词")
+        }
+        switch folder {
+        case .outgoing:
+          PhoneSMSOutgoingList(runtime: runtime, entries: visibleOutgoing) { composing = true }
+        case .drafts:
+          draftRows
+        case .inbox:
+          inboxRows
+        }
+        if canLoadMore {
+          Button {
+            visibleLimit += PhoneSMSPage<SMSNotification>.size
+          } label: {
+            Text("加载更多").font(.system(size: 14, weight: .semibold)).foregroundStyle(PhoneTheme.violet)
+              .frame(maxWidth: .infinity).padding(.vertical, 12)
+              .background(PhoneTheme.violetSoft, in: Capsule())
+          }.buttonStyle(PhonePressStyle()).padding(.vertical, 4)
+          Text("已显示 \(min(visibleLimit, matchCount)) / \(matchCount) 条")
+            .font(.caption).foregroundStyle(PhoneTheme.secondary).frame(maxWidth: .infinity)
+        } else if matchCount > 0 {
+          Text("共 \(matchCount) 条").font(.caption).foregroundStyle(PhoneTheme.secondary)
+            .frame(maxWidth: .infinity).padding(.vertical, 4)
+        }
+      }.listRowInsets(PhoneLayout.listRowInsets)
+        .listRowSeparator(.hidden)
+        .listRowBackground(Color.clear)
+    }.listStyle(.plain).scrollContentBackground(.hidden)
+      .scrollDismissesKeyboard(.interactively)
+      .sheet(isPresented: $composing) {
+        PhoneSMSComposeView(runtime: runtime, saved: { folder = .drafts; query = ""; visibleLimit = PhoneSMSPage<SMSNotification>.size }) {
+          folder = .outgoing; query = ""; visibleLimit = PhoneSMSPage<SMSNotification>.size
+        }
+      }.onChange(of: inbox.openedNotification, initial: true) { _, value in
         if let value {
           folder = .inbox; query = ""
-          page = (inbox.messages.firstIndex(where: { $0.id == value }) ?? 0) / PhoneSMSPage<SMSNotification>.size + 1
+          if let index = inbox.messages.firstIndex(where: { $0.id == value }) {
+            visibleLimit = max(PhoneSMSPage<SMSNotification>.size, index + 1)
+          }
         }
       }.confirmationDialog("清除本机短信通知记录？", isPresented: $clearing, titleVisibility: .visible) {
         Button("清除记录", role: .destructive) { inbox.clear() }
@@ -343,9 +344,13 @@ struct PhoneSMSView: View {
   @ViewBuilder private var inboxRows: some View {
     Text(inbox.status).font(.caption).foregroundStyle(PhoneTheme.secondary)
     if inbox.messages.isEmpty {
-      EmptyPhoneState(icon: "message", title: "暂无短信通知", message: "Hub 开启该 SIM 的 APP 接听后，新短信将自动通知到这里")
+      EmptyPhoneState(
+        icon: "message",
+        title: "暂无短信通知",
+        message: "这里是推送到本机的短信，与 Web 管理页模块收件箱不是同一列表。Hub 将该线路设为「推送到 iPhone」后，新短信会出现在这里。"
+      )
     }
-    ForEach(incomingPage.items) { message in
+    ForEach(visibleIncoming) { message in
       VStack(alignment: .leading, spacing: 8) {
         HStack {
           Text(message.displaySender).font(.headline)
@@ -368,15 +373,21 @@ struct PhoneSMSView: View {
     }
     Button("清除本机短信通知记录", role: .destructive) { clearing = true }
       .font(.caption).padding(.vertical, 8)
-    Text("显示本机最近 500 条短信通知，左划可删除本机记录；Hub 上的短信不受影响。")
+    Text("显示本机最近 500 条短信通知，左划可删除本机记录；Hub / Web 收件箱不受影响。")
       .font(.caption2).foregroundStyle(PhoneTheme.secondary)
   }
 
   @ViewBuilder private var draftRows: some View {
     if outbox.draftEntries.isEmpty {
-      EmptyPhoneState(icon: "doc.text", title: "暂无草稿", message: "保存的草稿会显示在这里，点击即可继续编辑")
+      EmptyPhoneState(
+        icon: "doc.text",
+        title: "暂无草稿",
+        message: "保存的草稿会显示在这里，点击即可继续编辑",
+        actionTitle: outbox.ready ? "写新短信" : nil,
+        action: outbox.ready ? { if outbox.startDraft(module: runtime.selectedModule) { composing = true } } : nil
+      )
     }
-    ForEach(draftsPage.items) { entry in
+    ForEach(visibleDrafts) { entry in
       Button {
         if outbox.restoreDraft(entry.id) { composing = true }
       } label: {

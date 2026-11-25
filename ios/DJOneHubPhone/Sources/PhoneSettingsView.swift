@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct PhoneSettingsView: View {
   @ObservedObject var runtime: PhoneRuntime
+  @ObservedObject private var inbox = PhoneSMSInbox.shared
   @Environment(\.openURL) private var openURL
   var clearHistory: () -> Void
   @State private var scanning = false
@@ -11,9 +12,27 @@ struct PhoneSettingsView: View {
   @State private var diagnostics = false
   @State private var copied = false
   @State private var pushChanging = false
+  @AppStorage("phoneAppearance") private var appearance = PhoneAppearance.light.rawValue
 
   private var pairingDisabled: Bool {
     runtime.paired || runtime.working || runtime.online || runtime.callUUID != nil
+  }
+
+  private var pairing: PhonePairingPresentation {
+    PhonePairingPresentation(paired: runtime.paired, online: runtime.online, identityReady: runtime.identityReady)
+  }
+
+  private var notificationDenied: Bool {
+    inbox.status.contains("未获系统授权") || inbox.status.contains("系统通知设置")
+  }
+
+  private var pairingFailed: Bool {
+    runtime.status.contains("配对失败") || runtime.status.contains("无法读取配对")
+  }
+
+  private var connectionFailed: Bool {
+    runtime.paired && runtime.identityReady && !runtime.online && !runtime.working
+      && (runtime.status.contains("连接失败") || runtime.status.contains("无法读取本机凭据"))
   }
 
   var body: some View {
@@ -21,6 +40,51 @@ struct PhoneSettingsView: View {
       VStack(spacing: 12) {
         PageHeading(title: "设置", subtitle: "连接、配对与通话偏好")
         connectionCard
+
+        if pairingFailed {
+          PhoneActionBanner(
+            title: "配对失败",
+            message: runtime.status,
+            buttonTitle: "重新扫描配对码",
+            action: { scanning = true }
+          )
+        } else if !runtime.identityReady && runtime.paired {
+          PhoneActionBanner(
+            title: "凭据异常",
+            message: runtime.status.isEmpty
+              ? "配对凭据不完整。请先在 Hub/Relay 撤销旧身份，再清理本机凭据后重新配对。"
+              : runtime.status,
+            buttonTitle: "清理本机凭据",
+            action: { forgetting = true }
+          )
+        } else if connectionFailed {
+          PhoneActionBanner(
+            title: "连接失败",
+            message: connectionFailureReason,
+            buttonTitle: runtime.microphoneDenied ? "打开系统设置允许麦克风" : "重新连接",
+            tint: PhoneTheme.amber,
+            soft: PhoneTheme.amberSoft,
+            action: {
+              if runtime.microphoneDenied, let url = URL(string: UIApplication.openSettingsURLString) {
+                openURL(url)
+              } else {
+                Task { await runtime.retryForegroundConnection() }
+              }
+            }
+          )
+        }
+
+        if notificationDenied {
+          PhoneActionBanner(
+            title: "通知权限未开启",
+            message: "短信推送与部分来电提醒需要系统通知。请在 iPhone 设置中允许 DJOneHub Phone 通知。",
+            buttonTitle: "打开系统设置",
+            action: {
+              if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
+            }
+          )
+        }
+
         SectionCaption(title: "配对与设备")
         VStack(spacing: 0) {
           Button { scanning = true } label: {
@@ -64,9 +128,21 @@ struct PhoneSettingsView: View {
           }
           Divider().overlay(.white.opacity(0.7))
           VStack(alignment: .leading, spacing: 0) {
-            SettingsRow(icon: "terminal", title: "默认拨号线路", subtitle: "拨号时优先使用的模块", color: PhoneTheme.green, chevron: false)
+            SettingsRow(icon: "terminal", title: "默认拨号线路",
+                        subtitle: "对应 Hub「当前模块」，拨号时优先使用", color: PhoneTheme.green, chevron: false)
             LineMenu(runtime: runtime).padding(.leading, 54).padding(.bottom, 14)
           }
+        }.padding(.horizontal, 14).phoneGlass()
+
+        SectionCaption(title: "外观")
+        VStack(spacing: 0) {
+          SettingsRow(icon: "circle.lefthalf.filled", title: "外观",
+                      subtitle: "暖阳色板以浅色为主；也可跟随系统", chevron: false)
+          Picker("外观", selection: $appearance) {
+            ForEach(PhoneAppearance.allCases) { option in
+              Text(option.title).tag(option.rawValue)
+            }
+          }.pickerStyle(.segmented).padding(.leading, 54).padding(.trailing, 4).padding(.bottom, 14)
         }.padding(.horizontal, 14).phoneGlass()
 
         SectionCaption(title: "数据与支持")
@@ -79,11 +155,46 @@ struct PhoneSettingsView: View {
             SettingsRow(icon: "info.circle", title: "联调诊断", subtitle: "查看本次通话的调试日志", color: .blue)
           }
         }.padding(.horizontal, 14).phoneGlass().buttonStyle(PhonePressStyle())
-        Text("可通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。\nHub 开启 SIM 的 APP 接听后，短信通知自动接入 APP，Bark 提示暂停；请允许系统通知。\n后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
-          .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center).lineSpacing(4).padding(.top, 4)
+
+        SectionCaption(title: "线路接听")
+        VStack(alignment: .leading, spacing: 10) {
+          if runtime.modules.isEmpty {
+            Text("配对并授权线路后，这里按线路显示接听方式。")
+              .font(.system(size: 12)).foregroundStyle(PhoneTheme.secondary)
+          } else {
+            ForEach(runtime.modules, id: \.self) { id in
+              let route = runtime.lineRoute(for: id)
+              HStack(spacing: 10) {
+                Text(runtime.moduleName(for: id))
+                  .font(.system(size: 14, weight: .semibold))
+                  .foregroundStyle(PhoneTheme.ink)
+                  .lineLimit(1)
+                Spacer(minLength: 0)
+                if let title = route.badgeTitle ?? route.shortTitle {
+                  LineRouteBadge(title: title, route: route)
+                } else {
+                  Text("以 Hub 为准")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PhoneTheme.muted)
+                }
+              }
+              .padding(.vertical, 4)
+              if id != runtime.modules.last {
+                Divider().overlay(.white.opacity(0.7))
+              }
+            }
+          }
+          Text(lineRouteLegend)
+            .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }.padding(14).phoneGlass()
+
+        Text("可通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。\n某线路在 Hub 开启 APP 接听（\(PhoneTheme.routePhone)）后，该线路短信通知接入本机，Bark 提示暂停；请允许系统通知。\n后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
+          .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center).lineSpacing(4)
+          .padding(.top, 4)
         Text("DJOneHub Phone · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
           .font(.system(size: 11)).foregroundStyle(PhoneTheme.muted)
-      }.padding(.horizontal, 22).padding(.bottom, 24)
+      }.padding(.horizontal, PhoneLayout.contentInset).padding(.bottom, 24)
     }.scrollIndicators(.hidden)
       .sheet(isPresented: $scanning) { PairingScanner(runtime: runtime).tint(PhoneTheme.violet) }
       .sheet(isPresented: $diagnostics) { diagnosticsView }
@@ -102,24 +213,33 @@ struct PhoneSettingsView: View {
       .onChange(of: runtime.fingerprint) { _, _ in copied = false }
   }
 
+  private var connectionFailureReason: String {
+    if runtime.microphoneDenied { return "麦克风权限被拒绝，无法建立通话连接。" }
+    if runtime.foregroundPaused { return "前台连接已暂停。可恢复自动连接，或依赖后台来电推送。" }
+    if runtime.status.contains("连接失败") { return "网络或 Relay 不可用。可重试，或检查配对与 Hub 在线状态。" }
+    return runtime.status
+  }
+
   private var connectionCard: some View {
     VStack(spacing: 14) {
       HStack(spacing: 12) {
         Image(systemName: "phone.fill").font(.system(size: 24)).frame(width: 46, height: 46)
           .background(.white.opacity(0.22), in: RoundedRectangle(cornerRadius: 16))
         VStack(alignment: .leading, spacing: 4) {
-          Text(runtime.online ? "已配对 · 在线" : runtime.paired ? "已配对 · 离线" : "尚未配对")
+          Text(pairing.title)
             .font(.system(size: 17, weight: .heavy))
-          Text(runtime.status).font(.system(size: 12)).opacity(0.9).fixedSize(horizontal: false, vertical: true)
+            .accessibilityValue(pairing.shortValue)
+          Text(connectionDetail).font(.system(size: 12)).opacity(0.9).fixedSize(horizontal: false, vertical: true)
           if !runtime.installation.isEmpty {
             Text("安装 ID：\(runtime.installation)").font(.system(size: 11)).opacity(0.85)
               .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
           }
         }.frame(maxWidth: .infinity, alignment: .leading)
-        if runtime.working { ProgressView().tint(.white) }
+        if runtime.working { ProgressView().tint(.white).accessibilityLabel("正在连接") }
         else {
-          Circle().fill(runtime.online ? PhoneTheme.green : .white.opacity(0.4)).frame(width: 10, height: 10)
+          Circle().fill(pairing.color.opacity(runtime.online ? 1 : 0.85)).frame(width: 10, height: 10)
             .padding(4).background(.white.opacity(0.15), in: Circle())
+            .accessibilityHidden(true)
         }
       }.foregroundStyle(.white)
       Button {
@@ -138,6 +258,22 @@ struct PhoneSettingsView: View {
         .font(.system(size: 11)).foregroundStyle(.white.opacity(0.9)).multilineTextAlignment(.center)
     }.padding(18).background(PhoneTheme.connection, in: RoundedRectangle(cornerRadius: 28))
       .shadow(color: PhoneTheme.shadow.opacity(0.14), radius: 12, y: 8)
+      .accessibilityElement(children: .contain)
+  }
+
+  private var connectionDetail: String {
+    if runtime.working { return "正在连接…" }
+    if pairing == .credentialError { return runtime.status }
+    if !runtime.status.isEmpty { return runtime.status }
+    return pairing.title
+  }
+
+  private var lineRouteLegend: String {
+    let knownAI = runtime.modules.contains { runtime.lineRoute(for: $0) == .ai }
+    if knownAI {
+      return "仅启用 Voice Agent 的线路显示「\(PhoneTheme.routeAI)」且不会通知本机；其余走「\(PhoneTheme.routePhone)」/「\(PhoneTheme.routeApp)」。仅此线路由 AI 接听，其余走 App。"
+    }
+    return "接听方式按线路在 Hub 配置。本机已确认可用来电的线路显示「\(PhoneTheme.routePhone)」；尚未同步到的线路显示「以 Hub 为准」，不会用全局「AI 接听中」误标全部线路。"
   }
 
   private var diagnosticsView: some View {
@@ -147,16 +283,17 @@ struct PhoneSettingsView: View {
         ScrollView {
           if runtime.callDiagnostics.isEmpty {
             EmptyPhoneState(icon: "text.alignleft", title: "暂无诊断日志", message: "通话开始后，这里会显示本次联调信息。")
-              .padding(22)
+              .padding(PhoneLayout.contentInset)
           } else {
             Text(runtime.callDiagnostics.joined(separator: "\n"))
               .font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading).padding(18).phoneGlass().padding(22)
+              .frame(maxWidth: .infinity, alignment: .leading).padding(18).phoneGlass()
+              .padding(PhoneLayout.contentInset)
           }
         }
       }.navigationTitle("联调诊断").navigationBarTitleDisplayMode(.inline)
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { diagnostics = false } } }
-    }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).preferredColorScheme(.light)
+    }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).phonePreferredColorScheme(appearance)
   }
 }
 

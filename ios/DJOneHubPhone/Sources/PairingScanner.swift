@@ -7,6 +7,7 @@ struct PairingScanner: View {
   @ObservedObject var runtime: PhoneRuntime
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var phase
+  @AppStorage("phoneAppearance") private var appearance = PhoneAppearance.light.rawValue
   @State private var permitted = false
   @State private var message = "正在请求相机权限"
   @State private var data: Data?
@@ -47,7 +48,7 @@ struct PairingScanner: View {
       .navigationTitle("扫描 Hub 配对码").navigationBarTitleDisplayMode(.inline)
       .toolbar { Button("取消") { dismiss() }.disabled(runtime.working) }
     }
-    .preferredColorScheme(.light)
+    .phonePreferredColorScheme(appearance)
     .interactiveDismissDisabled(runtime.working)
     .task {
       guard DataScannerViewController.isSupported else {

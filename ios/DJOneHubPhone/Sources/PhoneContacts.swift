@@ -110,11 +110,13 @@ struct PhoneContactsView: View {
   @ObservedObject var runtime: PhoneRuntime
   @ObservedObject var contacts: PhoneContactsStore
   var dial: (String, String?) -> Void
+  var onBack: (() -> Void)? = nil
   @State private var query = ""
   @State private var editing: PhoneContact?
   @State private var adding = false
   @State private var deleting: PhoneContact?
   var allowsDial = true
+  @AppStorage("phoneAppearance") private var appearance = PhoneAppearance.light.rawValue
 
   private var all: [PhoneContact] { contacts.all(history: runtime.history) }
   private var filtered: [PhoneContact] {
@@ -125,9 +127,14 @@ struct PhoneContactsView: View {
   var body: some View {
     List {
       Group {
-        HStack {
+        HStack(alignment: .top, spacing: 10) {
+          if let onBack {
+            RoundIconButton(icon: "chevron.left", label: "返回", size: 40, action: onBack)
+              .padding(.top, 14)
+          }
           PageHeading(title: "联系人", subtitle: "给家人打个电话吧")
           RoundIconButton(icon: "plus", label: "添加联系人") { adding = true }
+            .padding(.top, 14)
         }
         HStack(spacing: 9) {
           Image(systemName: "magnifyingglass").foregroundStyle(PhoneTheme.muted)
@@ -163,8 +170,13 @@ struct PhoneContactsView: View {
 
         SectionCaption(title: "全部联系人")
         if filtered.isEmpty {
-          EmptyPhoneState(icon: "person.crop.circle.badge.plus", title: all.isEmpty ? "还没有联系人" : "没有匹配的联系人",
-                          message: all.isEmpty ? "点击右上角添加家人，通话记录中的号码也会显示在这里。" : "试试其他姓名或号码")
+          EmptyPhoneState(
+            icon: "person.crop.circle.badge.plus",
+            title: all.isEmpty ? "还没有联系人" : "没有匹配的联系人",
+            message: all.isEmpty ? "添加家人后可从这里一键拨号；通话记录中的号码也会出现在这里。" : "试试其他姓名或号码",
+            actionTitle: all.isEmpty ? "添加联系人" : nil,
+            action: all.isEmpty ? { adding = true } : nil
+          )
         }
         ForEach(filtered) { contact in
           HStack(spacing: 12) {
@@ -197,7 +209,7 @@ struct PhoneContactsView: View {
         }
         if !contacts.error.isEmpty { Text(contacts.error).font(.caption).foregroundStyle(PhoneTheme.red) }
         Text("联系人仅保存在此 iPhone").font(.caption).foregroundStyle(PhoneTheme.secondary).padding(.vertical, 10)
-      }.listRowInsets(EdgeInsets(top: 6, leading: 22, bottom: 6, trailing: 22))
+      }.listRowInsets(PhoneLayout.listRowInsets)
         .listRowSeparator(.hidden)
         .listRowBackground(Color.clear)
     }.listStyle(.plain).scrollContentBackground(.hidden)
@@ -217,6 +229,7 @@ private struct ContactEditor: View {
   @ObservedObject var contacts: PhoneContactsStore
   var contact: PhoneContact?
   @Environment(\.dismiss) private var dismiss
+  @AppStorage("phoneAppearance") private var appearance = PhoneAppearance.light.rawValue
   @State private var name = ""
   @State private var number = ""
   @State private var favorite = true
@@ -256,7 +269,7 @@ private struct ContactEditor: View {
             }.disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || name.count > 64 || PhoneCall.dialNumber(number) == nil)
           }
         }
-    }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).preferredColorScheme(.light)
+    }.tint(PhoneTheme.violet).foregroundStyle(PhoneTheme.ink).phonePreferredColorScheme(appearance)
       .confirmationDialog("删除联系人？", isPresented: $deleting, titleVisibility: .visible) {
         if let contact {
           Button("删除\(contact.name)", role: .destructive) { if contacts.delete(contact.number) { dismiss() } }
