@@ -160,16 +160,69 @@ function renderProfiles() {
   }
   if (!snapshot.profiles.length) container.append(node('p', '暂无本机配置。创建新申请，或导入已存在的旧钥匙串配置。'));
 }
+function pairingStateLabel(phone) {
+  if (phone?.revoked) return { text: '凭据异常', tone: 'bad' };
+  if (phone?.signal_state === 'online') return { text: '在线', tone: 'good' };
+  if (phone?.push_registered) return { text: '已配对离线', tone: 'warn' };
+  return { text: '未配对', tone: 'muted' };
+}
+function updateSetupProgress(data) {
+  const readyProfiles = data.profiles.filter(item => item.status.phase === 'ready').length;
+  const pendingProfiles = data.profiles.filter(item => item.status.phase !== 'ready').length;
+  const hasAnyProfile = data.profiles.length > 0;
+  const connected = Boolean(data.active_profile) && data.connection_state === 'online';
+  const connectedOrSelected = Boolean(data.active_profile);
+  const steps = {
+    register: hasAnyProfile || pendingProfiles > 0 || readyProfiles > 0,
+    authorize: readyProfiles > 0,
+    connect: connectedOrSelected,
+    pair: phones.length > 0 && phones.some(item => !item.revoked),
+    route: false,
+  };
+  const order = ['register', 'authorize', 'connect', 'pair', 'route'];
+  const stepNumbers = { register: '1', authorize: '2', connect: '3', pair: '4', route: '5' };
+  const current = order.find(key => !steps[key]) || null;
+  for (const key of order) {
+    const badge = document.querySelector(`[data-step-badge="${key}"]`);
+    const step = document.querySelector(`.setup-step[data-step="${stepNumbers[key]}"]`);
+    const done = Boolean(steps[key]);
+    const isCurrent = key === current;
+    if (badge) {
+      badge.textContent = done ? '已完成' : (isCurrent ? '进行中' : '待开始');
+      badge.classList.toggle('done', done);
+      badge.classList.toggle('current', isCurrent && !done);
+    }
+    if (step) {
+      step.classList.toggle('done', done);
+      step.classList.toggle('current', isCurrent && !done);
+    }
+    document.querySelectorAll(`[data-feature-state="${key}"]`).forEach(node => {
+      node.textContent = done ? '✓' : '';
+    });
+    document.querySelectorAll(`.feature-button[data-feature="${key}"]`).forEach(node => {
+      node.classList.toggle('done', done);
+    });
+  }
+  document.querySelectorAll('[data-feature-state="phones"]').forEach(node => {
+    node.textContent = steps.pair ? '✓' : '';
+  });
+  document.querySelectorAll('.feature-button[data-feature="phones"]').forEach(node => {
+    node.classList.toggle('done', steps.pair);
+  });
+  void connected;
+}
 async function refresh() {
   if (!authenticated) return;
   const data = await api('/profiles');
   if (!authenticated) return;
   snapshot = data;
-  $('#overview').textContent = `当前连接：${entry(data.active_profile)?.label || '未连接'} · 信令：${data.connection_state} · 重启选择：${entry(data.autostart_profile)?.label || '无'}${data.native_control_configured ? '' : ' · 尚未启用原生音频控制，请用发行启动器运行'}`;
+  const connectionLabel = data.connection_state === 'online' ? '在线' : (data.active_profile ? '已配对离线' : '未配对');
+  $('#overview').textContent = `当前连接：${entry(data.active_profile)?.label || '未连接'} · 状态：${connectionLabel} · 信令：${data.connection_state} · 重启选择：${entry(data.autostart_profile)?.label || '无'}${data.native_control_configured ? '' : ' · 尚未启用原生音频控制，请用发行启动器运行'}`;
   $('#connection-dot').classList.toggle('online', data.connection_state === 'online');
   $('#module-count').textContent = data.modules.filter(item => item.state === 'ready').length;
   $('#profile-count').textContent = data.profiles.filter(item => item.status.phase === 'ready').length;
   $('#request-count').textContent = data.profiles.filter(item => item.status.phase !== 'ready').length;
+  updateSetupProgress(data);
   const pending = $('#pending-operation'); pending.replaceChildren();
   if (data.pending_job) pending.append(button('查看正在进行的操作', async () => { await waitJob(data.pending_job.id); notice('操作已完成，请核对对应对象。'); }));
   if (changed('profiles', [data.profiles, data.active_profile])) {
@@ -202,10 +255,10 @@ $('#invitations-profile').addEventListener('change', clearInvitations);
 clearPhones(); clearInvitations();
 $('#module-routes').append(node('p', '连接 Mac 配置后，点击“读取模块配置”。'));
 
-async function readPhones() { const profile = $('#phones-profile').value; if (!profile) throw new Error('请选择已登记的 Mac 配置'); const result = await job('/installations', { profile, action: 'list' }); if ($('#phones-profile').value !== profile) return; phones = result.installations; phones.forEach(item => { item.signal_received_at = Date.now(); }); phonesProfile = profile; renderPhones(); notice('手机列表已更新；WSS 连接与后台推送分别显示。'); }
-function renderPhones() { const box = $('#phones'); box.replaceChildren(); for (const item of phones) { const rowProfile = phonesProfile; const row = node('div', undefined, 'phone'); row.append(node('h3', `${item.name || '未命名 iPhone'} · ${item.revoked ? '已撤销' : '授权有效'}`), node('p', item.id, 'mono'), node('p', `配对：${date(item.created_at)} · 最近认证：${date(item.last_authenticated)}`), node('p', phonePresence(item))); row.firstChild.dataset.identityStateId = item.id; const presence = row.lastChild; presence.dataset.presenceId = item.id; row.append(copyButton('复制手机 ID', item.id), copyButton('复制公钥指纹', item.public_key_fingerprint)); for (const id of item.modules) row.append(node('small', moduleLabel(id))); if (!item.revoked) { const label = node('label', '手机备注'), input = node('input'); input.value = item.name || ''; input.maxLength = 128; label.append(input); row.append(label, button('保存手机备注', async () => { await job('/installations', { profile: rowProfile, action: 'rename', id: item.id, name: input.value }); await readPhones(); }), button('撤销此手机', async () => { const refs = await job('/installations', { profile: rowProfile, action: 'preview', id: item.id }); const text = refs.map(ref => `${ref.alias} · ${ref.module}${ref.active ? '（有通话）' : ''}${ref.ai_enabled ? '（AI 接听已启用）' : ''}`).join('\n'); if (!await confirmAction(`撤销 ${item.name || item.id}？\n受影响模块：\n${text || '无当前引用'}\n活动远程通话可能中断；不会自动改成其他手机。`)) return; await job('/installations', { profile: rowProfile, action: 'revoke', id: item.id }); await readPhones(); notice('手机授权已撤销。请重新选择相关模块的目标。'); }, true)); } box.append(row); } if (!phones.length) box.append(node('p', '暂无已配对手机。')); }
+async function readPhones() { const profile = $('#phones-profile').value; if (!profile) throw new Error('请选择已登记的 Mac 配置'); const result = await job('/installations', { profile, action: 'list' }); if ($('#phones-profile').value !== profile) return; phones = result.installations; phones.forEach(item => { item.signal_received_at = Date.now(); }); phonesProfile = profile; renderPhones(); updateSetupProgress(snapshot); notice('手机列表已更新；WSS 连接与后台推送分别显示。'); }
+function renderPhones() { const box = $('#phones'); box.replaceChildren(); for (const item of phones) { const rowProfile = phonesProfile; const row = node('div', undefined, 'phone'); const state = pairingStateLabel(item); row.append(node('h3', `${item.name || '未命名 iPhone'} · ${state.text}`), node('p', item.id, 'mono'), node('p', `配对：${date(item.created_at)} · 最近认证：${date(item.last_authenticated)}`), node('p', phonePresence(item))); row.firstChild.dataset.identityStateId = item.id; const presence = row.lastChild; presence.dataset.presenceId = item.id; row.append(copyButton('复制手机 ID', item.id), copyButton('复制公钥指纹', item.public_key_fingerprint)); for (const id of item.modules) row.append(node('small', moduleLabel(id))); if (!item.revoked) { const label = node('label', '手机备注'), input = node('input'); input.value = item.name || ''; input.maxLength = 128; label.append(input); row.append(label, button('保存手机备注', async () => { await job('/installations', { profile: rowProfile, action: 'rename', id: item.id, name: input.value }); await readPhones(); }), button('撤销此手机', async () => { const refs = await job('/installations', { profile: rowProfile, action: 'preview', id: item.id }); const text = refs.map(ref => `${ref.alias} · ${ref.module}${ref.active ? '（有通话）' : ''}${ref.ai_enabled ? '（AI 接听中）' : ''}`).join('\n'); if (!await confirmAction(`撤销 ${item.name || item.id}？\n受影响模块：\n${text || '无当前引用'}\n活动远程通话可能中断；不会自动改成其他手机。`)) return; await job('/installations', { profile: rowProfile, action: 'revoke', id: item.id }); await readPhones(); notice('手机授权已撤销。请重新选择相关模块的目标。'); }, true)); } box.append(row); } if (!phones.length) box.append(node('p', '暂无已配对手机。')); }
 function phoneOptions(select, items, current) { select.replaceChildren(); const empty = node('option', '请选择有效 iPhone'); empty.value = ''; select.append(empty); for (const phone of items) { phone.signal_received_at = Date.now(); const option = node('option', `${phone.name || '未命名 iPhone'} · ${phone.id.slice(0, 12)}… · ${signalLabel(phone)} · ${phone.push_registered ? '已登记推送' : '未登记推送'}`); option.value = phone.id; select.append(option); } if (current && !items.some(item => item.id === current)) { const invalid = node('option', '原目标已失效 / 不属于此配置，请重新选择'); invalid.value = current; invalid.disabled = true; select.append(invalid); } select.value = current || ''; }
-async function readRoutes() { const profile = snapshot.active_profile; if (!profile) throw new Error('请先连接已登记的 Mac 配置'); const owner = entry(profile); const result = await job('/installations', { profile, action: 'list' }); if (profile !== snapshot.active_profile) throw new Error('当前连接已变化，请重新读取模块配置'); routesProfile = profile; const box = $('#module-routes'); box.replaceChildren(); const scope = owner.status.principal.modules; for (const module of snapshot.modules.filter(module => scope.includes(module.id))) { const row = node('div', undefined, 'route'); row.append(node('h3', moduleLabel(module.id)), link('打开此模块的来电设置', '/?device=' + encodeURIComponent(module.id) + '#calls')); if (module.state !== 'ready') { row.append(node('p', '模块离线，当前不能保存接听设置。')); box.append(row); continue; } const response = await fetch(`/api/devices/${encodeURIComponent(module.id)}/remote-calls/status`); if (!response.ok) { row.append(node('p', '模块不可用，请刷新后重试')); box.append(row); continue; } const state = await response.json(); const config = state.config; const valid = result.installations.filter(phone => !phone.revoked && phone.hub_id === owner.status.principal.id && phone.modules.includes(module.id)); const form = node('form'), enabled = node('input'); enabled.type = 'checkbox'; enabled.checked = config.enabled; const enabledLabel = node('label', undefined, 'check'); enabledLabel.append(enabled, document.createTextNode('启用远程接听')); const phoneLabel = node('label', '目标 iPhone'), select = node('select'); phoneOptions(select, valid, config.target_installation_id); phoneLabel.append(select); const save = node('button', '保存此模块'); save.type = 'submit'; row.append(node('p', state.effective_route === 'agent' ? 'AI 当前已启用；保存远程目标后仍由 AI 接听。' : 'AI 未启用；远程接听按此模块设置触发。')); row.append(node('p', '启用后，此 SIM 的短信通知自动接入 DJ电话通 APP，短信与来电 Bark 自动提示暂停；关闭后恢复原配置。请在 iPhone 上允许 APP 通知。')); form.append(enabledLabel, phoneLabel, save); form.addEventListener('submit', event => { event.preventDefault(); action(save, async () => { if (enabled.checked && !valid.some(item => item.id === select.value)) throw new Error('请选择有效且覆盖此模块的 iPhone'); const candidate = { ...config, enabled: enabled.checked, target_installation_id: valid.some(item => item.id === select.value) ? select.value : '' }; if (snapshot.active_profile !== profile) throw new Error('当前连接已变化，请重新读取模块配置'); await job('/routes', { module: module.id, config: candidate }); notice('此模块设置已保存。AI 接听状态保持当前设置。'); }); }); row.append(form); box.append(row); } }
+async function readRoutes() { const profile = snapshot.active_profile; if (!profile) throw new Error('请先连接已登记的 Mac 配置'); const owner = entry(profile); const result = await job('/installations', { profile, action: 'list' }); if (profile !== snapshot.active_profile) throw new Error('当前连接已变化，请重新读取模块配置'); routesProfile = profile; const box = $('#module-routes'); box.replaceChildren(); const scope = owner.status.principal.modules; for (const module of snapshot.modules.filter(module => scope.includes(module.id))) { const row = node('div', undefined, 'route'); row.append(node('h3', moduleLabel(module.id)), link('打开此模块的来电设置', '/?device=' + encodeURIComponent(module.id) + '#calls')); if (module.state !== 'ready') { row.append(node('p', '模块离线，当前不能保存接听设置。')); box.append(row); continue; } const response = await fetch(`/api/devices/${encodeURIComponent(module.id)}/remote-calls/status`); if (!response.ok) { row.append(node('p', '模块不可用，请刷新后重试')); box.append(row); continue; } const state = await response.json(); const config = state.config; const valid = result.installations.filter(phone => !phone.revoked && phone.hub_id === owner.status.principal.id && phone.modules.includes(module.id)); const form = node('form'), enabled = node('input'); enabled.type = 'checkbox'; enabled.checked = config.enabled; const enabledLabel = node('label', undefined, 'check'); enabledLabel.append(enabled, document.createTextNode('启用远程接听')); const phoneLabel = node('label', '目标 iPhone'), select = node('select'); phoneOptions(select, valid, config.target_installation_id); phoneLabel.append(select); const save = node('button', '保存此模块'); save.type = 'submit'; row.append(node('p', state.effective_route === 'agent' ? '接听路由：AI 接听中（不通知 iPhone）。保存远程目标后仍由 AI 接听。' : (config.enabled ? '接听路由：推送到 iPhone。' : '接听路由：本机人工接听。'))); row.append(node('p', '启用「推送到 iPhone」后，此线路短信通知自动接入 DJ电话通 APP，短信与来电 Bark 自动提示暂停；关闭后恢复原配置。请在 iPhone 上允许 APP 通知。')); form.append(enabledLabel, phoneLabel, save); form.addEventListener('submit', event => { event.preventDefault(); action(save, async () => { if (enabled.checked && !valid.some(item => item.id === select.value)) throw new Error('请选择有效且覆盖此模块的 iPhone'); const candidate = { ...config, enabled: enabled.checked, target_installation_id: valid.some(item => item.id === select.value) ? select.value : '' }; if (snapshot.active_profile !== profile) throw new Error('当前连接已变化，请重新读取模块配置'); await job('/routes', { module: module.id, config: candidate }); notice('此模块设置已保存。AI 接听状态保持当前设置。'); }); }); row.append(form); box.append(row); } }
 function renderDelivery(value, profile) { clearDelivery(); delivery = value; deliveryProfile = profile; invitationState = 'pending'; $('#pairing-delivery').hidden = false; $('#pairing-state').textContent = `邀请：${value.grant.id}，等待该邀请的手机登记结果`; $('#pairing-qr').hidden = !value.qr_image; if (value.qr_image) $('#pairing-qr').src = value.qr_image; else $('#pairing-state').textContent += '。二维码暂不可用，请减少此次模块数，或下载文件导入手机。'; $('#pairing-download').disabled = false; $('#pairing-cancel').disabled = false; $('#pairing-apply').hidden = true; updateExpiry(); }
 function updateExpiry() { if (!delivery) return; const remaining = Math.max(0, Math.ceil((new Date(delivery.grant.expires_at).getTime() - Date.now()) / 1000)); $('#pairing-expiry').textContent = `有效期至 ${date(delivery.grant.expires_at)} · 剩余 ${remaining} 秒`; if (!remaining && invitationState === 'pending') { invitationState = 'expired'; $('#pairing-state').textContent = '邀请已过期，请重新生成。'; $('#pairing-qr').removeAttribute('src'); $('#pairing-qr').hidden = true; delivery.grant.secret = ''; $('#pairing-download').disabled = true; $('#pairing-cancel').disabled = true; } }
 async function checkPairing(silent = false) { if (!delivery) throw new Error('没有可查询的邀请'); const id = delivery.grant.id, profile = deliveryProfile; const state = await job(`/pairings/${encodeURIComponent(id)}/actions`, { profile, action: 'status' }, silent); if (!delivery || delivery.grant.id !== id) return; invitationState = state.state; const labels = { pending: '等待扫码确认', consumed: '配对完成', revoked: '已撤销', expired: '已过期' }; $('#pairing-state').textContent = `${labels[state.state] || state.state}${state.identity_id ? ' · 本次实际登记：' + state.identity_id : ''}`; if (state.state !== 'pending') { $('#pairing-qr').removeAttribute('src'); $('#pairing-qr').hidden = true; delivery.grant.secret = ''; $('#pairing-download').disabled = true; $('#pairing-cancel').disabled = true; } if (state.state === 'consumed' && state.identity_id) { pairedIdentity = state.identity_id; $('#pairing-apply').hidden = false; } }
