@@ -877,8 +877,8 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
     saveHistory()
     callDisplay = number
     callModule = selectedModule
-    // Outbound via this phone ⇒ this line is routed to App, not Voice Agent.
-    noteLineRoute(selectedModule, .phone)
+    // Do not infer `.phone` here: Hub may reject with dial_not_allowed (AI / other target).
+    // Route is noted only after CallEffect.dialAccepted.
     callPhase = "dialing"
     outgoing = true
     muted = false
@@ -950,6 +950,9 @@ final class PhoneRuntime: NSObject, ObservableObject, @preconcurrency CXProvider
   }
   private func handle(_ effect: CallEffect) {
     switch effect {
+    case .dialAccepted(let b):
+      // Hub confirmed outbound dial on this installation ⇒ this line is App/human.
+      noteLineRoute(b.moduleID, .phone)
     case .reportIncoming(let b, let display):
       let caller = IncomingCaller(display: display)
       outgoing = false
