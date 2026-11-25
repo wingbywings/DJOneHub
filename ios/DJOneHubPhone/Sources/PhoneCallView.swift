@@ -84,7 +84,11 @@ struct PhoneCallScreen: View {
         AppBackground()
         ScrollView {
           VStack(spacing: 0) {
-            LineChip(title: "\(incoming ? "来电 · " : "")\(call.module.isEmpty ? "DJOneHub" : call.module)")
+            // Call reached this iPhone ⇒ this line is App/human route, never global AI.
+            LineChip(
+              title: "\(incoming ? "来电 · " : "")\(call.module.isEmpty ? "DJOneHub" : call.module)",
+              route: call.module.isEmpty ? .unknown : .phone
+            )
               .padding(.top, 16)
             PhoneAvatar(name: name, size: keyboard ? 72 : incoming ? 118 : 104).padding(.top, keyboard ? 18 : 30)
             Text(name).font(.system(size: incoming ? 30 : 27, weight: .heavy, design: .rounded))

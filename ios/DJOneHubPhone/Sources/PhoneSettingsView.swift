@@ -156,14 +156,42 @@ struct PhoneSettingsView: View {
           }
         }.padding(.horizontal, 14).phoneGlass().buttonStyle(PhonePressStyle())
 
-        VStack(spacing: 8) {
-          HStack(spacing: 8) {
-            routeBadge(PhoneTheme.routeAI, soft: PhoneTheme.violetSoft, ink: PhoneTheme.violet)
-            routeBadge(PhoneTheme.routePhone, soft: PhoneTheme.greenSoft, ink: PhoneTheme.green)
+        SectionCaption(title: "线路接听")
+        VStack(alignment: .leading, spacing: 10) {
+          if runtime.modules.isEmpty {
+            Text("配对并授权线路后，这里按线路显示接听方式。")
+              .font(.system(size: 12)).foregroundStyle(PhoneTheme.secondary)
+          } else {
+            ForEach(runtime.modules, id: \.self) { id in
+              let route = runtime.lineRoute(for: id)
+              HStack(spacing: 10) {
+                Text(runtime.moduleName(for: id))
+                  .font(.system(size: 14, weight: .semibold))
+                  .foregroundStyle(PhoneTheme.ink)
+                  .lineLimit(1)
+                Spacer(minLength: 0)
+                if let title = route.badgeTitle ?? route.shortTitle {
+                  LineRouteBadge(title: title, route: route)
+                } else {
+                  Text("以 Hub 为准")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(PhoneTheme.muted)
+                }
+              }
+              .padding(.vertical, 4)
+              if id != runtime.modules.last {
+                Divider().overlay(.white.opacity(0.7))
+              }
+            }
           }
-          Text("接听路由与 Web 一致：\(PhoneTheme.routeAI) 时不会通知本机；\(PhoneTheme.routePhone) 时请保持配对或开启后台来电。\n可通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。\nHub 开启 SIM 的 APP 接听（\(PhoneTheme.routePhone)）后，短信通知自动接入 APP，Bark 提示暂停；请允许系统通知。\n后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
-            .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center).lineSpacing(4)
-        }.padding(.top, 4)
+          Text(lineRouteLegend)
+            .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }.padding(14).phoneGlass()
+
+        Text("可通过系统通话界面或 App 内通话面板接听、拒接、挂断和静音。\n某线路在 Hub 开启 APP 接听（\(PhoneTheme.routePhone)）后，该线路短信通知接入本机，Bark 提示暂停；请允许系统通知。\n后台来电需要正确的 App 签名和 Relay APNs 配置；跨网络通话需要 TURN 中继。")
+          .font(.system(size: 11)).foregroundStyle(PhoneTheme.secondary).multilineTextAlignment(.center).lineSpacing(4)
+          .padding(.top, 4)
         Text("DJOneHub Phone · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0")")
           .font(.system(size: 11)).foregroundStyle(PhoneTheme.muted)
       }.padding(.horizontal, PhoneLayout.contentInset).padding(.bottom, 24)
@@ -240,9 +268,12 @@ struct PhoneSettingsView: View {
     return pairing.title
   }
 
-  private func routeBadge(_ title: String, soft: Color, ink: Color) -> some View {
-    Text(title).font(.system(size: 11, weight: .bold)).foregroundStyle(ink)
-      .padding(.horizontal, 10).padding(.vertical, 5).background(soft, in: Capsule())
+  private var lineRouteLegend: String {
+    let knownAI = runtime.modules.contains { runtime.lineRoute(for: $0) == .ai }
+    if knownAI {
+      return "仅启用 Voice Agent 的线路显示「\(PhoneTheme.routeAI)」且不会通知本机；其余走「\(PhoneTheme.routePhone)」/「\(PhoneTheme.routeApp)」。仅此线路由 AI 接听，其余走 App。"
+    }
+    return "接听方式按线路在 Hub 配置。本机已确认可用来电的线路显示「\(PhoneTheme.routePhone)」；尚未同步到的线路显示「以 Hub 为准」，不会用全局「AI 接听中」误标全部线路。"
   }
 
   private var diagnosticsView: some View {

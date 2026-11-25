@@ -18,12 +18,52 @@ enum PhoneTheme {
   static let decline = gradient(0xFF7E6B, 0xF4445A)
   static let connection = gradient(0x8B6FF0, 0xFF6C8C)
 
-  /// Shared route badge copy with Web management UI.
-  static let routeAI = "AI 接听中"
+  /// Per-line answer-route copy (never imply whole-phone AI).
+  static let routeAI = "本线路 · AI 接听"
+  static let routeAIShort = "AI"
   static let routePhone = "推送到 iPhone"
+  static let routeApp = "App 接听"
 
   static func gradient(_ first: UInt32, _ last: UInt32) -> LinearGradient {
     LinearGradient(colors: [Color(hex: first), Color(hex: last)], startPoint: .topLeading, endPoint: .bottomTrailing)
+  }
+}
+
+/// Answer route is configured per Hub line/module. Missing data stays `.unknown`
+/// so the UI never paints a global “AI 接听中” across every line.
+enum PhoneLineRoute: Equatable {
+  case ai, phone, unknown
+
+  var badgeTitle: String? {
+    switch self {
+    case .ai: return PhoneTheme.routeAI
+    case .phone: return PhoneTheme.routePhone
+    case .unknown: return nil
+    }
+  }
+
+  var shortTitle: String? {
+    switch self {
+    case .ai: return PhoneTheme.routeAIShort
+    case .phone: return PhoneTheme.routeApp
+    case .unknown: return nil
+    }
+  }
+
+  var soft: Color {
+    switch self {
+    case .ai: return PhoneTheme.violetSoft
+    case .phone: return PhoneTheme.greenSoft
+    case .unknown: return PhoneTheme.violetSoft.opacity(0.5)
+    }
+  }
+
+  var ink: Color {
+    switch self {
+    case .ai: return PhoneTheme.violet
+    case .phone: return PhoneTheme.green
+    case .unknown: return PhoneTheme.muted
+    }
   }
 }
 
@@ -164,10 +204,31 @@ struct SectionCaption: View {
 
 struct LineChip: View {
   var title: String
+  var route: PhoneLineRoute = .unknown
   var body: some View {
-    Label(title, systemImage: "terminal")
-      .font(.system(size: 13, weight: .bold)).foregroundStyle(PhoneTheme.violet)
-      .padding(.horizontal, 14).padding(.vertical, 7).background(PhoneTheme.violetSoft, in: Capsule())
+    HStack(spacing: 8) {
+      Label(title, systemImage: "terminal")
+        .font(.system(size: 13, weight: .bold)).foregroundStyle(PhoneTheme.violet)
+        .padding(.horizontal, 14).padding(.vertical, 7).background(PhoneTheme.violetSoft, in: Capsule())
+      if let badge = route.shortTitle ?? route.badgeTitle {
+        LineRouteBadge(title: badge, route: route, compact: true)
+      }
+    }
+  }
+}
+
+struct LineRouteBadge: View {
+  var title: String
+  var route: PhoneLineRoute
+  var compact = false
+  var body: some View {
+    Text(title)
+      .font(.system(size: compact ? 11 : 12, weight: .bold))
+      .foregroundStyle(route.ink)
+      .padding(.horizontal, compact ? 9 : 10)
+      .padding(.vertical, compact ? 4 : 5)
+      .background(route.soft, in: Capsule())
+      .accessibilityLabel(route.badgeTitle ?? title)
   }
 }
 
@@ -175,18 +236,31 @@ struct LineMenu: View {
   @ObservedObject var runtime: PhoneRuntime
   var labelPrefix = "线路"
   var body: some View {
-    Menu {
+    let selectedRoute = runtime.lineRoute(for: runtime.selectedModule)
+    return Menu {
       Picker("选择线路", selection: $runtime.selectedModule) {
-        ForEach(runtime.modules, id: \.self) { id in Text(runtime.moduleName(for: id)).tag(id) }
+        ForEach(runtime.modules, id: \.self) { id in
+          let route = runtime.lineRoute(for: id)
+          if let short = route.shortTitle {
+            Text("\(runtime.moduleName(for: id)) · \(short)").tag(id)
+          } else {
+            Text(runtime.moduleName(for: id)).tag(id)
+          }
+        }
       }
     } label: {
-      HStack(spacing: 6) {
-        Image(systemName: "terminal")
-        Text(runtime.selectedModule.isEmpty ? "暂无可用线路" : "\(labelPrefix)：\(runtime.moduleName(for: runtime.selectedModule))").lineLimit(1)
-        Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
+      HStack(spacing: 8) {
+        HStack(spacing: 6) {
+          Image(systemName: "terminal")
+          Text(runtime.selectedModule.isEmpty ? "暂无可用线路" : "\(labelPrefix)：\(runtime.moduleName(for: runtime.selectedModule))").lineLimit(1)
+          Image(systemName: "chevron.down").font(.system(size: 10, weight: .bold))
+        }
+        .font(.system(size: 13, weight: .bold)).foregroundStyle(PhoneTheme.violet)
+        .padding(.horizontal, 14).padding(.vertical, 8).background(PhoneTheme.violetSoft, in: Capsule())
+        if let short = selectedRoute.shortTitle {
+          LineRouteBadge(title: short, route: selectedRoute, compact: true)
+        }
       }
-      .font(.system(size: 13, weight: .bold)).foregroundStyle(PhoneTheme.violet)
-      .padding(.horizontal, 14).padding(.vertical, 8).background(PhoneTheme.violetSoft, in: Capsule())
     }.disabled(runtime.modules.isEmpty || runtime.callUUID != nil)
       .accessibilityLabel("选择线路（Hub 当前模块）")
   }

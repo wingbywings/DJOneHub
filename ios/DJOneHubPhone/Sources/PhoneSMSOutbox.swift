@@ -294,7 +294,7 @@ struct PhoneSMSComposeView: View {
           .onChange(of: outbox.draft.module) { _, module in
             if runtime.modules.contains(module) { runtime.selectedModule = module }
           }
-          Text("对应 Hub「当前模块」。需设为「\(PhoneTheme.routePhone)」且目标为本机，才能发送。")
+          Text("对应 Hub「当前模块」。需将该线路设为「\(PhoneTheme.routePhone)」且目标为本机，才能发送（与是否启用其它线路的 AI 无关）。")
             .font(.caption).foregroundStyle(.secondary)
         } header: {
           Text("发送线路")
