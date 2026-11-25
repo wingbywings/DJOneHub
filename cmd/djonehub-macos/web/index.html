@@ -232,7 +232,7 @@
 
       <div class="call-group" data-group="routing">
         <h3 class="call-group-title">接听路由（远程 / AI）</h3>
-        <p id="answer-route-badge" class="route-badge" role="status">读取接听路由…</p>
+        <p id="answer-route-badge" class="route-badge" role="status">读取本线路接听路由…</p>
       <details id="remote-settings-panel" class="call-feature-panel">
         <summary class="call-feature-summary">
           <span class="call-feature-icon monitor-icon" aria-hidden="true"></span>
@@ -240,10 +240,10 @@
           <span id="remote-status" class="call-feature-status">展开后读取当前模块设置</span>
         </summary>
         <div class="call-feature-content">
-        <p>启用 AI 时不通知 iPhone。通话过程中不能更改接听路由。</p>
+        <p>仅作用于当前线路：本线路启用 AI 时不通知 iPhone。通话过程中不能更改接听路由。</p>
         <form id="remote-form">
           <fieldset id="remote-fields" class="agent-settings-grid" disabled>
-            <label class="agent-toggle"><input id="remote-enabled" type="checkbox"><span>启用此模块的远程接听（推送到 iPhone）</span></label>
+            <label class="agent-toggle"><input id="remote-enabled" type="checkbox"><span>本线路推送到 iPhone</span></label>
             <label>目标 iPhone<select id="remote-installation"><option value="">先登录远程管理并读取已配对手机</option></select></label>
             <label>响铃超时（秒）<input id="remote-timeout" type="number" min="10" max="90" required value="45"></label>
             <label>来电显示<select id="remote-display"><option value="number">电话号码</option><option value="module">仅模块</option></select></label>
@@ -266,7 +266,7 @@
         <form id="voice-agent-form" class="agent-settings-grid">
           <label class="checkbox-field agent-switch">
             <input id="voice-agent-enabled" type="checkbox">
-            <span><strong>启用 AI 媒体模式</strong><small>关闭后立即回退到本地麦克风和扬声器。启用 AI 时不通知 iPhone。</small></span>
+            <span><strong>本线路启用 AI 媒体模式</strong><small>仅当前线路生效；关闭后回退本地麦克风。启用后本线路不通知 iPhone。</small></span>
           </label>
           <label class="settings-field">
             <span>主 Provider</span>

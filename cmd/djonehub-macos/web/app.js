@@ -412,22 +412,39 @@ function setAnswerRouteBadge({ agentEnabled = false, remoteEnabled = false, reco
   if (!badge) return;
   badge.classList.remove("ai", "iphone", "manual");
   if (recovery) {
-    badge.textContent = "待核对通话";
+    badge.textContent = "本线路 · 待核对通话";
     badge.classList.add("manual");
     return;
   }
   if (agentEnabled) {
-    badge.textContent = "AI 接听中";
+    badge.textContent = "本线路 · AI 接听";
     badge.classList.add("ai");
     return;
   }
   if (remoteEnabled) {
-    badge.textContent = "推送到 iPhone";
+    badge.textContent = "本线路 · 推送到 iPhone";
     badge.classList.add("iphone");
     return;
   }
-  badge.textContent = "本机人工接听";
+  badge.textContent = "本线路 · 本机人工";
   badge.classList.add("manual");
+}
+
+function syncActiveCallRouteBadge({ agentEnabled = false, remoteEnabled = false } = {}) {
+  const badge = $("#active-call-route");
+  if (!badge) return;
+  if (agentEnabled) {
+    badge.hidden = false;
+    badge.textContent = "本线路 · AI";
+    return;
+  }
+  if (remoteEnabled) {
+    badge.hidden = false;
+    badge.textContent = "本线路 · 推送到 iPhone";
+    return;
+  }
+  badge.hidden = false;
+  badge.textContent = "本线路 · 本机人工";
 }
 
 function workModeLockButtons() {
@@ -1021,15 +1038,20 @@ async function loadRemoteSettings() {
       enabled: Boolean(config.enabled),
       recovery: Boolean(state.recovery?.recovery_required),
     };
+    const agentOn = state.effective_route === "agent";
     $("#remote-status").textContent = state.recovery?.recovery_required
-      ? "有待核对的模块通话，请先在本机处理"
-      : state.effective_route === "agent" ? "AI 接听中 · 不通知 iPhone"
-      : !config.enabled ? "未启用 · 本机人工接听"
-      : `推送到 iPhone · Hub：${state.online_transport?.state || "未知"}`;
+      ? "本线路有待核对通话，请先在本机处理"
+      : agentOn ? "本线路 · AI 接听（不通知 iPhone）"
+      : !config.enabled ? "本线路 · 本机人工"
+      : `本线路 · 推送到 iPhone · Hub：${state.online_transport?.state || "未知"}`;
     setAnswerRouteBadge({
-      agentEnabled: state.effective_route === "agent",
+      agentEnabled: agentOn,
       remoteEnabled: lastRemoteRoute.enabled,
       recovery: lastRemoteRoute.recovery,
+    });
+    syncActiveCallRouteBadge({
+      agentEnabled: agentOn,
+      remoteEnabled: lastRemoteRoute.enabled,
     });
   } catch (error) {
     if (device === activeDeviceID && attempt === remoteLoadID) $("#remote-status").textContent = `读取失败：${error.message}`;
@@ -1079,18 +1101,21 @@ async function loadVoiceAgentStatus({ forcePopulate = false } = {}) {
     const badge = $("#voice-agent-connection");
     badge.className = `agent-status-badge${state.connected ? " connected" : (state.last_error ? " error" : "")}`;
     badge.textContent = state.connected
-      ? `AI 接听中 · ${state.active_provider || state.provider}`
-      : (state.enabled ? "AI 接听中 · 待机" : "本机人工");
+      ? `本线路 · AI · ${state.active_provider || state.provider}`
+      : (state.enabled ? "本线路 · AI · 待机" : "本线路 · 本机人工");
     $("#voice-agent-status").textContent = state.last_error
       ? `最近错误：${state.last_error}`
       : (state.enabled
-        ? `AI 接听中 · ${state.provider || "未选择"}${state.reconnect_count ? ` · 重连 ${state.reconnect_count} 次` : ""}`
-        : "当前使用本地麦克风；启用 AI 时不通知 iPhone。");
+        ? `本线路 · AI 接听 · ${state.provider || "未选择"}${state.reconnect_count ? ` · 重连 ${state.reconnect_count} 次` : ""}`
+        : "本线路使用本地麦克风；启用 AI 时仅本线路不通知 iPhone。");
+    const agentEnabled = Boolean(state.enabled);
+    const remoteEnabled = lastRemoteRoute.enabled || Boolean($("#remote-enabled")?.checked);
     setAnswerRouteBadge({
-      agentEnabled: Boolean(state.enabled),
-      remoteEnabled: lastRemoteRoute.enabled || Boolean($("#remote-enabled")?.checked),
+      agentEnabled,
+      remoteEnabled,
       recovery: lastRemoteRoute.recovery,
     });
+    syncActiveCallRouteBadge({ agentEnabled, remoteEnabled });
     renderVoiceAgentProviders(status);
   } catch (error) {
     $("#voice-agent-status").textContent = `Voice Agent 状态读取失败：${error.message}`;
